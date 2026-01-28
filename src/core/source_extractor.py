@@ -7,7 +7,7 @@ using the 'src' attribute embedded by Yosys during parsing.
 import re
 from typing import Dict, Optional, Any
 
-from ..models import SourceLocation
+from models import SourceLocation
 
 
 class SourceExtractor:

@@ -5,7 +5,7 @@ Extracts module hierarchy from a Yosys design and builds a tree structure.
 
 from typing import Optional, Dict, Set, Any
 
-from ..models import HierarchyNode, ModuleInfo
+from models import HierarchyNode, ModuleInfo
 
 
 class HierarchyBuilder:

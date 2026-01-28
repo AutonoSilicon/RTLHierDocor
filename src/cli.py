@@ -14,7 +14,7 @@ from pathlib import Path
 
 def cmd_generate(args):
     """Generate complete documentation."""
-    from .output import DocumentGenerator
+    from output import DocumentGenerator
     
     if not args.filelist and not args.rtlil:
         print("Error: Either --filelist or --rtlil is required", file=sys.stderr)
@@ -35,7 +35,7 @@ def cmd_generate(args):
 
 def cmd_hierarchy(args):
     """Generate hierarchy tree only."""
-    from .core import YosysBackend, HierarchyBuilder
+    from core import YosysBackend, HierarchyBuilder
     
     backend = YosysBackend(cache_dir=args.cache_dir, verbose=args.verbose)
     if not backend.load_filelist(args.filelist, args.top, use_cache=True):
@@ -59,8 +59,8 @@ def cmd_hierarchy(args):
 
 def cmd_schematic(args):
     """Generate schematic for a single module."""
-    from .core import YosysBackend
-    from .schematic import SchematicGenerator
+    from core import YosysBackend
+    from schematic import SchematicGenerator
     
     backend = YosysBackend(cache_dir=args.cache_dir, verbose=args.verbose)
     if not backend.load_filelist(args.filelist, args.top, use_cache=True):
@@ -68,7 +68,7 @@ def cmd_schematic(args):
         return 1
     
     generator = SchematicGenerator(backend, verbose=args.verbose)
-    dot = generator.generate(args.module, simplify=not args.no_simplify)
+    dot = generator.generate(args.module)
     
     if not dot:
         print(f"Failed to generate schematic for {args.module}", file=sys.stderr)
@@ -100,7 +100,7 @@ def main():
     gen_parser.add_argument("--rtlil", "-r", help="Pre-compiled RTLIL file path (alternative to filelist)")
     gen_parser.add_argument("--top", "-t", required=True, help="Top module name")
     gen_parser.add_argument("--output", "-o", default="./rtl_docs", help="Output directory")
-    gen_parser.add_argument("--max-schematics", type=int, default=100, help="Max schematics to generate")
+    gen_parser.add_argument("--max-schematics", type=int, default=0, help="Max schematics to generate (0 for all)")
     
     # hierarchy command
     hier_parser = subparsers.add_parser("hierarchy", help="Generate hierarchy tree")
@@ -116,7 +116,6 @@ def main():
     sch_parser.add_argument("--top", "-t", required=True, help="Top module name")
     sch_parser.add_argument("--module", "-m", required=True, help="Module to generate schematic for")
     sch_parser.add_argument("--output", "-o", help="Output file path")
-    sch_parser.add_argument("--no-simplify", action="store_true", help="Don't simplify schematic")
     
     args = parser.parse_args()
     

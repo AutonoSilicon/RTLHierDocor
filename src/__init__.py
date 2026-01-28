@@ -2,14 +2,14 @@
 RTL Hierarchy Documentor
 
 A tool to build hierarchical index trees for RTL codebases using Yosys,
-with source code location annotations and simplified schematic generation.
+with source code location annotations.
 """
 
 __version__ = "0.1.0"
 
 from .models import HierarchyNode, SourceLocation, ModuleInfo, PortInfo
 from .core import YosysBackend, HierarchyBuilder, SourceExtractor
-from .schematic import SchematicGenerator, DotSimplifier
+from .schematic import SchematicGenerator
 
 __all__ = [
     "HierarchyNode",
@@ -20,5 +20,4 @@ __all__ = [
     "HierarchyBuilder",
     "SourceExtractor",
     "SchematicGenerator",
-    "DotSimplifier",
 ]

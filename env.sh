@@ -14,5 +14,10 @@ source "$SCRIPT_DIR/../scripts/.venv/bin/activate"
 # Add src directory to PYTHONPATH
 export PYTHONPATH="$SCRIPT_DIR/src:$PYTHONPATH"
 
+# Set CODE_BASE_PATH for C910 RTL filelist
+export CODE_BASE_PATH="$SCRIPT_DIR/../C910_RTL_FACTORY"
+
 echo "RTL Hierarchy Documentor environment loaded."
-echo "Usage: python -m rtl_hier_docor.cli -v generate -f <filelist> -t <top_module>"
+echo "  CODE_BASE_PATH=$CODE_BASE_PATH"
+echo "Usage: python3 -m cli generate -f <filelist> -t <top_module> -o <output_dir>"
+echo "Example: python3 -m cli generate -f \$CODE_BASE_PATH/gen_rtl/filelists/C910_asic_rtl.fl -t openC910 -o output/"

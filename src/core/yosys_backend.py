@@ -247,6 +247,8 @@ class YosysBackend:
                 # Skip other flags
                 if line.startswith('-'):
                     continue
+                # Expand environment variables (e.g., ${CODE_BASE_PATH})
+                line = os.path.expandvars(line)
                 # Resolve relative paths
                 if not os.path.isabs(line):
                     line = str(base_dir / line)
@@ -347,8 +349,11 @@ class YosysBackend:
         if not module_name.startswith("\\"):
             module_name = "\\" + module_name
         
+        # Ensure cache dir exists for temp files
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        
         try:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.dot', delete=False) as f:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.dot', delete=False, dir=str(self._cache_dir)) as f:
                 dot_path = f.name
             
             # Generate DOT using Yosys show command

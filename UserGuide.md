@@ -176,14 +176,14 @@ src/rtl_hier_docor/
 source env.sh
 
 # 完整生成
-python3 -m rtl_hier_docor.cli generate \
-    -f /home/c910/lingzichao/openc910/scripts/filelist_openc910.f \
+python3 -m cli generate \
+    -f /home/c910/lingzichao/openc910/C910_RTL_FACTORY/gen_rtl/filelists/C910_asic_rtl.fl \
     -t openC910 \
     -o output/
 
 # 查看结果
 head -100 output/hierarchy_tree.txt
-dot -Tsvg output/schematics/ct_iu_div.dot -o ct_iu_div.svg
+dot -Tsvg output/schematics/ct_idu_id_decd.dot -o ct_idu_id_decd.svg
 ```
 
 ## 已知限制
