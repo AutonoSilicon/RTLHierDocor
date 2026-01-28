@@ -1,2 +1,7 @@
 Hierachry RTL Codebase Docor
 ---
+
+
+    uv venv --system-site-packages --python $(which python3) 
+
+    source .venv/bin/activate
