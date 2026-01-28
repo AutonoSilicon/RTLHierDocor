@@ -214,10 +214,10 @@ class YosysBackend:
             # Elaborate hierarchy
             if self._verbose:
                 print(f"[INFO] Elaborating design with top: {top_module}")
-            ys.run_pass(f"hierarchy -top {top_module}", self._design)
+            ys.run_pass(f"hierarchy -check -top {top_module}", self._design)
             
             # Run proc to convert processes to netlists
-            ys.run_pass("proc", self._design)
+            # ys.run_pass("proc", self._design)
             
             return True
             
