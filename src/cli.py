@@ -1,39 +1,59 @@
 #!/usr/bin/env python3
 """Command-line interface for RTL Hierarchy Documentor.
 
+All parameters can be set in config.yaml and overridden via CLI flags.
+
 Usage:
-    rtl-hier-doc generate --filelist <file> --top <module> [--output <dir>]
-    rtl-hier-doc hierarchy --filelist <file> --top <module>
-    rtl-hier-doc schematic --filelist <file> --module <name> [--output <file>]
+    python3 -m cli generate                         # uses config.yaml
+    python3 -m cli generate -t other_top            # override top_module
+    python3 -m cli generate -c project.yaml         # use custom config
+    python3 -m cli hierarchy --format json
+    python3 -m cli schematic -m ct_ifu_addrgen -o out.dot
 """
 
 import argparse
 import sys
-from pathlib import Path
+
+from core.config import load_project_config, ProjectConfig
+
+
+def _load_config(args) -> ProjectConfig:
+    """Load config.yaml then override with CLI args."""
+    config_path = getattr(args, 'config', None)
+    try:
+        cfg = load_project_config(config_path)
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception:
+        cfg = ProjectConfig()
+
+    cfg.override_from_args(args)
+    return cfg
 
 
 def cmd_generate(args):
     """Generate complete documentation."""
     from output import DocumentGenerator
 
-    if not args.filelist and not args.rtlil:
-        print("Error: Either --filelist or --rtlil is required", file=sys.stderr)
+    cfg = _load_config(args)
+
+    errors = cfg.validate("generate")
+    if errors:
+        for err in errors:
+            print(f"Error: {err}", file=sys.stderr)
         return 1
 
-    generator = DocumentGenerator(
-        filelist=args.filelist,
-        rtlil_path=args.rtlil,
-        top_module=args.top,
-        output_dir=args.output,
-        cache_dir=args.cache_dir,
-        verbose=args.verbose,
-        simplify=not args.no_simplify,
-        strategy=args.strategy
-    )
+    if cfg.verbose:
+        print(f"[config] filelist:     {cfg.filelist}")
+        print(f"[config] top_module:   {cfg.top_module}")
+        print(f"[config] output_dir:   {cfg.output_dir}")
+        print(f"[config] simplify:     {cfg.simplify} ({cfg.strategy})")
+        if cfg.remove_signals:
+            print(f"[config] remove:       {', '.join(cfg.remove_signals)}")
 
-    stats = generator.generate(max_schematics=args.max_schematics)
-    # Return 0 if any documentation was generated (hierarchy at minimum)
-    # Schematics may fail on large modules but hierarchy is still valuable
+    generator = DocumentGenerator.from_config(cfg)
+    stats = generator.generate(max_schematics=cfg.max_schematics)
     return 0 if stats else 1
 
 
@@ -41,21 +61,38 @@ def cmd_hierarchy(args):
     """Generate hierarchy tree only."""
     from core import YosysBackend, HierarchyBuilder
 
-    backend = YosysBackend(cache_dir=args.cache_dir, verbose=args.verbose)
-    if not backend.load_filelist(args.filelist, args.top, use_cache=True):
+    cfg = _load_config(args)
+
+    errors = cfg.validate("hierarchy")
+    if errors:
+        for err in errors:
+            print(f"Error: {err}", file=sys.stderr)
+        return 1
+
+    backend = YosysBackend(cache_dir=cfg.cache_dir, verbose=cfg.verbose)
+
+    if cfg.rtlil:
+        success = backend.load_rtlil(cfg.rtlil)
+    else:
+        success = backend.load_filelist(cfg.filelist, cfg.top_module, use_cache=True)
+
+    if not success:
         print("Failed to load design", file=sys.stderr)
         return 1
 
-    builder = HierarchyBuilder(backend, verbose=args.verbose)
-    hierarchy = builder.build(args.top)
+    builder = HierarchyBuilder(backend, verbose=cfg.verbose)
+    hierarchy = builder.build(cfg.top_module)
 
     if not hierarchy:
         print("Failed to build hierarchy", file=sys.stderr)
         return 1
 
-    if args.format == "ascii":
-        print(hierarchy.render_ascii(show_ports=args.show_ports, max_depth=args.max_depth))
-    elif args.format == "json":
+    fmt = getattr(args, 'format', 'ascii')
+    if fmt == "ascii":
+        show_ports = getattr(args, 'show_ports', False)
+        max_depth = getattr(args, 'max_depth', None)
+        print(hierarchy.render_ascii(show_ports=show_ports, max_depth=max_depth))
+    elif fmt == "json":
         print(hierarchy.to_json())
 
     return 0
@@ -64,35 +101,69 @@ def cmd_hierarchy(args):
 def cmd_schematic(args):
     """Generate schematic for a single module."""
     from core import YosysBackend
+    from core.signal_tracer import trace_remove_signals
     from schematic import SchematicGenerator
 
-    backend = YosysBackend(cache_dir=args.cache_dir, verbose=args.verbose)
-    if not backend.load_filelist(args.filelist, args.top, use_cache=True):
+    cfg = _load_config(args)
+
+    module_name = getattr(args, 'module', None)
+    if not module_name:
+        print("Error: --module/-m is required for schematic command", file=sys.stderr)
+        return 1
+
+    errors = cfg.validate("schematic")
+    if errors:
+        for err in errors:
+            print(f"Error: {err}", file=sys.stderr)
+        return 1
+
+    backend = YosysBackend(cache_dir=cfg.cache_dir, verbose=cfg.verbose)
+
+    if cfg.rtlil:
+        success = backend.load_rtlil(cfg.rtlil)
+    else:
+        success = backend.load_filelist(cfg.filelist, cfg.top_module, use_cache=True)
+
+    if not success:
         print("Failed to load design", file=sys.stderr)
         return 1
 
-    simplify = not args.no_simplify
+    # Trace remove_signals through the hierarchy
+    traced_signals = {}
+    if cfg.remove_signals and cfg.top_module:
+        try:
+            traced_signals = trace_remove_signals(
+                backend, cfg.top_module,
+                cfg.remove_signals, verbose=cfg.verbose
+            )
+        except Exception as e:
+            if cfg.verbose:
+                print(f"[WARN] Signal tracing failed: {e}")
+
     generator = SchematicGenerator(
         backend,
-        verbose=args.verbose,
-        simplify=simplify,
-        strategy=args.strategy
+        verbose=cfg.verbose,
+        simplify=cfg.simplify,
+        strategy=cfg.strategy,
+        remove_signals=cfg.remove_signals,
+        traced_signals=traced_signals
     )
 
-    if simplify:
-        raw_dot, simplified_dot = generator.generate_simplified(args.module)
+    if cfg.simplify:
+        raw_dot, simplified_dot = generator.generate_simplified(module_name)
         dot = simplified_dot or raw_dot
     else:
-        dot = generator.generate(args.module)
+        dot = generator.generate(module_name)
 
     if not dot:
-        print(f"Failed to generate schematic for {args.module}", file=sys.stderr)
+        print(f"Failed to generate schematic for {module_name}", file=sys.stderr)
         return 1
 
-    if args.output:
-        with open(args.output, 'w') as f:
+    output_path = getattr(args, 'output', None)
+    if output_path:
+        with open(output_path, 'w') as f:
             f.write(dot)
-        print(f"Written to {args.output}")
+        print(f"Written to {output_path}")
     else:
         print(dot)
 
@@ -102,45 +173,73 @@ def cmd_schematic(args):
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="RTL Hierarchy Documentor - Generate hierarchical documentation for RTL designs"
+        description="RTL Hierarchy Documentor - Generate hierarchical documentation for RTL designs",
+        epilog="All options can also be set in config.yaml (auto-detected or via -c)."
     )
-    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    parser.add_argument("--cache-dir", default=".rtl_cache", help="Cache directory")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Verbose output")
+    parser.add_argument("-c", "--config", default=None,
+                        help="Path to config.yaml (auto-detected if not specified)")
+    parser.add_argument("--cache-dir", default=None,
+                        help="Cache directory (default: from config or .rtl_cache)")
 
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
-    # generate command
-    gen_parser = subparsers.add_parser("generate", help="Generate complete documentation")
-    gen_parser.add_argument("--filelist", "-f", help="RTL filelist path")
-    gen_parser.add_argument("--rtlil", "-r", help="Pre-compiled RTLIL file path (alternative to filelist)")
-    gen_parser.add_argument("--top", "-t", required=True, help="Top module name")
-    gen_parser.add_argument("--output", "-o", default="./rtl_docs", help="Output directory")
-    gen_parser.add_argument("--max-schematics", type=int, default=0, help="Max schematics to generate (0 for all)")
+    # ── generate command ──
+    gen_parser = subparsers.add_parser("generate",
+        help="Generate complete documentation (hierarchy + schematics + index)")
+    gen_parser.add_argument("-f", "--filelist",
+                            help="RTL filelist path (overrides config)")
+    gen_parser.add_argument("-r", "--rtlil",
+                            help="Pre-compiled RTLIL file path (overrides config)")
+    gen_parser.add_argument("-t", "--top",
+                            help="Top module name (overrides config)")
+    gen_parser.add_argument("-o", "--output", default=None,
+                            help="Output directory (overrides config)")
+    gen_parser.add_argument("--max-schematics", type=int, default=None,
+                            help="Max schematics to generate, 0=all (overrides config)")
     gen_parser.add_argument("--no-simplify", action="store_true",
                             help="Disable DOT schematic simplification")
-    gen_parser.add_argument("--strategy", choices=["proc_group", "connected_component"],
-                            default="proc_group",
-                            help="Simplification strategy (default: proc_group)")
+    gen_parser.add_argument("--strategy",
+                            choices=["proc_group", "connected_component"],
+                            default=None,
+                            help="Simplification strategy (overrides config)")
 
-    # hierarchy command
-    hier_parser = subparsers.add_parser("hierarchy", help="Generate hierarchy tree")
-    hier_parser.add_argument("--filelist", "-f", required=True, help="RTL filelist path")
-    hier_parser.add_argument("--top", "-t", required=True, help="Top module name")
-    hier_parser.add_argument("--format", choices=["ascii", "json"], default="ascii", help="Output format")
-    hier_parser.add_argument("--show-ports", action="store_true", help="Show port connections")
-    hier_parser.add_argument("--max-depth", type=int, help="Maximum depth to display")
+    # ── hierarchy command ──
+    hier_parser = subparsers.add_parser("hierarchy",
+        help="Generate hierarchy tree only")
+    hier_parser.add_argument("-f", "--filelist",
+                             help="RTL filelist path (overrides config)")
+    hier_parser.add_argument("-r", "--rtlil",
+                             help="Pre-compiled RTLIL file path (overrides config)")
+    hier_parser.add_argument("-t", "--top",
+                             help="Top module name (overrides config)")
+    hier_parser.add_argument("--format", choices=["ascii", "json"],
+                             default="ascii", help="Output format")
+    hier_parser.add_argument("--show-ports", action="store_true",
+                             help="Show port connections in ASCII tree")
+    hier_parser.add_argument("--max-depth", type=int,
+                             help="Maximum depth to display")
 
-    # schematic command
-    sch_parser = subparsers.add_parser("schematic", help="Generate module schematic")
-    sch_parser.add_argument("--filelist", "-f", required=True, help="RTL filelist path")
-    sch_parser.add_argument("--top", "-t", required=True, help="Top module name")
-    sch_parser.add_argument("--module", "-m", required=True, help="Module to generate schematic for")
-    sch_parser.add_argument("--output", "-o", help="Output file path")
+    # ── schematic command ──
+    sch_parser = subparsers.add_parser("schematic",
+        help="Generate schematic for a single module")
+    sch_parser.add_argument("-f", "--filelist",
+                            help="RTL filelist path (overrides config)")
+    sch_parser.add_argument("-r", "--rtlil",
+                            help="Pre-compiled RTLIL file path (overrides config)")
+    sch_parser.add_argument("-t", "--top",
+                            help="Top module name (overrides config)")
+    sch_parser.add_argument("-m", "--module", required=True,
+                            help="Module to generate schematic for")
+    sch_parser.add_argument("-o", "--output",
+                            help="Output DOT file path (stdout if omitted)")
     sch_parser.add_argument("--no-simplify", action="store_true",
                             help="Disable DOT schematic simplification")
-    sch_parser.add_argument("--strategy", choices=["proc_group", "connected_component"],
-                            default="proc_group",
-                            help="Simplification strategy (default: proc_group)")
+    sch_parser.add_argument("--strategy",
+                            choices=["proc_group", "connected_component"],
+                            default=None,
+                            help="Simplification strategy (overrides config)")
 
     args = parser.parse_args()
 

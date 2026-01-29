@@ -1,0 +1,35 @@
+# RTLHierDocor Project Configuration
+#
+# All CLI arguments can be specified here. CLI flags override these values.
+# Usage: python3 -m cli generate              (uses config.yaml defaults)
+#        python3 -m cli generate -t other_top  (overrides top_module only)
+
+# ── Design source ──────────────────────────────────────────────
+design:
+  filelist: "$CODE_BASE_PATH/gen_rtl/filelists/C910_asic_rtl.fl"
+  top_module: "openC910"
+  # rtlil: ""                  # Alternative: pre-compiled RTLIL path
+
+# ── Output settings ───────────────────────────────────────────
+output:
+  dir: "./rtl_docs"
+  cache_dir: ".rtl_cache"
+  max_schematics: 0            # 0 = generate all
+
+# ── Schematic simplification ──────────────────────────────────
+simplify:
+  enabled: true
+  strategy: "proc_group"       # proc_group | connected_component
+
+  # I/O port signals matching these patterns are removed from
+  # simplified schematics along with their connected paths.
+  # Uses fnmatch-style wildcards: * matches anything, ? matches one char.
+  remove_signals:
+    - "cpurst_b"
+    - "*rst_b"
+    - "*_rst_b"
+    - "pad_yy_icg_scan_en"
+    - "*scan_en*"
+
+# ── General ───────────────────────────────────────────────────
+verbose: true

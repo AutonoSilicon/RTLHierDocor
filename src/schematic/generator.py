@@ -4,7 +4,7 @@ Generates DOT format schematics using Yosys show command,
 with optional simplification.
 """
 
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Set, Tuple
 from pathlib import Path
 
 from core.source_extractor import extract_module_locations
@@ -19,7 +19,9 @@ class SchematicGenerator:
     """
 
     def __init__(self, backend: Any, verbose: bool = False,
-                 simplify: bool = True, strategy: str = "proc_group"):
+                 simplify: bool = True, strategy: str = "proc_group",
+                 remove_signals: Optional[List[str]] = None,
+                 traced_signals: Optional[Dict[str, Set[str]]] = None):
         """Initialize the schematic generator.
 
         Args:
@@ -27,11 +29,18 @@ class SchematicGenerator:
             verbose: Enable verbose output
             simplify: Enable DOT simplification (default True)
             strategy: Simplification strategy - "proc_group" or "connected_component"
+            remove_signals: Signal name patterns to remove before simplification
+                (global patterns applied as fnmatch to all modules)
+            traced_signals: Pre-computed per-module signal names from SignalTracer.
+                Dict[module_name -> Set[port_names]]. These are exact port names
+                resolved through the hierarchy, merged with pattern-matched names.
         """
         self._backend = backend
         self._verbose = verbose
         self._simplify = simplify
         self._strategy = strategy
+        self._remove_signals = remove_signals or []
+        self._traced_signals = traced_signals or {}
 
     def generate(
         self,
@@ -70,10 +79,20 @@ class SchematicGenerator:
         # Extract cell locations for source annotations
         cell_locations = self._extract_cell_locations(module_name)
 
+        # Build effective remove_signals for this module:
+        # global patterns + traced per-module port names
+        clean_name = module_name.lstrip("\\")
+        effective_signals = list(self._remove_signals)
+        if clean_name in self._traced_signals:
+            for port_name in self._traced_signals[clean_name]:
+                if port_name not in effective_signals:
+                    effective_signals.append(port_name)
+
         simplified_dot = simplify_dot_content(
             raw_dot,
             strategy=self._strategy,
-            cell_locations=cell_locations
+            cell_locations=cell_locations,
+            remove_signals=effective_signals if effective_signals else None
         )
 
         return raw_dot, simplified_dot

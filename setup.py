@@ -18,6 +18,7 @@ setup(
     },
     install_requires=[
         # pyosys is provided by Yosys installation
+        # pyyaml optional; built-in simple YAML parser used by default
     ],
     extras_require={
         "dev": [

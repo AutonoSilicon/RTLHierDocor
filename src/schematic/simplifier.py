@@ -397,11 +397,126 @@ class DotSimplifier:
     """Simplifies DOT schematics by merging combinational logic."""
 
     def __init__(self, parser: DotParser, strategy: str = "proc_group",
-                 cell_locations: Optional[Dict[str, SourceLocation]] = None):
+                 cell_locations: Optional[Dict[str, SourceLocation]] = None,
+                 remove_signals: Optional[List[str]] = None):
         self.parser = parser
-        self.graph = CircuitGraph(parser)
         self.strategy = strategy
         self.cell_locations = cell_locations or {}
+        self.remove_signals = remove_signals or []
+
+        # Apply signal removal before building the graph
+        if self.remove_signals:
+            self._remove_signals()
+
+        self.graph = CircuitGraph(parser)
+
+    def _remove_signals(self) -> None:
+        """Remove I/O port nodes matching remove_signals patterns and their edges.
+
+        Walks from each matched I/O port along edges through intermediate
+        combinational logic until reaching PROC blocks or other I/O ports.
+        Removes the matched port nodes, the intermediate-only comb nodes,
+        and all associated edges. This cleans up rst/scan paths before
+        COMB merging so they don't clutter the simplified schematic.
+
+        Uses cell_locations to distinguish auto-generated comb logic (no source
+        annotation) from user-written logic. Auto-generated nodes on the signal
+        path are removed even if they still have live outputs; user-written nodes
+        are preserved.
+        """
+        import fnmatch
+        patterns = [p.lower() for p in self.remove_signals]
+
+        # Find I/O port nodes whose label matches any pattern
+        matched_ports = set()
+        for node_id, node in self.parser.nodes.items():
+            if node.node_type != 'io_port':
+                continue
+            label = node.label.strip().lstrip('\\').strip()
+            label_lower = label.lower()
+            for pat in patterns:
+                if fnmatch.fnmatch(label_lower, pat.lower()):
+                    matched_ports.add(node_id)
+                    break
+
+        if not matched_ports:
+            return
+
+        # Build temporary adjacency for traversal
+        adj_out: Dict[str, List[DotEdge]] = defaultdict(list)
+        adj_in: Dict[str, List[DotEdge]] = defaultdict(list)
+        for edge in self.parser.edges:
+            adj_out[edge.src_node].append(edge)
+            adj_in[edge.dst_node].append(edge)
+
+        # Helper: check if a comb node has source code annotation
+        def _has_source_annotation(node_id: str) -> bool:
+            """Return True if the node has a real RTL source location."""
+            node = self.parser.nodes.get(node_id)
+            if not node or not node.cell_id:
+                return False
+            return node.cell_id in self.cell_locations
+
+        # Phase 1: Seed removal set with matched I/O ports
+        nodes_to_remove = set(matched_ports)
+        edges_to_remove = set()
+
+        for port_id in matched_ports:
+            for edge in adj_out.get(port_id, []):
+                edges_to_remove.add(id(edge))
+            for edge in adj_in.get(port_id, []):
+                edges_to_remove.add(id(edge))
+
+        # Phase 2: Propagate removal through intermediate nodes.
+        # A non-boundary node is removed if:
+        #   (a) ALL its neighbors are already removed (fully orphaned), OR
+        #   (b) ALL its input sources are removed (no data flows in) AND
+        #       the node is auto-generated (no source annotation)
+        # Condition (b) is the key enhancement: auto-generated comb logic
+        # that only receives data from removed signal paths gets removed,
+        # even if it still feeds into live PROC blocks.
+        # User-written comb nodes (with source annotations) are preserved
+        # under condition (b) to avoid losing real RTL logic.
+        changed = True
+        while changed:
+            changed = False
+            for node_id, node in list(self.parser.nodes.items()):
+                if node_id in nodes_to_remove:
+                    continue
+                if node.node_type in ('proc', 'io_port'):
+                    continue
+
+                # Condition (a): all neighbors removed (fully orphaned)
+                all_neighbors = set()
+                for edge in adj_out.get(node_id, []):
+                    all_neighbors.add(edge.dst_node)
+                for edge in adj_in.get(node_id, []):
+                    all_neighbors.add(edge.src_node)
+                fully_orphaned = all_neighbors and all_neighbors.issubset(nodes_to_remove)
+
+                # Condition (b): all input sources removed AND no source annotation
+                in_sources = set()
+                for edge in adj_in.get(node_id, []):
+                    in_sources.add(edge.src_node)
+                no_input = in_sources and in_sources.issubset(nodes_to_remove)
+                auto_generated = not _has_source_annotation(node_id)
+
+                if fully_orphaned or (no_input and auto_generated):
+                    nodes_to_remove.add(node_id)
+                    for edge in adj_out.get(node_id, []):
+                        edges_to_remove.add(id(edge))
+                    for edge in adj_in.get(node_id, []):
+                        edges_to_remove.add(id(edge))
+                    changed = True
+
+        # Apply removal to parser data
+        for node_id in nodes_to_remove:
+            self.parser.nodes.pop(node_id, None)
+
+        self.parser.edges = [e for e in self.parser.edges
+                             if id(e) not in edges_to_remove
+                             and e.src_node not in nodes_to_remove
+                             and e.dst_node not in nodes_to_remove]
 
     def simplify(self) -> str:
         """Execute simplification and return new DOT content."""
@@ -685,7 +800,8 @@ class DotSimplifier:
 def simplify_dot_content(
     content: str,
     strategy: str = "proc_group",
-    cell_locations: Optional[Dict[str, SourceLocation]] = None
+    cell_locations: Optional[Dict[str, SourceLocation]] = None,
+    remove_signals: Optional[List[str]] = None
 ) -> str:
     """Simplify DOT content string.
 
@@ -693,6 +809,8 @@ def simplify_dot_content(
         content: Raw DOT file content from Yosys
         strategy: "proc_group" (default) or "connected_component"
         cell_locations: Optional mapping of cell IDs to SourceLocation objects
+        remove_signals: Optional list of signal name patterns to remove
+            (fnmatch-style, e.g. ["*rst*", "cpurst_b", "*scan_en*"])
 
     Returns:
         Simplified DOT content string
@@ -700,5 +818,9 @@ def simplify_dot_content(
     parser = DotParser()
     parser.parse(content)
 
-    simplifier = DotSimplifier(parser, strategy=strategy, cell_locations=cell_locations)
+    simplifier = DotSimplifier(
+        parser, strategy=strategy,
+        cell_locations=cell_locations,
+        remove_signals=remove_signals
+    )
     return simplifier.simplify()
