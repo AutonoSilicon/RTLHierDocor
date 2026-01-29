@@ -82,7 +82,7 @@ class OpenAIBackend(LLMBackend):
             # Common pattern for thinking/reasoning models in OpenAI-compatible APIs (e.g. DeepSeek)
             if self.thinking:
                 # Some providers use specific parameters in extra_body
-                kwargs["extra_body"] = {"thinking": True}
+                kwargs["extra_body"] = {"enable_thinking": True}
                 # For o1-style models, they might not support 'system' role in some versions or require 'developer'
                 # But here we keep it simple as most compatible APIs handle 'system'
 
