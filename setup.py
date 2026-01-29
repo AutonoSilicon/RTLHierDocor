@@ -25,6 +25,9 @@ setup(
             "pytest",
             "pytest-cov",
         ],
+        "agent": [
+            "anthropic>=0.3.0",
+        ],
     },
     classifiers=[
         "Development Status :: 3 - Alpha",

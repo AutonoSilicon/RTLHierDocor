@@ -168,6 +168,17 @@ class ProjectConfig:
     # General
     verbose: bool = False
 
+    # Agent settings
+    agent_backend: str = "anthropic"
+    agent_model: str = "claude-3-5-sonnet-20241022"
+    agent_api_key: Optional[str] = None
+    agent_base_url: Optional[str] = None
+    agent_thinking: bool = False
+    max_source_lines: int = 2000
+    code_base_path: str = ""
+    resume: bool = True
+    max_modules: int = 0  # 0 for unlimited
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ProjectConfig':
         """Create ProjectConfig from a parsed config dict (config.yaml structure).
@@ -223,6 +234,28 @@ class ProjectConfig:
         if 'verbose' in data:
             config.verbose = bool(data['verbose'])
 
+        # agent section
+        agent = data.get('agent', {})
+        if isinstance(agent, dict):
+            if 'backend' in agent:
+                config.agent_backend = str(agent['backend'])
+            if 'model' in agent:
+                config.agent_model = str(agent['model'])
+            if 'api_key' in agent:
+                config.agent_api_key = str(agent['api_key'])
+            if 'base_url' in agent:
+                config.agent_base_url = str(agent['base_url'])
+            if 'thinking' in agent:
+                config.agent_thinking = bool(agent['thinking'])
+            if 'max_source_lines' in agent:
+                config.max_source_lines = int(agent['max_source_lines'])
+            if 'code_base_path' in agent:
+                config.code_base_path = str(agent['code_base_path'])
+            if 'resume' in agent:
+                config.resume = bool(agent['resume'])
+            if 'max_modules' in agent:
+                config.max_modules = int(agent['max_modules'])
+
         return config
 
     def override_from_args(self, args) -> 'ProjectConfig':
@@ -262,6 +295,22 @@ class ProjectConfig:
         if getattr(args, 'verbose', False):
             self.verbose = True
 
+        # Agent overrides
+        if getattr(args, 'backend', None) is not None:
+            self.agent_backend = args.backend
+        if getattr(args, 'model', None) is not None:
+            self.agent_model = args.model
+        if getattr(args, 'base_url', None) is not None:
+            self.agent_base_url = args.base_url
+        if getattr(args, 'thinking', False):
+            self.agent_thinking = True
+        if getattr(args, 'max_source_lines', None) is not None:
+            self.max_source_lines = args.max_source_lines
+        if getattr(args, 'no_resume', False):
+            self.resume = False
+        if getattr(args, 'max_modules', None) is not None:
+            self.max_modules = args.max_modules
+
         return self
 
     def validate(self, command: str = "generate") -> List[str]:
@@ -272,13 +321,24 @@ class ProjectConfig:
         """
         errors = []
 
-        if command in ("generate", "hierarchy", "schematic"):
+        if command in ("generate", "hierarchy", "schematic", "docor"):
             if not self.filelist and not self.rtlil:
                 errors.append("Either 'filelist' or 'rtlil' must be specified "
                               "(via config.yaml design section or CLI -f/-r)")
             if not self.top_module:
                 errors.append("'top_module' must be specified "
                               "(via config.yaml design.top_module or CLI -t)")
+
+        if command == "docor":
+            if self.agent_backend not in ("anthropic", "openai", "agent_sdk"):
+                errors.append(f"Invalid agent backend '{self.agent_backend}', "
+                              f"must be 'anthropic', 'openai' or 'agent_sdk'")
+            
+            if self.agent_backend == "anthropic" and not self.agent_api_key and not os.environ.get("ANTHROPIC_API_KEY"):
+                errors.append("ANTHROPIC_API_KEY must be provided in config or environment for 'anthropic' backend")
+            
+            if self.agent_backend == "openai" and not self.agent_api_key and not os.environ.get("OPENAI_API_KEY"):
+                errors.append("OPENAI_API_KEY must be provided in config or environment for 'openai' backend")
 
         if self.strategy not in ("proc_group", "connected_component"):
             errors.append(f"Invalid strategy '{self.strategy}', "

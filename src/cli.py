@@ -170,6 +170,67 @@ def cmd_schematic(args):
     return 0
 
 
+def cmd_docor(args):
+    """Generate AI-powered module documentation."""
+    import asyncio
+    from core import YosysBackend, HierarchyBuilder
+    from agent import AgentDocGenerator, SourceResolver, get_llm_backend, ProgressTracker
+
+    cfg = _load_config(args)
+
+    errors = cfg.validate("docor")
+    if errors:
+        for err in errors:
+            print(f"Error: {err}", file=sys.stderr)
+        return 1
+
+    backend = YosysBackend(cache_dir=cfg.cache_dir, verbose=cfg.verbose)
+    if cfg.rtlil:
+        success = backend.load_rtlil(cfg.rtlil)
+    else:
+        success = backend.load_filelist(cfg.filelist, cfg.top_module, use_cache=True)
+
+    if not success:
+        print("Failed to load design", file=sys.stderr)
+        return 1
+
+    builder = HierarchyBuilder(backend, verbose=cfg.verbose)
+    hierarchy = builder.build(cfg.top_module)
+
+    if not hierarchy:
+        print("Failed to build hierarchy", file=sys.stderr)
+        return 1
+
+    # Initialize Agent components
+    llm_config = {
+        "backend": cfg.agent_backend,
+        "model": cfg.agent_model,
+        "api_key": cfg.agent_api_key,
+        "base_url": cfg.agent_base_url,
+        "thinking": cfg.agent_thinking
+    }
+    llm = get_llm_backend(llm_config)
+    resolver = SourceResolver(backend, code_base_path=cfg.code_base_path)
+    tracker = ProgressTracker(cfg.output_dir)
+    
+    if not cfg.resume:
+        tracker.clear()
+
+    generator = AgentDocGenerator(
+        hierarchy=hierarchy,
+        llm=llm,
+        resolver=resolver,
+        tracker=tracker,
+        output_dir=cfg.output_dir,
+        max_source_lines=cfg.max_source_lines,
+        max_modules=cfg.max_modules
+    )
+
+    # Run async generator
+    asyncio.run(generator.run())
+    return 0
+
+
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -241,6 +302,32 @@ def main():
                             default=None,
                             help="Simplification strategy (overrides config)")
 
+    # ── docor command ──
+    doc_parser = subparsers.add_parser("docor",
+        help="Generate AI-powered hierarchical module documentation")
+    doc_parser.add_argument("-f", "--filelist",
+                            help="RTL filelist path (overrides config)")
+    doc_parser.add_argument("-r", "--rtlil",
+                            help="Pre-compiled RTLIL file path (overrides config)")
+    doc_parser.add_argument("-t", "--top",
+                            help="Top module name (overrides config)")
+    doc_parser.add_argument("-o", "--output",
+                            help="Output directory (overrides config)")
+    doc_parser.add_argument("--backend", choices=["anthropic", "openai", "agent_sdk"],
+                            help="LLM backend (overrides config)")
+    doc_parser.add_argument("--model",
+                            help="LLM model (overrides config)")
+    doc_parser.add_argument("--base-url",
+                            help="LLM API base URL (overrides config)")
+    doc_parser.add_argument("--thinking", action="store_true",
+                            help="Enable thinking/reasoning mode (for supported models)")
+    doc_parser.add_argument("--max-source-lines", type=int,
+                            help="Truncate source files after N lines")
+    doc_parser.add_argument("--no-resume", action="store_true",
+                            help="Ignore progress and start from scratch")
+    doc_parser.add_argument("--max-modules", type=int,
+                            help="Limit number of modules to process (for debugging)")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -253,6 +340,8 @@ def main():
         return cmd_hierarchy(args)
     elif args.command == "schematic":
         return cmd_schematic(args)
+    elif args.command == "docor":
+        return cmd_docor(args)
 
     return 0
 

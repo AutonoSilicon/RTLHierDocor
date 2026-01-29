@@ -33,3 +33,15 @@ simplify:
 
 # ── General ───────────────────────────────────────────────────
 verbose: true
+
+# ── Agent Docor ────────────────────────────────────────────────
+agent:
+  backend: "openai"              # anthropic | openai | agent_sdk
+  model: "glm-4.7"
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"                      # Custom LLM API base URL if needed
+  thinking: false                   # Enable thinking/reasoning mode
+  max_source_lines: 2000            # Truncate source files after N lines
+  resume: true                      # Resume from last checkpoint
+  code_base_path: "$CODE_BASE_PATH" # Base path for source file resolution
+  max_modules: 0                    # 0 = all, N = limit for debugging
+  api_key: "sk-37663dd917e64c14bb73aa2b0ccb44a6"    # Or use ANTHROPIC_API_KEY env var
