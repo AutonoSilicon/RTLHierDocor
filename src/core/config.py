@@ -174,6 +174,7 @@ class ProjectConfig:
     agent_api_key: Optional[str] = None
     agent_base_url: Optional[str] = None
     agent_thinking: bool = False
+    skip_modules: List[str] = field(default_factory=lambda: ["ct_had*"])
     max_source_lines: int = 2000
     code_base_path: str = ""
     resume: bool = True
@@ -247,6 +248,10 @@ class ProjectConfig:
                 config.agent_base_url = str(agent['base_url'])
             if 'thinking' in agent:
                 config.agent_thinking = bool(agent['thinking'])
+            if 'skip_modules' in agent:
+                skips = agent['skip_modules']
+                if isinstance(skips, list):
+                    config.skip_modules = [str(s) for s in skips]
             if 'max_source_lines' in agent:
                 config.max_source_lines = int(agent['max_source_lines'])
             if 'code_base_path' in agent:

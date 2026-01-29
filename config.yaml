@@ -40,7 +40,9 @@ agent:
   model: "glm-4.7"
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"                      # Custom LLM API base URL if needed
   thinking: true                   # Enable thinking/reasoning mode
-  max_source_lines: 2000            # Truncate source files after N lines
+  skip_modules:                     # Modules matching these patterns will be skipped
+    - "ct_had*"
+  max_source_lines: 5000            # Truncate source files after N lines
   resume: true                      # Resume from last checkpoint
   code_base_path: "$CODE_BASE_PATH" # Base path for source file resolution
   max_modules: 0                    # 0 = all, N = limit for debugging

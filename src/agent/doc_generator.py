@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+import fnmatch
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
@@ -20,7 +21,8 @@ class AgentDocGenerator:
         tracker: ProgressTracker,
         output_dir: str,
         max_source_lines: int = 2000,
-        max_modules: int = 0
+        max_modules: int = 0,
+        skip_modules: Optional[List[str]] = None
     ):
         self.hierarchy = hierarchy
         self.llm = llm
@@ -30,8 +32,16 @@ class AgentDocGenerator:
         self.modules_dir = self.output_dir / "modules"
         self.max_source_lines = max_source_lines
         self.max_modules = max_modules
+        self.skip_modules = skip_modules or []
         self._processed_pass1: set = set()
         self._processed_pass2: set = set()
+
+    def _should_skip(self, module_name: str) -> bool:
+        """Check if a module should be skipped based on skip_modules patterns."""
+        for pattern in self.skip_modules:
+            if fnmatch.fnmatch(module_name, pattern):
+                return True
+        return False
 
     async def run(self):
         """Run the full documentation generation process."""
@@ -49,6 +59,13 @@ class AgentDocGenerator:
 
     async def _run_pass1(self, node: Any, ancestor_context: str):
         """Pass 1: Top-down (Overview)"""
+        module_name = node.module_name
+        
+        # Skip logic
+        if self._should_skip(module_name):
+            print(f"[INFO] [Pass 1] Skipping module {module_name} (matches skip pattern)")
+            return
+
         # Check limit
         if self.max_modules > 0 and len(self._processed_pass1) >= self.max_modules:
             if node.module_name not in self._processed_pass1:
@@ -99,11 +116,16 @@ class AgentDocGenerator:
 
     async def _run_pass2(self, node: Any, ancestor_context: str) -> str:
         """Pass 2: Bottom-up (Detailed Doc)"""
+        module_name = node.module_name
+
+        # Skip logic
+        if self._should_skip(module_name):
+            print(f"[INFO] [Pass 2] Skipping module {module_name} (matches skip pattern)")
+            return f"Skipped module {module_name} (matches skip pattern)"
+
         # Check limit - only process if Pass 1 processed it
         if self.max_modules > 0 and node.module_name not in self._processed_pass1:
             return "Skipped due to max_modules limit."
-
-        module_name = node.module_name
         
         # 1. Recurse to children first
         children_descriptions = {}

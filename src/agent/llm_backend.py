@@ -1,4 +1,5 @@
 import os
+import datetime
 from abc import ABC, abstractmethod
 from typing import List, Optional, Any
 
@@ -9,6 +10,26 @@ class LLMBackend(ABC):
     async def generate(self, system: str, prompt: str) -> str:
         """Generate text from the LLM."""
         pass
+
+    def _log_call(self, system: str, prompt: str, model: str):
+        """Log the LLM call to debug.md."""
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_entry = f"""
+## [{timestamp}] Model: {model}
+
+### System Prompt
+{system}
+
+### User Prompt
+{prompt}
+
+---
+"""
+            with open("debug.md", "a", encoding="utf-8") as f:
+                f.write(log_entry)
+        except Exception as e:
+            print(f"[WARNING] Failed to write to debug.md: {e}")
 
 class AnthropicBackend(LLMBackend):
     """Backend using Anthropic's Messages API."""
@@ -46,7 +67,9 @@ class AnthropicBackend(LLMBackend):
                     kwargs["max_tokens"] = 16384
 
             response = await self.client.messages.create(**kwargs)
-            return response.content[0].text
+            result = response.content[0].text
+            self._log_call(system, prompt, self.model)
+            return result
         except Exception as e:
             return f"Error calling Anthropic API: {str(e)}"
 
@@ -87,7 +110,9 @@ class OpenAIBackend(LLMBackend):
                 # But here we keep it simple as most compatible APIs handle 'system'
 
             response = await self.client.chat.completions.create(**kwargs)
-            return response.choices[0].message.content
+            result = response.choices[0].message.content
+            self._log_call(system, prompt, self.model)
+            return result
         except Exception as e:
             return f"Error calling OpenAI API: {str(e)}"
 

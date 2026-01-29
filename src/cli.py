@@ -223,7 +223,8 @@ def cmd_docor(args):
         tracker=tracker,
         output_dir=cfg.output_dir,
         max_source_lines=cfg.max_source_lines,
-        max_modules=cfg.max_modules
+        max_modules=cfg.max_modules,
+        skip_modules=cfg.skip_modules
     )
 
     # Run async generator
