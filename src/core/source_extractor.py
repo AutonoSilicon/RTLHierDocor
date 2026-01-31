@@ -42,34 +42,48 @@ class SourceExtractor:
 
     def extract_all(self) -> Dict[str, SourceLocation]:
         """Extract source locations for all cells in the module.
-        
+
         Returns:
             Dict mapping cell IDs to SourceLocation objects
         """
         self._locations.clear()
-        
+
+        total_cells = 0
+        skipped_no_id = 0
+        skipped_no_loc = 0
+
         for cell_id in self._module.cells_:
+            total_cells += 1
             cell = self._module.cell(cell_id)
             cell_name = cell.name.str()
-            
+
             # Extract numeric ID from cell name (e.g., "$add$file.v:10$123" -> "123")
             numeric_id = self._extract_numeric_id(cell_name)
             if not numeric_id:
+                skipped_no_id += 1
+                if self._verbose:
+                    print(f"[WARN] Cell skipped (no numeric ID): {cell_name}")
                 continue
-            
+
             # Try to get location from attributes first
             location = self._get_location_from_attributes(cell)
-            
+
             # Fall back to parsing cell name
             if not location:
                 location = self._parse_location_from_name(cell_name)
-            
+
             if location:
                 self._locations[numeric_id] = location
-        
+            else:
+                skipped_no_loc += 1
+                if self._verbose:
+                    print(f"[WARN] Cell skipped (no source location): {cell_name} (id={numeric_id})")
+
         if self._verbose:
-            print(f"[INFO] Extracted {len(self._locations)} cell locations")
-        
+            extracted = len(self._locations)
+            print(f"[INFO] Source extraction: {extracted}/{total_cells} cells have locations "
+                  f"(skipped: {skipped_no_id} no ID, {skipped_no_loc} no location)")
+
         return self._locations
 
     def _extract_numeric_id(self, cell_name: str) -> Optional[str]:

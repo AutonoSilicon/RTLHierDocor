@@ -24,12 +24,12 @@ simplify:
   # I/O port signals matching these patterns are removed from
   # simplified schematics along with their connected paths.
   # Uses fnmatch-style wildcards: * matches anything, ? matches one char.
-  remove_signals:
-    - "cpurst_b"
-    - "*rst_b"
-    - "*_rst_b"
-    - "pad_yy_icg_scan_en"
-    - "*scan_en*"
+  # remove_signals:
+  #   - "cpurst_b"
+  #   - "*rst_b"
+  #   - "*_rst_b"
+  #   - "pad_yy_icg_scan_en"
+  #   - "*scan_en*"
 
 # ── General ───────────────────────────────────────────────────
 verbose: true

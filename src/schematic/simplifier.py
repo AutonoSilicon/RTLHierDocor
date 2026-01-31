@@ -416,11 +416,18 @@ class DotSimplifier:
 
     def __init__(self, parser: DotParser, strategy: str = "proc_group",
                  cell_locations: Optional[Dict[str, SourceLocation]] = None,
-                 remove_signals: Optional[List[str]] = None):
+                 remove_signals: Optional[List[str]] = None,
+                 verbose: bool = False):
         self.parser = parser
         self.strategy = strategy
         self.cell_locations = cell_locations or {}
         self.remove_signals = remove_signals or []
+        self.verbose = verbose
+
+        # Track which cell_ids from cell_locations are covered by the simplified output
+        self._covered_cell_ids: Set[str] = set()
+        # Track cell_ids removed by signal removal
+        self._signal_removed_cell_ids: Set[str] = set()
 
         # Apply signal removal before building the graph
         if self.remove_signals:
@@ -513,19 +520,37 @@ class DotSimplifier:
                 fully_orphaned = all_neighbors and all_neighbors.issubset(nodes_to_remove)
 
                 # Condition (b): all input sources removed AND no source annotation
+                #   Additional safety: do NOT remove if the node has live outputs
+                #   to non-removed boundary nodes (fan-out safety)
                 in_sources = set()
                 for edge in adj_in.get(node_id, []):
                     in_sources.add(edge.src_node)
                 no_input = in_sources and in_sources.issubset(nodes_to_remove)
                 auto_generated = not _has_source_annotation(node_id)
 
-                if fully_orphaned or (no_input and auto_generated):
+                has_live_boundary_output = False
+                if no_input and auto_generated:
+                    for edge in adj_out.get(node_id, []):
+                        dst = edge.dst_node
+                        if dst not in nodes_to_remove:
+                            dst_node = self.parser.nodes.get(dst)
+                            if dst_node and dst_node.node_type in ('proc', 'io_port', 'submodule'):
+                                has_live_boundary_output = True
+                                break
+
+                if fully_orphaned or (no_input and auto_generated and not has_live_boundary_output):
                     nodes_to_remove.add(node_id)
                     for edge in adj_out.get(node_id, []):
                         edges_to_remove.add(id(edge))
                     for edge in adj_in.get(node_id, []):
                         edges_to_remove.add(id(edge))
                     changed = True
+
+        # Track cell_ids of removed nodes for completeness verification
+        for node_id in nodes_to_remove:
+            node = self.parser.nodes.get(node_id)
+            if node and node.cell_id and node.cell_id in self.cell_locations:
+                self._signal_removed_cell_ids.add(node.cell_id)
 
         # Apply removal to parser data
         for node_id in nodes_to_remove:
@@ -560,6 +585,25 @@ class DotSimplifier:
         comb_locations: Dict[str, CombLocationInfo] = {}
 
         for comp_idx, component in enumerate(components):
+            # Skip components with only junctions/constants/slices (no actual logic)
+            # These are just connection points and should be bypassed in edges
+            has_logic = any(
+                self.parser.nodes.get(node_id) and
+                self.parser.nodes[node_id].node_type == 'comb_logic'
+                for node_id in component
+            )
+            if not has_logic:
+                # Don't create COMB node for pure junction/constant components
+                # These nodes will be bypassed when generating edges
+                continue
+
+            # Count only actual comb_logic nodes, excluding junctions/constants/slices
+            comb_logic_nodes = [
+                node_id for node_id in component
+                if self.parser.nodes.get(node_id) and
+                self.parser.nodes[node_id].node_type == 'comb_logic'
+            ]
+
             associated_procs: Dict[str, Set[str]] = {}
 
             for node_id in component:
@@ -590,27 +634,40 @@ class DotSimplifier:
                 comb_id = f"comb_{comp_idx}"
                 label = "COMB"
 
-            comb_info[comb_id] = (label, len(component))
+            # Only count comb_logic nodes, not junctions/constants/slices
+            comb_info[comb_id] = (label, len(comb_logic_nodes))
 
             location_info = CombLocationInfo()
-            for node_id in component:
+            missing_loc_count = 0
+            # Only add comb_logic nodes to the COMB block, bypass junctions
+            for node_id in comb_logic_nodes:
                 node = self.parser.nodes.get(node_id)
                 if node and node.cell_id and node.cell_id in self.cell_locations:
                     loc = self.cell_locations[node.cell_id]
                     location_info.add_location(loc.file_path, loc.start_line)
+                    self._covered_cell_ids.add(node.cell_id)
+                else:
+                    missing_loc_count += 1
+            if missing_loc_count > 0 and self.verbose:
+                print(f"[WARN] COMB {comb_id}: {missing_loc_count}/{len(comb_logic_nodes)} "
+                      f"nodes missing source location")
             comb_locations[comb_id] = location_info
 
-            for node_id in component:
+            # Only map comb_logic nodes to COMB, junctions will be bypassed
+            for node_id in comb_logic_nodes:
                 comb_nodes[node_id] = comb_id
 
-        # Handle orphaned nodes
+        # Handle orphaned comb_logic nodes only (skip junctions/constants/slices)
         for node_id in nodes_to_merge:
             if node_id not in comb_nodes:
-                if "_orphan_comb" not in comb_info:
-                    comb_info["_orphan_comb"] = ("COMB", 0)
-                comb_nodes[node_id] = "_orphan_comb"
-                label, count = comb_info["_orphan_comb"]
-                comb_info["_orphan_comb"] = (label, count + 1)
+                node = self.parser.nodes.get(node_id)
+                # Only add actual comb_logic to orphan, bypass junctions/constants/slices
+                if node and node.node_type == 'comb_logic':
+                    if "_orphan_comb" not in comb_info:
+                        comb_info["_orphan_comb"] = ("COMB", 0)
+                    comb_nodes[node_id] = "_orphan_comb"
+                    label, count = comb_info["_orphan_comb"]
+                    comb_info["_orphan_comb"] = (label, count + 1)
 
         comb_info = {k: v for k, v in comb_info.items() if v[1] > 0}
 
@@ -624,9 +681,70 @@ class DotSimplifier:
             if edge.dst_node in comb_info:
                 used_combs.add(edge.dst_node)
 
+        # Log filtered (edgeless) COMB nodes
+        filtered_combs = {k: v for k, v in comb_info.items() if k not in used_combs}
+        if filtered_combs and self.verbose:
+            for comb_id, (label, count) in filtered_combs.items():
+                loc_label = comb_locations.get(comb_id, CombLocationInfo()).get_display_label()
+                print(f"[WARN] COMB {comb_id} filtered (no edges): {count} nodes, source: {loc_label or 'none'}")
+
         comb_info = {k: v for k, v in comb_info.items() if k in used_combs}
 
+        # Track boundary node cell_ids (submodules have cell_ids in cell_locations)
+        for node_id in boundary_nodes:
+            node = self.parser.nodes.get(node_id)
+            if node and node.cell_id and node.cell_id in self.cell_locations:
+                self._covered_cell_ids.add(node.cell_id)
+
+        # Completeness verification: check cell_locations against covered + removed
+        self._verify_completeness()
+
         return self._generate_simplified_proc_group(boundary_nodes, comb_info, new_edges, comb_locations)
+
+    def _verify_completeness(self) -> None:
+        """Verify that all cell_locations entries are accounted for in the output.
+
+        Checks every cell_id in cell_locations against:
+        - covered: appeared in a COMB node or boundary node in the simplified output
+        - signal_removed: removed during signal removal phase
+        - uncovered: not accounted for — these are potential RTL line losses
+        """
+        if not self.cell_locations:
+            return
+
+        all_ids = set(self.cell_locations.keys())
+        covered = self._covered_cell_ids
+        removed = self._signal_removed_cell_ids
+        accounted = covered | removed
+        uncovered = all_ids - accounted
+
+        if self.verbose:
+            print(f"[Completeness] cell_locations: {len(all_ids)}, "
+                  f"covered: {len(covered)}, signal_removed: {len(removed)}, "
+                  f"uncovered: {len(uncovered)}")
+
+        if uncovered and self.verbose:
+            # Group uncovered by file for readable output
+            uncovered_by_file: Dict[str, List[int]] = defaultdict(list)
+            for cell_id in sorted(uncovered):
+                loc = self.cell_locations[cell_id]
+                filename = loc.file_path.split('/')[-1] if '/' in loc.file_path else loc.file_path
+                uncovered_by_file[filename].append(loc.start_line)
+
+            for filename, lines in sorted(uncovered_by_file.items()):
+                lines.sort()
+                # Compress consecutive lines into ranges
+                ranges = []
+                start = lines[0]
+                end = lines[0]
+                for line in lines[1:]:
+                    if line == end + 1:
+                        end = line
+                    else:
+                        ranges.append(f"{start}" if start == end else f"{start}-{end}")
+                        start = end = line
+                ranges.append(f"{start}" if start == end else f"{start}-{end}")
+                print(f"[WARN] Uncovered RTL lines in {filename}: {', '.join(ranges)}")
 
     def _simplify_by_connected_component(self, boundary_nodes: Set[str],
                                           nodes_to_merge: Set[str]) -> str:
@@ -653,17 +771,105 @@ class DotSimplifier:
         Merged nodes lose their port info (COMB nodes have no ports).
         Boundary nodes (PROC, I/O, submodule) keep their original port info
         so that arrows connect to the correct port positions.
+
+        Nodes in nodes_to_merge but not in comb_nodes (pure junction/constant)
+        are bypassed: they don't appear in the output, edges pass through them.
         """
+        # Build bypass map for junction nodes
+        # junction_bypass[node_id] = list of (target_node, target_port, src_port) reachable through junctions
+        junction_nodes = {n for n in nodes_to_merge if n not in comb_nodes}
+
+        def find_targets_through_junctions(start_node: str, start_port: str, visited: Set[str]) -> List[Tuple[str, str, str]]:
+            """Trace through junction nodes to find all reachable endpoints.
+
+            Returns list of (endpoint_node, endpoint_port, original_port)
+            """
+            if start_node in visited:
+                return []
+            visited = visited | {start_node}
+
+            targets = []
+            for edge in self.graph.adj_out.get(start_node, []):
+                if edge.dst_node in junction_nodes:
+                    # Continue through junction
+                    targets.extend(find_targets_through_junctions(edge.dst_node, edge.dst_port, visited))
+                else:
+                    # Reached a non-junction node
+                    targets.append((edge.dst_node, edge.dst_port, start_port))
+            return targets
+
+        # Build bypass edges for junctions: boundary → junction* → boundary/COMB
+        bypass_edges: List[Tuple[str, str, str, str]] = []  # (src, src_port, dst, dst_port)
+
+        for edge in self.graph.edges:
+            src_is_junction = edge.src_node in junction_nodes
+            dst_is_junction = edge.dst_node in junction_nodes
+
+            if not src_is_junction and dst_is_junction:
+                # Boundary/COMB → junction: trace through to find actual targets
+                targets = find_targets_through_junctions(edge.dst_node, edge.dst_port, set())
+                # Map src to COMB if it's a merged node
+                src_node = edge.src_node
+                src_port = edge.src_port
+                if edge.src_node in comb_nodes:
+                    src_node = comb_nodes[edge.src_node]
+                    src_port = ""  # COMB nodes have no ports
+                for target_node, target_port, _ in targets:
+                    bypass_edges.append((src_node, src_port, target_node, target_port))
+
         new_edges = []
         edge_set = set()
 
+        # Process bypass edges first (boundary/COMB → junction* → endpoint)
+        for src, src_port, dst, dst_port in bypass_edges:
+            # Map dst to COMB if it's in merge set
+            if dst in nodes_to_merge:
+                dst_comb = comb_nodes.get(dst)
+                if dst_comb:
+                    # Skip self-loops (same COMB block)
+                    if src == dst_comb:
+                        continue
+                    edge_key = (src, src_port, dst_comb)
+                    if edge_key not in edge_set:
+                        edge_set.add(edge_key)
+                        new_edges.append(DotEdge(
+                            src_node=src,
+                            src_port=src_port,
+                            dst_node=dst_comb,
+                            dst_port="",
+                            attrs={}
+                        ))
+            else:
+                # dst is boundary
+                edge_key = (src, src_port, dst, dst_port)
+                if edge_key not in edge_set:
+                    edge_set.add(edge_key)
+                    new_edges.append(DotEdge(
+                        src_node=src,
+                        src_port=src_port,
+                        dst_node=dst,
+                        dst_port=dst_port,
+                        attrs={}
+                    ))
+
+        # Process normal edges (skip those involving junctions, already handled above)
         for edge in self.graph.edges:
+            src_is_junction = edge.src_node in junction_nodes
+            dst_is_junction = edge.dst_node in junction_nodes
+
+            # Skip edges involving junctions (handled by bypass logic)
+            if src_is_junction or dst_is_junction:
+                continue
+
             src_in_merge = edge.src_node in nodes_to_merge
             dst_in_merge = edge.dst_node in nodes_to_merge
 
+            # Get COMB IDs
+            src_comb = comb_nodes.get(edge.src_node) if src_in_merge else None
+            dst_comb = comb_nodes.get(edge.dst_node) if dst_in_merge else None
+
             if src_in_merge and dst_in_merge:
-                src_comb = comb_nodes.get(edge.src_node)
-                dst_comb = comb_nodes.get(edge.dst_node)
+                # Both have COMB nodes (we already filtered out junctions)
                 if src_comb and dst_comb and src_comb != dst_comb:
                     edge_key = (src_comb, dst_comb)
                     if edge_key not in edge_set:
@@ -676,9 +882,8 @@ class DotSimplifier:
                             attrs={}
                         ))
             elif src_in_merge:
-                src_comb = comb_nodes.get(edge.src_node)
+                # COMB → boundary
                 if src_comb:
-                    # Preserve dst port for boundary nodes (submodule, proc, etc.)
                     edge_key = (src_comb, edge.dst_node, edge.dst_port)
                     if edge_key not in edge_set:
                         edge_set.add(edge_key)
@@ -690,9 +895,8 @@ class DotSimplifier:
                             attrs=edge.attrs
                         ))
             elif dst_in_merge:
-                dst_comb = comb_nodes.get(edge.dst_node)
+                # boundary → COMB
                 if dst_comb:
-                    # Preserve src port for boundary nodes (submodule, proc, etc.)
                     edge_key = (edge.src_node, edge.src_port, dst_comb)
                     if edge_key not in edge_set:
                         edge_set.add(edge_key)
@@ -704,6 +908,7 @@ class DotSimplifier:
                             attrs=edge.attrs
                         ))
             else:
+                # Both are boundary nodes
                 new_edges.append(edge)
 
         return new_edges
@@ -747,6 +952,10 @@ class DotSimplifier:
             else:
                 lines.append(f'{key}={value};')
 
+        # Add layout optimization parameters for better spacing
+        lines.append('ranksep=1.5;')  # Increase vertical spacing between ranks
+        lines.append('nodesep=0.8;')  # Increase horizontal spacing between nodes
+
         for node_id in sorted(boundary_nodes):
             node = self.parser.nodes.get(node_id)
             if node:
@@ -785,6 +994,10 @@ class DotSimplifier:
                 lines.append(f'{key}="{value}";')
             else:
                 lines.append(f'{key}={value};')
+
+        # Add layout optimization parameters for better spacing
+        lines.append('ranksep=1.5;')  # Increase vertical spacing between ranks
+        lines.append('nodesep=0.8;')  # Increase horizontal spacing between nodes
 
         for node_id in sorted(boundary_nodes):
             node = self.parser.nodes.get(node_id)
@@ -834,7 +1047,8 @@ def simplify_dot_content(
     content: str,
     strategy: str = "proc_group",
     cell_locations: Optional[Dict[str, SourceLocation]] = None,
-    remove_signals: Optional[List[str]] = None
+    remove_signals: Optional[List[str]] = None,
+    verbose: bool = False
 ) -> str:
     """Simplify DOT content string.
 
@@ -844,6 +1058,7 @@ def simplify_dot_content(
         cell_locations: Optional mapping of cell IDs to SourceLocation objects
         remove_signals: Optional list of signal name patterns to remove
             (fnmatch-style, e.g. ["*rst*", "cpurst_b", "*scan_en*"])
+        verbose: Enable completeness verification warnings
 
     Returns:
         Simplified DOT content string
@@ -854,6 +1069,7 @@ def simplify_dot_content(
     simplifier = DotSimplifier(
         parser, strategy=strategy,
         cell_locations=cell_locations,
-        remove_signals=remove_signals
+        remove_signals=remove_signals,
+        verbose=verbose
     )
     return simplifier.simplify()

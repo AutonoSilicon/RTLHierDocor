@@ -92,7 +92,8 @@ class SchematicGenerator:
             raw_dot,
             strategy=self._strategy,
             cell_locations=cell_locations,
-            remove_signals=effective_signals if effective_signals else None
+            remove_signals=effective_signals if effective_signals else None,
+            verbose=self._verbose
         )
 
         return raw_dot, simplified_dot
