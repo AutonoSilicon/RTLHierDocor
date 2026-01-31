@@ -107,7 +107,7 @@ output_dir/
   hierarchy_tree.txt       # ASCII module hierarchy
   hierarchy_tree.json      # JSON module hierarchy
   schematics/              # Raw DOT schematics (complete, unmodified)
-  schematics/simplified/   # Simplified DOT schematics (signals removed, COMB merged)
+  simplified/              # Simplified DOT schematics (signals removed, COMB merged)
   index.json               # Module index with cell/port info
 ```
 

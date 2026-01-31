@@ -2,5 +2,4 @@ __pycache__
 
 .venv
 .rtl_cache
-output*
 rtl_docs
