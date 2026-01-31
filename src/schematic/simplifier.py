@@ -68,12 +68,30 @@ class DotNode:
                 return match.group(1)
         return None
 
+    def is_submodule(self) -> bool:
+        """Check if this record node is a submodule instance (not a built-in cell).
+
+        Submodule labels: {inputs}|instance_name\\nmodule_type|{outputs}
+        Comb logic labels: {inputs}|$cell_id\\n$cell_type|{outputs}
+        Key difference: submodule instance names don't start with '$'
+        """
+        if self.shape != "record" or not self.label:
+            return False
+        # Extract the instance/cell name before \n
+        match = re.search(r'\|([^|{}<>]+?)\\n', self.label)
+        if match:
+            name = match.group(1).strip()
+            return bool(name) and not name.startswith('$')
+        return False
+
     @property
     def node_type(self) -> str:
         """Classify node type based on shape/style attributes."""
         if self.shape == "box" and "PROC" in self.label:
             return "proc"
         if self.shape == "record":
+            if self.is_submodule():
+                return "submodule"
             return "comb_logic"
         if self.shape == "octagon":
             return "io_port"
@@ -239,10 +257,10 @@ class CircuitGraph:
             self.adj_in[edge.dst_node].append(edge)
 
     def get_boundary_nodes(self) -> Set[str]:
-        """Get boundary nodes (PROC blocks and I/O ports)."""
+        """Get boundary nodes (PROC blocks, I/O ports, and submodule instances)."""
         boundary = set()
         for node_id, node in self.nodes.items():
-            if node.node_type in ('proc', 'io_port'):
+            if node.node_type in ('proc', 'io_port', 'submodule'):
                 boundary.add(node_id)
         return boundary
 
@@ -483,7 +501,7 @@ class DotSimplifier:
             for node_id, node in list(self.parser.nodes.items()):
                 if node_id in nodes_to_remove:
                     continue
-                if node.node_type in ('proc', 'io_port'):
+                if node.node_type in ('proc', 'io_port', 'submodule'):
                     continue
 
                 # Condition (a): all neighbors removed (fully orphaned)
@@ -630,7 +648,12 @@ class DotSimplifier:
 
     def _generate_new_edges(self, nodes_to_merge: Set[str],
                             comb_nodes: Dict[str, str]) -> List[DotEdge]:
-        """Remap edges after merging nodes into COMB groups."""
+        """Remap edges after merging nodes into COMB groups.
+
+        Merged nodes lose their port info (COMB nodes have no ports).
+        Boundary nodes (PROC, I/O, submodule) keep their original port info
+        so that arrows connect to the correct port positions.
+        """
         new_edges = []
         edge_set = set()
 
@@ -655,25 +678,27 @@ class DotSimplifier:
             elif src_in_merge:
                 src_comb = comb_nodes.get(edge.src_node)
                 if src_comb:
-                    edge_key = (src_comb, edge.dst_node)
+                    # Preserve dst port for boundary nodes (submodule, proc, etc.)
+                    edge_key = (src_comb, edge.dst_node, edge.dst_port)
                     if edge_key not in edge_set:
                         edge_set.add(edge_key)
                         new_edges.append(DotEdge(
                             src_node=src_comb,
                             src_port="",
                             dst_node=edge.dst_node,
-                            dst_port="",
+                            dst_port=edge.dst_port,
                             attrs=edge.attrs
                         ))
             elif dst_in_merge:
                 dst_comb = comb_nodes.get(edge.dst_node)
                 if dst_comb:
-                    edge_key = (edge.src_node, dst_comb)
+                    # Preserve src port for boundary nodes (submodule, proc, etc.)
+                    edge_key = (edge.src_node, edge.src_port, dst_comb)
                     if edge_key not in edge_set:
                         edge_set.add(edge_key)
                         new_edges.append(DotEdge(
                             src_node=edge.src_node,
-                            src_port="",
+                            src_port=edge.src_port,
                             dst_node=dst_comb,
                             dst_port="",
                             attrs=edge.attrs
@@ -729,6 +754,8 @@ class DotSimplifier:
                     lines.append(f'{node_id} [{node.raw_attrs}];')
                 elif node.node_type == 'io_port':
                     lines.append(f'{node_id} [shape=octagon, label="{node.label}"];')
+                elif node.node_type == 'submodule':
+                    lines.append(f'{node_id} [{node.raw_attrs}];')
 
         for comb_id, count in sorted(comb_info.items()):
             lines.append(
@@ -737,7 +764,9 @@ class DotSimplifier:
             )
 
         for edge in new_edges:
-            lines.append(f'{edge.src_node} -> {edge.dst_node};')
+            src = f'{edge.src_node}:{edge.src_port}' if edge.src_port else edge.src_node
+            dst = f'{edge.dst_node}:{edge.dst_port}' if edge.dst_port else edge.dst_node
+            lines.append(f'{src} -> {dst};')
 
         lines.append('}')
         return '\n'.join(lines)
@@ -764,6 +793,8 @@ class DotSimplifier:
                     lines.append(f'{node_id} [{node.raw_attrs}];')
                 elif node.node_type == 'io_port':
                     lines.append(f'{node_id} [shape=octagon, label="{node.label}"];')
+                elif node.node_type == 'submodule':
+                    lines.append(f'{node_id} [{node.raw_attrs}];')
 
         for comb_id, (label, count) in sorted(comb_info.items()):
             if count == 0:
@@ -791,7 +822,9 @@ class DotSimplifier:
             )
 
         for edge in new_edges:
-            lines.append(f'{edge.src_node} -> {edge.dst_node};')
+            src = f'{edge.src_node}:{edge.src_port}' if edge.src_port else edge.src_node
+            dst = f'{edge.dst_node}:{edge.dst_port}' if edge.dst_port else edge.dst_node
+            lines.append(f'{src} -> {dst};')
 
         lines.append('}')
         return '\n'.join(lines)
