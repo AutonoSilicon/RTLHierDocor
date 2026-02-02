@@ -10,7 +10,18 @@ from .source_resolver import SourceResolver
 from .progress_tracker import ProgressTracker
 from .block_doc_generator import BlockDocGenerator
 from schematic.simplifier import SimplifiedGraph
-from . import prompt_templates as prompts
+from .prompts import (
+    PASS1_SYSTEM,
+    PASS1_PROMPT,
+    PASS2_LEAF_SYSTEM,
+    PASS2_LEAF_PROMPT,
+    PASS2_NONLEAF_SYSTEM,
+    PASS2_NONLEAF_PROMPT,
+    PASS2_1_SYSTEM,
+    PASS2_1_PROMPT,
+    PASS2_5_MODULE_SYSTEM,
+    PASS2_5_MODULE_PROMPT,
+)
 
 class AgentDocGenerator:
     """Orchestrates the two-pass documentation generation process."""
@@ -69,21 +80,25 @@ class AgentDocGenerator:
                 self.llm.set_context(resolver=self.resolver, graphs=self._graphs)
                 print("[INFO] Updated LLM backend with graphs for function calling")
 
-        # Pass 1: Top-down Preview Generation (renamed from Overview)
+        # Pass 1: Top-down Preview Generation
         print("[INFO] Running Pass 1: Top-down Preview Generation...")
         await self._run_pass1(self.hierarchy, "该模块是设计的顶层模块。")
 
-        # Pass 2: Bottom-up Detailed Documentation (with block-level docs)
-        print("[INFO] Running Pass 2: Bottom-up Detailed Documentation...")
-        await self._run_pass2(self.hierarchy, "该模块是设计的顶层模块。")
+        # Pass 1.5: Block-level Documentation (extracted from old Pass 2)
+        print("[INFO] Running Pass 1.5: Block-level Documentation...")
+        await self._run_pass1_5(self.hierarchy)
 
-        # Pass 2.1: Design Highlight/Trick Identification
-        print("[INFO] Running Pass 2.1: Design Highlight Identification...")
-        await self._run_pass2_1(self.hierarchy)
+        # Pass 2.1 + Pass 2.5: Run in parallel (both depend only on Pass 1 + Pass 1.5)
+        print("[INFO] Running Pass 2.1 + Pass 2.5 in parallel...")
+        import asyncio
+        await asyncio.gather(
+            self._run_pass2_1(self.hierarchy),
+            self._run_pass2_5(self.hierarchy)
+        )
 
-        # Pass 2.5: Mermaid Flowchart Generation
-        print("[INFO] Running Pass 2.5: Mermaid Flowchart Generation...")
-        await self._run_pass2_5(self.hierarchy)
+        # Pass 2: Bottom-up Synthesis Documentation (depends on Pass 2.1 + Pass 2.5)
+        print("[INFO] Running Pass 2: Synthesis Documentation...")
+        await self._run_pass2(self.hierarchy)
 
         print(f"[INFO] Documentation generation complete. Results in {self.modules_dir}")
 
@@ -143,6 +158,78 @@ class AgentDocGenerator:
         # For children, pass current preview as context
         for child in node.children.values():
             await self._run_pass1(child, current_preview)
+
+    async def _run_pass1_5(self, node: Any):
+        """Pass 1.5: Block-level documentation generation (extracted from old Pass 2).
+
+        Depends only on Pass 0 (SimplifiedGraph) and SourceResolver, not on Pass 1.
+        """
+        module_name = node.module_name
+
+        # Skip logic
+        if self._should_skip(module_name):
+            print(f"[INFO] [Pass 1.5] Skipping module {module_name} (matches skip pattern)")
+            return
+
+        # Check limit
+        if self.max_modules > 0 and module_name not in self._processed_pass1:
+            return
+
+        # Check if already done
+        if self.tracker.is_pass1_5_done(module_name):
+            print(f"  [Pass 1.5] Module {module_name} already has block docs")
+            return
+
+        print(f"  [Pass 1.5] Generating block-level docs for {module_name}...")
+
+        # Generate block-level docs if SimplifiedGraph is available
+        block_descriptions = ""
+        block_docs_dict = {}
+
+        if module_name in self._graphs:
+            graph = self._graphs[module_name]
+            block_log_path = self._module_log_path(module_name, "block")
+            block_gen = BlockDocGenerator(
+                llm=self.llm,
+                resolver=self.resolver,
+                module_name=module_name,
+                graph=graph,
+                log_path=block_log_path,
+                block_doc_threshold=self.block_doc_threshold
+            )
+            block_docs_dict = await block_gen.generate_all()
+
+            # Format block docs for markdown
+            if block_docs_dict:
+                parts = []
+                for block_id, doc_text in sorted(block_docs_dict.items()):
+                    parts.append(f"### {block_id}:")
+                    parts.append(doc_text)
+                    parts.append("")  # Empty line
+                block_descriptions = "\n".join(parts)
+            else:
+                block_descriptions = "// 无逻辑块文档"
+        else:
+            # Fallback: use source code
+            source_code = self.resolver.read_source(module_name) or "Source not found."
+            block_descriptions = f"```verilog\n{source_code}\n```"
+            print(f"    [WARN] Module {module_name}: using source fallback (no SimplifiedGraph)")
+
+        # Save block docs (both markdown and JSON)
+        self._save_module_file(module_name, "block_docs.md", block_descriptions)
+        if block_docs_dict:
+            import json
+            module_dir = self.modules_dir / module_name
+            module_dir.mkdir(parents=True, exist_ok=True)
+            with open(module_dir / "block_docs.json", 'w', encoding='utf-8') as f:
+                json.dump(block_docs_dict, f, indent=2, ensure_ascii=False)
+
+        # Update tracker
+        self.tracker.update_pass1_5(module_name, "done")
+
+        # Recurse to children
+        for child in node.children.values():
+            await self._run_pass1_5(child)
 
     def _format_block_sources_topological(self, graph: SimplifiedGraph, module_name: str) -> str:
         """Format block source code in topological order.
@@ -306,7 +393,7 @@ class AgentDocGenerator:
             if module_name not in self._graphs and self.schematic_gen:
                 print(f"  [WARN] Module {module_name}: using source fallback (no SimplifiedGraph)")
 
-        prompt = prompts.PASS1_PROMPT.format(
+        prompt = PASS1_PROMPT.format(
             module_name=module_name,
             ancestor_context=ancestor_context,
             port_summary=port_summary,
@@ -316,7 +403,7 @@ class AgentDocGenerator:
         )
 
         log_path = self._module_log_path(module_name, "pass1_preview")
-        preview, token_stats = await self.llm.generate(prompts.PASS1_SYSTEM, prompt, log_path=log_path, disable_thinking=True)
+        preview, token_stats = await self.llm.generate(PASS1_SYSTEM, prompt, log_path=log_path, disable_thinking=True)
 
         # Record token stats
         if module_name not in self._token_stats:
@@ -331,8 +418,8 @@ class AgentDocGenerator:
         self._save_module_file(module_name, "preview.md", preview)
         self._save_metadata(node)
 
-    async def _run_pass2(self, node: Any, ancestor_context: str) -> str:
-        """Pass 2: Bottom-up (Detailed Doc)"""
+    async def _run_pass2(self, node: Any) -> str:
+        """Pass 2: Bottom-up synthesis documentation (runs after Pass 2.1 and Pass 2.5)."""
         module_name = node.module_name
 
         # Skip logic
@@ -343,15 +430,13 @@ class AgentDocGenerator:
         # Check limit - only process if Pass 1 processed it
         if self.max_modules > 0 and node.module_name not in self._processed_pass1:
             return "Skipped due to max_modules limit."
-        
+
         # 1. Recurse to children first
         children_descriptions = {}
         for child in node.children.values():
-            # Note: We need the overview of the current node to pass as context to children in Pass 2?
-            # User says: "向上回溯，每个模块会结合所有子模块的功能描述，和本模块的数据流..."
-            child_desc = await self._run_pass2(child, self.tracker.get_state(module_name).pass1_overview or "")
+            child_desc = await self._run_pass2(child)
             children_descriptions[child.module_name] = child_desc
-        
+
         # 2. Process current module if not already done
         if module_name in self._processed_pass2:
             return self.tracker.get_state(module_name).pass2_description or ""
@@ -360,76 +445,63 @@ class AgentDocGenerator:
             self._processed_pass2.add(module_name)
             return self.tracker.get_state(module_name).pass2_description or ""
 
-        # 3. Generate detailed doc
+        # 3. Check prerequisites: Pass 2.1 and Pass 2.5 must be done
+        if not self.tracker.is_pass2_1_done(module_name):
+            print(f"  [Pass 2] Skipping {module_name} (Pass 2.1 not completed)")
+            self._processed_pass2.add(module_name)
+            return ""
+
+        if not self.tracker.is_pass2_5_done(module_name):
+            print(f"  [Pass 2] Skipping {module_name} (Pass 2.5 not completed)")
+            self._processed_pass2.add(module_name)
+            return ""
+
+        # 4. Generate synthesis doc
         is_leaf = len(node.children) == 0
-        description = await self._generate_module_description(node, ancestor_context, children_descriptions, is_leaf)
-        
+        description = await self._generate_module_description(node, children_descriptions, is_leaf)
+
         self._processed_pass2.add(module_name)
         return description
 
-    async def _generate_module_description(self, node: Any, ancestor_context: str, children_descs: Dict[str, str], is_leaf: bool) -> str:
+    async def _generate_module_description(self, node: Any, children_descs: Dict[str, str], is_leaf: bool) -> str:
+        """Generate synthesis documentation by combining all prior analysis results."""
         module_name = node.module_name
-        print(f"  [Pass 2] Generating description for {module_name}...")
+        print(f"  [Pass 2] Generating synthesis description for {module_name}...")
 
         state = self.tracker.get_state(module_name)
-        preview = state.pass1_overview or ""  # Internally stored as pass1_overview
+        preview = state.pass1_overview or ""
         port_summary = self.resolver.get_port_summary(module_name)
 
-        # Generate block-level docs if SimplifiedGraph is available
-        block_descriptions = ""
-        if module_name in self._graphs:
-            print(f"    [Pass 1.5] Generating block-level docs for {module_name}...")
-            graph = self._graphs[module_name]
-            block_log_path = self._module_log_path(module_name, "block")
-            block_gen = BlockDocGenerator(
-                llm=self.llm,
-                resolver=self.resolver,
-                module_name=module_name,
-                graph=graph,
-                log_path=block_log_path,
-                block_doc_threshold=self.block_doc_threshold
-            )
-            block_docs = await block_gen.generate_all()
+        # Read block docs from file (generated in Pass 1.5)
+        block_docs_file = self.modules_dir / module_name / "block_docs.md"
+        block_descriptions = block_docs_file.read_text() if block_docs_file.exists() else "无逻辑块文档"
 
-            # Format block docs
-            if block_docs:
-                parts = []
-                for block_id, doc_text in sorted(block_docs.items()):
-                    parts.append(f"### {block_id}:")
-                    parts.append(doc_text)
-                    parts.append("")  # Empty line
-                block_descriptions = "\n".join(parts)
-            else:
-                block_descriptions = "// 无逻辑块文档"
-        else:
-            # Fallback: use source code
-            source_code = self.resolver.read_source(module_name) or "Source not found."
-            block_descriptions = f"```verilog\n{source_code}\n```"
-            print(f"    [WARN] Module {module_name}: using source fallback (no SimplifiedGraph)")
-
-        # Save block descriptions for Pass 2.5
-        self._save_module_file(module_name, "block_docs.md", block_descriptions)
+        # Get Pass 2.1 and Pass 2.5 results from tracker
+        design_highlights = state.pass2_1_highlights or "无设计亮点分析"
+        flowchart = state.pass2_5_mermaid or "无流程图"
 
         if is_leaf:
-            prompt = prompts.PASS2_LEAF_PROMPT.format(
+            prompt = PASS2_LEAF_PROMPT.format(
                 module_name=module_name,
-                ancestor_context=ancestor_context,
                 preview=preview,
                 port_summary=port_summary,
-                block_descriptions=block_descriptions
+                block_descriptions=block_descriptions,
+                design_highlights=design_highlights,
+                flowchart=flowchart
             )
-            system = prompts.PASS2_LEAF_SYSTEM
+            system = PASS2_LEAF_SYSTEM
         else:
             # Format children descriptions
             children_summary = "\n\n".join([f"## 子模块 {name}:\n{desc}" for name, desc in children_descs.items()])
-            prompt = prompts.PASS2_NONLEAF_PROMPT.format(
+            prompt = PASS2_NONLEAF_PROMPT.format(
                 module_name=module_name,
-                ancestor_context=ancestor_context,
                 preview=preview,
                 children_descriptions=children_summary,
-                block_descriptions=block_descriptions
+                block_descriptions=block_descriptions,
+                design_highlights=design_highlights,
+                flowchart=flowchart
             )
-            system = prompts.PASS2_NONLEAF_SYSTEM
+            system = PASS2_NONLEAF_SYSTEM
 
         log_path = self._module_log_path(module_name, "pass2_description")
         description, token_stats = await self.llm.generate(system, prompt, log_path=log_path)
@@ -518,9 +590,9 @@ class AgentDocGenerator:
             state = self.tracker.get_state(module_name)
             return state.pass2_1_highlights or ""
 
-        # 3. Check if we have necessary context (need Pass 2 description)
-        if not self.tracker.is_pass2_done(module_name):
-            print(f"  [Pass 2.1] Skipping {module_name} (Pass 2 not completed)")
+        # 3. Check if we have necessary context (need Pass 1.5 block docs)
+        if not self.tracker.is_pass1_5_done(module_name):
+            print(f"  [Pass 2.1] Skipping {module_name} (Pass 1.5 not completed)")
             self._processed_pass2_1.add(module_name)
             return ""
 
@@ -558,11 +630,11 @@ class AgentDocGenerator:
             Markdown document with design highlights analysis
         """
         module_name = node.module_name
-        
-        # Get module description from Pass 2
+
+        # Get Pass 1 preview (replacing old Pass 2 description dependency)
         state = self.tracker.get_state(module_name)
-        module_description = state.pass2_description or "无功能描述"
-        
+        preview = state.pass1_overview or "无功能预览"
+
         # Port summary
         port_summary = self.resolver.get_port_summary(module_name)
         
@@ -612,9 +684,9 @@ class AgentDocGenerator:
             children_highlights_str = "无子模块设计点参考"
         
         # Format prompt
-        prompt = prompts.PASS2_1_PROMPT.format(
+        prompt = PASS2_1_PROMPT.format(
             module_name=module_name,
-            module_description=module_description,
+            preview=preview,
             port_summary=port_summary,
             graph_description=graph_description if graph_description else "无拓扑结构信息",
             block_descriptions=block_descriptions if block_descriptions else "无逻辑块文档",
@@ -625,7 +697,7 @@ class AgentDocGenerator:
         # Call LLM
         log_path = self._module_log_path(module_name, "pass2_1_highlights")
         highlights, token_stats = await self.llm.generate(
-            prompts.PASS2_1_SYSTEM, 
+            PASS2_1_SYSTEM, 
             prompt, 
             log_path=log_path
         )
@@ -728,32 +800,14 @@ class AgentDocGenerator:
         # Block source code in topological order (same format as PASS 1)
         block_sources = self._format_block_sources_topological(graph, module_name)
 
-        # Block descriptions: read from Pass 1.5 saved file if available
+        # Block descriptions: read from Pass 1.5 saved file (guaranteed to exist)
         block_desc_file = self.modules_dir / module_name / "block_docs.md"
         if block_desc_file.exists():
             block_descriptions = block_desc_file.read_text()
         else:
-            # Regenerate if not found (shouldn't happen if Pass 1 ran)
-            block_log_path = self._module_log_path(module_name, "block")
-            block_gen = BlockDocGenerator(
-                llm=self.llm,
-                resolver=self.resolver,
-                module_name=module_name,
-                graph=graph,
-                log_path=block_log_path,
-                block_doc_threshold=self.block_doc_threshold
-            )
-            block_docs = await block_gen.generate_all()
-            if block_docs:
-                parts = []
-                for block_id, doc_text in sorted(block_docs.items()):
-                    if not doc_text.startswith("(< "):  # Skip small blocks
-                        parts.append(f"### {block_id}:")
-                        parts.append(doc_text)
-                        parts.append("")
-                block_descriptions = "\n".join(parts) if parts else "无复杂块文档"
-            else:
-                block_descriptions = "无复杂块文档"
+            # Should not happen if Pass 1.5 ran correctly
+            print(f"    [WARN] Module {module_name}: block_docs.md not found")
+            block_descriptions = "无逻辑块文档"
 
         # Format children summaries
         child_lines = []
@@ -762,7 +816,7 @@ class AgentDocGenerator:
         children_str = "\n".join(child_lines) if child_lines else "无子模块"
 
         # Format prompt
-        prompt = prompts.PASS2_5_MODULE_PROMPT.format(
+        prompt = PASS2_5_MODULE_PROMPT.format(
             module_name=module_name,
             preview=preview,
             port_summary=port_summary,
@@ -774,7 +828,7 @@ class AgentDocGenerator:
 
         # Call LLM
         log_path = self._module_log_path(module_name, "pass2_5_module")
-        full_mermaid, token_stats = await self.llm.generate(prompts.PASS2_5_MODULE_SYSTEM, prompt, log_path=log_path)
+        full_mermaid, token_stats = await self.llm.generate(PASS2_5_MODULE_SYSTEM, prompt, log_path=log_path)
 
         # Record token stats
         if module_name not in self._token_stats:

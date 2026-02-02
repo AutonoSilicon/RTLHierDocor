@@ -7,11 +7,12 @@ from datetime import datetime
 @dataclass
 class ModuleDocState:
     module_name: str
-    status: str  # "pending" | "pass1_done" | "pass2_done" | "pass2_1_done" | "pass2_5_done" | "failed"
+    status: str  # "pending" | "pass1_done" | "pass1_5_done" | "pass2_1_done" | "pass2_5_done" | "pass2_done" | "failed"
     pass1_overview: Optional[str] = None
-    pass2_description: Optional[str] = None
+    pass1_5_block_docs: Optional[str] = None  # Block docs completion marker
     pass2_1_highlights: Optional[str] = None  # Design highlights/tricks
     pass2_5_mermaid: Optional[str] = None
+    pass2_description: Optional[str] = None  # Now comes LAST (synthesis)
     error: Optional[str] = None
     timestamp: Optional[str] = None
 
@@ -58,10 +59,17 @@ class ProgressTracker:
         state.timestamp = datetime.now().isoformat()
         self.save()
 
+    def update_pass1_5(self, module_name: str, block_docs_marker: str = "done"):
+        state = self.get_state(module_name)
+        state.pass1_5_block_docs = block_docs_marker
+        state.status = "pass1_5_done"
+        state.timestamp = datetime.now().isoformat()
+        self.save()
+
     def update_pass2(self, module_name: str, description: str):
         state = self.get_state(module_name)
         state.pass2_description = description
-        state.status = "pass2_done"
+        state.status = "pass2_done"  # Terminal state
         state.timestamp = datetime.now().isoformat()
         self.save()
 
@@ -88,19 +96,25 @@ class ProgressTracker:
 
     def is_pass1_done(self, module_name: str) -> bool:
         state = self.states.get(module_name)
-        return state and state.status in ["pass1_done", "pass2_done"]
+        return state and state.status in ["pass1_done", "pass1_5_done", "pass2_1_done", "pass2_5_done", "pass2_done"]
 
-    def is_pass2_done(self, module_name: str) -> bool:
+    def is_pass1_5_done(self, module_name: str) -> bool:
         state = self.states.get(module_name)
-        return state and state.status in ["pass2_done", "pass2_1_done", "pass2_5_done"]
+        return state and state.status in ["pass1_5_done", "pass2_1_done", "pass2_5_done", "pass2_done"]
 
     def is_pass2_1_done(self, module_name: str) -> bool:
         state = self.states.get(module_name)
-        return state and state.status in ["pass2_1_done", "pass2_5_done"]
+        # Check field presence (parallel execution, not linear status)
+        return state and state.pass2_1_highlights is not None
 
     def is_pass2_5_done(self, module_name: str) -> bool:
         state = self.states.get(module_name)
-        return state and state.status == "pass2_5_done"
+        # Check field presence (parallel execution, not linear status)
+        return state and state.pass2_5_mermaid is not None
+
+    def is_pass2_done(self, module_name: str) -> bool:
+        state = self.states.get(module_name)
+        return state and state.status == "pass2_done"
 
     def clear(self):
         self.states.clear()

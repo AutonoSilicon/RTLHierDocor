@@ -4,7 +4,7 @@ import asyncio
 from typing import Dict, Tuple, List, Any, Optional
 
 from schematic.simplifier import SimplifiedGraph, ProcNodeInfo, CombNodeInfo
-from . import prompt_templates as prompts
+from .prompts import BLOCK_SYSTEM, BLOCK_PROMPT
 
 
 class BlockDocGenerator:
@@ -78,7 +78,7 @@ class BlockDocGenerator:
         upstream, downstream = self._get_connectivity(proc_id)
 
         # Format prompt
-        prompt = prompts.BLOCK_PROMPT.format(
+        prompt = BLOCK_PROMPT.format(
             module_name=self.module_name,
             block_id=proc_id,
             block_type="PROC (时序逻辑块)",
@@ -88,7 +88,7 @@ class BlockDocGenerator:
         )
 
         # Call LLM
-        doc, token_stats = await self.llm.generate(prompts.BLOCK_SYSTEM, prompt, log_path=self.log_path)
+        doc, token_stats = await self.llm.generate(BLOCK_SYSTEM, prompt, log_path=self.log_path)
 
         return (proc_id, doc)
 
@@ -118,7 +118,7 @@ class BlockDocGenerator:
         block_type = block_type_map.get(comb_info.comb_type, comb_info.comb_type)
 
         # Format prompt
-        prompt = prompts.BLOCK_PROMPT.format(
+        prompt = BLOCK_PROMPT.format(
             module_name=self.module_name,
             block_id=comb_id,
             block_type=block_type,
@@ -128,7 +128,7 @@ class BlockDocGenerator:
         )
 
         # Call LLM
-        doc, token_stats = await self.llm.generate(prompts.BLOCK_SYSTEM, prompt, log_path=self.log_path)
+        doc, token_stats = await self.llm.generate(BLOCK_SYSTEM, prompt, log_path=self.log_path)
 
         return (comb_id, doc)
 
