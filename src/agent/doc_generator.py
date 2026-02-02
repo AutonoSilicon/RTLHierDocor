@@ -500,12 +500,11 @@ class AgentDocGenerator:
             )
             self._save_module_file(module_name, "flowchart.mmd", full_mermaid)
 
-            # Step C: Generate summary for parent
-            summary = await self._generate_summary_flowchart(module_name, full_mermaid)
-            self._mermaid_summaries[module_name] = summary
+            # Use full mermaid as summary — parent module decides how to summarize
+            self._mermaid_summaries[module_name] = full_mermaid
 
             # Update tracker
-            self.tracker.update_pass2_5(module_name, summary)
+            self.tracker.update_pass2_5(module_name, full_mermaid)
 
             self._processed_pass2_5.add(module_name)
             return summary
@@ -559,20 +558,3 @@ class AgentDocGenerator:
 
         return full_mermaid
 
-    async def _generate_summary_flowchart(self, module_name: str, full_mermaid: str) -> str:
-        """Generate simplified flowchart summary for parent module."""
-        state = self.tracker.get_state(module_name)
-        preview = state.pass1_overview or "无预览"
-        port_summary = self.resolver.get_port_summary(module_name)
-
-        prompt = prompts.PASS2_5_SUMMARY_PROMPT.format(
-            module_name=module_name,
-            preview=preview,
-            full_mermaid=full_mermaid,
-            port_summary=port_summary
-        )
-
-        log_path = self._module_log_path(module_name, "pass2_5_summary")
-        summary = await self.llm.generate(prompts.PASS2_5_SUMMARY_SYSTEM, prompt, log_path=log_path)
-
-        return summary
