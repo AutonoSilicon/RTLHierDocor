@@ -25,7 +25,8 @@ class AgentDocGenerator:
         max_source_lines: int = 2000,
         max_modules: int = 0,
         skip_modules: Optional[List[str]] = None,
-        schematic_gen: Optional[Any] = None
+        schematic_gen: Optional[Any] = None,
+        block_doc_threshold: int = 64
     ):
         self.hierarchy = hierarchy
         self.llm = llm
@@ -37,6 +38,7 @@ class AgentDocGenerator:
         self.max_modules = max_modules
         self.skip_modules = skip_modules or []
         self.schematic_gen = schematic_gen
+        self.block_doc_threshold = block_doc_threshold
         self._graphs: Dict[str, SimplifiedGraph] = {}  # module_name -> SimplifiedGraph
         self._processed_pass1: set = set()
         self._processed_pass2: set = set()
@@ -384,7 +386,8 @@ class AgentDocGenerator:
                 resolver=self.resolver,
                 module_name=module_name,
                 graph=graph,
-                log_path=block_log_path
+                log_path=block_log_path,
+                block_doc_threshold=self.block_doc_threshold
             )
             block_docs = await block_gen.generate_all()
 
@@ -403,6 +406,9 @@ class AgentDocGenerator:
             source_code = self.resolver.read_source(module_name) or "Source not found."
             block_descriptions = f"```verilog\n{source_code}\n```"
             print(f"    [WARN] Module {module_name}: using source fallback (no SimplifiedGraph)")
+
+        # Save block descriptions for Pass 2.5
+        self._save_module_file(module_name, "block_docs.md", block_descriptions)
 
         if is_leaf:
             prompt = prompts.PASS2_LEAF_PROMPT.format(
@@ -693,7 +699,7 @@ class AgentDocGenerator:
 
             self._processed_pass2_5.add(module_name)
             self._save_metadata(node)
-            return summary
+            return full_mermaid
 
         except Exception as e:
             print(f"  [ERROR] [Pass 2.5] Failed to generate flowchart for {module_name}: {e}")
@@ -722,6 +728,33 @@ class AgentDocGenerator:
         # Block source code in topological order (same format as PASS 1)
         block_sources = self._format_block_sources_topological(graph, module_name)
 
+        # Block descriptions: read from Pass 1.5 saved file if available
+        block_desc_file = self.modules_dir / module_name / "block_docs.md"
+        if block_desc_file.exists():
+            block_descriptions = block_desc_file.read_text()
+        else:
+            # Regenerate if not found (shouldn't happen if Pass 1 ran)
+            block_log_path = self._module_log_path(module_name, "block")
+            block_gen = BlockDocGenerator(
+                llm=self.llm,
+                resolver=self.resolver,
+                module_name=module_name,
+                graph=graph,
+                log_path=block_log_path,
+                block_doc_threshold=self.block_doc_threshold
+            )
+            block_docs = await block_gen.generate_all()
+            if block_docs:
+                parts = []
+                for block_id, doc_text in sorted(block_docs.items()):
+                    if not doc_text.startswith("(< "):  # Skip small blocks
+                        parts.append(f"### {block_id}:")
+                        parts.append(doc_text)
+                        parts.append("")
+                block_descriptions = "\n".join(parts) if parts else "无复杂块文档"
+            else:
+                block_descriptions = "无复杂块文档"
+
         # Format children summaries
         child_lines = []
         for child_name, summary in sorted(children_summaries.items()):
@@ -735,6 +768,7 @@ class AgentDocGenerator:
             port_summary=port_summary,
             graph_description=graph_description,
             block_sources=block_sources,
+            block_descriptions=block_descriptions,
             children_summaries=children_str
         )
 

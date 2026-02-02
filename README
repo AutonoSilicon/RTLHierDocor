@@ -1,7 +1,12 @@
 Hierachry RTL Codebase Docor
 ---
 
+## TODO
 
-    uv venv --system-site-packages --python $(which python3) 
+- [ ] **Agent-based source code lookup**: Currently block-level source code is provided directly in prompts (for blocks > 64 lines). Future enhancement: let the Agent call tools on-demand to read specific source files when needed, rather than embedding all source code upfront.
+
+## Setup
+
+    uv venv --system-site-packages --python $(which python3)
 
     source .venv/bin/activate

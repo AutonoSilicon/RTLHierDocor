@@ -242,7 +242,8 @@ def cmd_docor(args):
         max_source_lines=cfg.max_source_lines,
         max_modules=cfg.max_modules,
         skip_modules=cfg.skip_modules,
-        schematic_gen=schematic_gen
+        schematic_gen=schematic_gen,
+        block_doc_threshold=cfg.block_doc_threshold
     )
 
     # Run async generator

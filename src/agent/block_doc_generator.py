@@ -11,7 +11,8 @@ class BlockDocGenerator:
     """Generates documentation for individual COMB and PROC blocks."""
 
     def __init__(self, llm: Any, resolver: Any, module_name: str,
-                 graph: SimplifiedGraph, log_path: Optional[str] = None):
+                 graph: SimplifiedGraph, log_path: Optional[str] = None,
+                 block_doc_threshold: int = 64):
         """Initialize block documentation generator.
 
         Args:
@@ -20,12 +21,14 @@ class BlockDocGenerator:
             module_name: Name of the module
             graph: SimplifiedGraph for the module
             log_path: Path to write debug logs (per-module)
+            block_doc_threshold: Min lines to invoke LLM for block doc
         """
         self.llm = llm
         self.resolver = resolver
         self.module_name = module_name
         self.graph = graph
         self.log_path = log_path or "debug.md"
+        self.block_doc_threshold = block_doc_threshold
 
     async def generate_all(self) -> Dict[str, str]:
         """Generate documentation for all COMB and PROC blocks concurrently.
@@ -65,6 +68,12 @@ class BlockDocGenerator:
         else:
             source_snippet = "// Source location not available"
 
+        # Check line count threshold
+        line_count = source_snippet.count('\n') + 1
+        if line_count < self.block_doc_threshold:
+            # Skip LLM call for small blocks
+            return (proc_id, f"(< {self.block_doc_threshold} lines, skipped)")
+
         # Get connectivity info
         upstream, downstream = self._get_connectivity(proc_id)
 
@@ -90,6 +99,12 @@ class BlockDocGenerator:
             source_snippet = self.resolver.read_block_source(comb_info.source_locations)
         else:
             source_snippet = "// Source locations not available"
+
+        # Check line count threshold
+        line_count = source_snippet.count('\n') + 1
+        if line_count < self.block_doc_threshold:
+            # Skip LLM call for small blocks
+            return (comb_id, f"(< {self.block_doc_threshold} lines, skipped)")
 
         # Get connectivity info
         upstream, downstream = self._get_connectivity(comb_id)
