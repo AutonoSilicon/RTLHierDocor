@@ -59,6 +59,11 @@ class AgentDocGenerator:
             print("[INFO] Running Pass 0: Precomputing SimplifiedGraphs...")
             self._precompute_graphs(self.hierarchy)
             print(f"[INFO] Precomputed {len(self._graphs)} simplified graphs")
+            
+            # Update OpenAI backend context if it supports it
+            if hasattr(self.llm, 'set_context'):
+                self.llm.set_context(resolver=self.resolver, graphs=self._graphs)
+                print("[INFO] Updated LLM backend with graphs for function calling")
 
         # Pass 1: Top-down Preview Generation (renamed from Overview)
         print("[INFO] Running Pass 1: Top-down Preview Generation...")

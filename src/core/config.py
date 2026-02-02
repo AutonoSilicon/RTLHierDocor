@@ -179,6 +179,7 @@ class ProjectConfig:
     code_base_path: str = ""
     resume: bool = True
     max_modules: int = 0  # 0 for unlimited
+    block_doc_threshold: int = 64  # Min lines for block-level LLM call
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ProjectConfig':
@@ -260,6 +261,8 @@ class ProjectConfig:
                 config.resume = bool(agent['resume'])
             if 'max_modules' in agent:
                 config.max_modules = int(agent['max_modules'])
+            if 'block_doc_threshold' in agent:
+                config.block_doc_threshold = int(agent['block_doc_threshold'])
 
         return config
 

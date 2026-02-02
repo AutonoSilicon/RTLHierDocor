@@ -24,11 +24,11 @@ BLOCK_PROMPT = """
 """
 
 # Pass 1: Preview generation
-PASS1_SYSTEM = """
+PASS1_SYSTEM = """你是RTL设计分析专家。
 你的任务是快速阅览一个 Verilog 模块的结构信息，生成一个模块的预览（Preview）。
-输出必须严格限定在1个段落以内。
 重点关注本模块在硬件架构层次结构中的角色、核心功能以及与其他模块的主要接口关系。
 语言专业严谨，内容精炼，表达清晰，不要过多形容词。
+输出必须严格限定在1个段落以内。
 """
 
 PASS1_PROMPT = """
@@ -43,7 +43,7 @@ PASS1_PROMPT = """
 # 子模块列表:
 {children_summary}
 
-# 简化电路结构:
+# 结构化电路描述:
 {graph_description}
 
 # 逻辑块源代码（按拓扑序）:
