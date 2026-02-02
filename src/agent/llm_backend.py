@@ -7,12 +7,25 @@ class LLMBackend(ABC):
     """Abstract base class for LLM backends."""
     
     @abstractmethod
-    async def generate(self, system: str, prompt: str) -> str:
-        """Generate text from the LLM."""
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md") -> str:
+        """Generate text from the LLM.
+
+        Args:
+            system: System prompt
+            prompt: User prompt
+            log_path: Path for debug log file
+        """
         pass
 
-    def _log_call(self, system: str, prompt: str, model: str):
-        """Log the LLM call to debug.md."""
+    def _log_call(self, system: str, prompt: str, model: str, log_path: str = "debug.md"):
+        """Log the LLM call to a markdown file.
+
+        Args:
+            system: System prompt
+            prompt: User prompt
+            model: Model identifier
+            log_path: Path to the log file (default: debug.md in cwd)
+        """
         try:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             log_entry = f"""
@@ -26,10 +39,11 @@ class LLMBackend(ABC):
 
 ---
 """
-            with open("debug.md", "a", encoding="utf-8") as f:
+            os.makedirs(os.path.dirname(log_path), exist_ok=True) if os.path.dirname(log_path) else None
+            with open(log_path, "a", encoding="utf-8") as f:
                 f.write(log_entry)
         except Exception as e:
-            print(f"[WARNING] Failed to write to debug.md: {e}")
+            print(f"[WARNING] Failed to write to {log_path}: {e}")
 
 class AnthropicBackend(LLMBackend):
     """Backend using Anthropic's Messages API."""
@@ -47,10 +61,10 @@ class AnthropicBackend(LLMBackend):
             print("[ERROR] 'anthropic' package not installed. Run 'pip install anthropic'.")
             self.client = None
 
-    async def generate(self, system: str, prompt: str) -> str:
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md") -> str:
         if not self.client:
             return "Error: Anthropic client not initialized."
-        
+
         try:
             kwargs = {
                 "model": self.model,
@@ -58,7 +72,7 @@ class AnthropicBackend(LLMBackend):
                 "system": system,
                 "messages": [{"role": "user", "content": prompt}]
             }
-            
+
             if self.thinking:
                 # Support for Claude 3.7+ thinking mode
                 kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8192}
@@ -68,7 +82,7 @@ class AnthropicBackend(LLMBackend):
 
             response = await self.client.messages.create(**kwargs)
             result = response.content[0].text
-            self._log_call(system, prompt, self.model)
+            self._log_call(system, prompt, self.model, log_path)
             return result
         except Exception as e:
             return f"Error calling Anthropic API: {str(e)}"
@@ -89,10 +103,10 @@ class OpenAIBackend(LLMBackend):
             print("[ERROR] 'openai' package not installed. Run 'pip install openai'.")
             self.client = None
 
-    async def generate(self, system: str, prompt: str) -> str:
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md") -> str:
         if not self.client:
             return "Error: OpenAI client not initialized."
-        
+
         try:
             kwargs = {
                 "model": self.model,
@@ -101,46 +115,80 @@ class OpenAIBackend(LLMBackend):
                     {"role": "user", "content": prompt}
                 ]
             }
-            
+
             # Common pattern for thinking/reasoning models in OpenAI-compatible APIs (e.g. DeepSeek)
             if self.thinking:
                 # Some providers use specific parameters in extra_body
                 kwargs["extra_body"] = {"enable_thinking": True}
-                # For o1-style models, they might not support 'system' role in some versions or require 'developer'
-                # But here we keep it simple as most compatible APIs handle 'system'
 
             response = await self.client.chat.completions.create(**kwargs)
             result = response.choices[0].message.content
-            self._log_call(system, prompt, self.model)
+            self._log_call(system, prompt, self.model, log_path)
             return result
         except Exception as e:
             return f"Error calling OpenAI API: {str(e)}"
 
 class AgentSDKBackend(LLMBackend):
-    """Backend using Claude Agent SDK."""
-    
-    def __init__(self, model: str = "claude-3-5-sonnet-20241022"):
-        self.model = model
-        # Note: Actual implementation depends on specific SDK version and setup
-        # This is a conceptual implementation based on common Agent SDK patterns
-        try:
-            # Placeholder for agent sdk import
-            # import claude_agent_sdk as sdk
-            pass
-        except ImportError:
-            pass
+    """Backend using Claude Agent SDK (claude-code-sdk).
 
-    async def generate(self, system: str, prompt: str) -> str:
-        # In a real Agent SDK scenario, we might provide tools to the agent
-        # For this docor task, we are currently passing source code directly in prompt (Pass 1/2)
-        # But the Agent SDK could be used to let the agent explore the codebase
-        
-        # Conceptual implementation:
-        # agent = sdk.Agent(model=self.model, system=system)
-        # result = await agent.query(prompt)
-        # return result.text
-        
-        return "Agent SDK Backend implementation pending SDK availability."
+    Spawns Claude Code sub-processes that can autonomously use tools
+    (Read, Grep, Glob) to explore source files. Unlike the Anthropic/OpenAI
+    backends where we pass source code in the prompt, the Agent SDK lets
+    Claude decide what to read and how deeply to explore.
+    """
+
+    def __init__(
+        self,
+        model: str = "claude-sonnet-4-20250514",
+        cwd: Optional[str] = None,
+        max_turns: int = 10,
+        allowed_tools: Optional[List[str]] = None
+    ):
+        self.model = model
+        self.cwd = cwd or os.getcwd()
+        self.max_turns = max_turns
+        self.allowed_tools = allowed_tools or ["Read", "Grep", "Glob"]
+        self._sdk_available = False
+
+        try:
+            from claude_code_sdk import query as _query, ClaudeCodeOptions as _opts
+            self._sdk_available = True
+        except ImportError:
+            print("[ERROR] 'claude-code-sdk' package not installed. "
+                  "Run 'pip install claude-code-sdk'.")
+
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md") -> str:
+        if not self._sdk_available:
+            return "Error: claude-code-sdk not installed."
+
+        from claude_code_sdk import query, ClaudeCodeOptions
+
+        try:
+            options = ClaudeCodeOptions(
+                system_prompt=system,
+                allowed_tools=self.allowed_tools,
+                max_turns=self.max_turns,
+                cwd=self.cwd,
+                model=self.model,
+                permission_mode="acceptEdits",
+            )
+
+            text_parts = []
+            async for message in query(
+                prompt=prompt,
+                options=options
+            ):
+                # message types: AssistantMessage, ResultMessage, etc.
+                if hasattr(message, 'content') and isinstance(message.content, list):
+                    for block in message.content:
+                        if hasattr(block, 'text'):
+                            text_parts.append(block.text)
+
+            result = "\n".join(text_parts)
+            self._log_call(system, prompt, f"agent_sdk/{self.model}", log_path)
+            return result if result else "Error: Agent SDK returned empty response."
+        except Exception as e:
+            return f"Error calling Claude Agent SDK: {str(e)}"
 
 def get_llm_backend(config: Any) -> LLMBackend:
     """Factory to get the configured LLM backend."""
@@ -162,6 +210,11 @@ def get_llm_backend(config: Any) -> LLMBackend:
             thinking=config.get("thinking", False)
         )
     elif backend_type == "agent_sdk":
-        return AgentSDKBackend(model=model)
+        return AgentSDKBackend(
+            model=model,
+            cwd=config.get("code_base_path"),
+            max_turns=config.get("max_turns", 10),
+            allowed_tools=config.get("allowed_tools", ["Read", "Grep", "Glob"])
+        )
     else:
         raise ValueError(f"Unknown LLM backend: {backend_type}")

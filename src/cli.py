@@ -173,8 +173,9 @@ def cmd_schematic(args):
 def cmd_docor(args):
     """Generate AI-powered module documentation."""
     import asyncio
-    from core import YosysBackend, HierarchyBuilder
+    from core import YosysBackend, HierarchyBuilder, SignalTracer
     from agent import AgentDocGenerator, SourceResolver, get_llm_backend, ProgressTracker
+    from schematic import SchematicGenerator
 
     cfg = _load_config(args)
 
@@ -201,6 +202,22 @@ def cmd_docor(args):
         print("Failed to build hierarchy", file=sys.stderr)
         return 1
 
+    # Initialize Signal Tracer (for schematic generation)
+    traced_signals = {}
+    if cfg.simplify and cfg.remove_signals:
+        tracer = SignalTracer(backend, verbose=cfg.verbose)
+        traced_signals = tracer.trace(cfg.top_module, cfg.remove_signals)
+
+    # Initialize SchematicGenerator
+    schematic_gen = SchematicGenerator(
+        backend=backend,
+        verbose=cfg.verbose,
+        simplify=cfg.simplify,
+        strategy=cfg.strategy,
+        remove_signals=cfg.remove_signals,
+        traced_signals=traced_signals
+    )
+
     # Initialize Agent components
     llm_config = {
         "backend": cfg.agent_backend,
@@ -212,7 +229,7 @@ def cmd_docor(args):
     llm = get_llm_backend(llm_config)
     resolver = SourceResolver(backend, code_base_path=cfg.code_base_path)
     tracker = ProgressTracker(cfg.output_dir)
-    
+
     if not cfg.resume:
         tracker.clear()
 
@@ -224,7 +241,8 @@ def cmd_docor(args):
         output_dir=cfg.output_dir,
         max_source_lines=cfg.max_source_lines,
         max_modules=cfg.max_modules,
-        skip_modules=cfg.skip_modules
+        skip_modules=cfg.skip_modules,
+        schematic_gen=schematic_gen
     )
 
     # Run async generator

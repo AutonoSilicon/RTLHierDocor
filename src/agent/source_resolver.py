@@ -2,6 +2,7 @@ import os
 import re
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+from models import SourceLocation
 
 class SourceResolver:
     """Resolves module names to source file paths and reads content."""
@@ -120,5 +121,86 @@ class SourceResolver:
         
         if not ports:
             return "No ports defined."
-        
+
         return "\n".join(ports)
+
+    def read_source_lines(self, file_path: str, start_line: int, end_line: int) -> Optional[str]:
+        """Read specific line range from a source file.
+
+        Args:
+            file_path: Path to the source file
+            start_line: Starting line number (1-indexed, inclusive)
+            end_line: Ending line number (1-indexed, inclusive)
+
+        Returns:
+            Source code string or None if read failed
+        """
+        if not os.path.exists(file_path):
+            return None
+
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = []
+                for i, line in enumerate(f, start=1):
+                    if i >= start_line and i <= end_line:
+                        lines.append(line)
+                    if i > end_line:
+                        break
+                return "".join(lines)
+        except Exception as e:
+            print(f"[ERROR] Failed to read lines {start_line}-{end_line} from {file_path}: {e}")
+            return None
+
+    def read_block_source(self, source_locations: List[SourceLocation]) -> str:
+        """Aggregate source code from multiple SourceLocation objects.
+
+        Groups by file and reads the appropriate line ranges, formatting
+        with file names and line number annotations for clarity.
+
+        Args:
+            source_locations: List of SourceLocation objects
+
+        Returns:
+            Formatted source code string with file/line annotations
+        """
+        if not source_locations:
+            return "// No source code available"
+
+        # Group by file and aggregate line ranges
+        file_ranges: Dict[str, List[Tuple[int, int]]] = {}
+        for loc in source_locations:
+            if loc.file_path not in file_ranges:
+                file_ranges[loc.file_path] = []
+            if loc.end_line:
+                file_ranges[loc.file_path].append((loc.start_line, loc.end_line))
+            else:
+                file_ranges[loc.file_path].append((loc.start_line, loc.start_line))
+
+        # Merge overlapping/adjacent ranges per file
+        for file_path in file_ranges:
+            ranges = sorted(file_ranges[file_path])
+            merged = []
+            for start, end in ranges:
+                if merged and start <= merged[-1][1] + 1:
+                    # Overlapping or adjacent, merge
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+                else:
+                    merged.append((start, end))
+            file_ranges[file_path] = merged
+
+        # Read and format source code
+        parts = []
+        for file_path, ranges in sorted(file_ranges.items()):
+            filename = file_path.split('/')[-1] if '/' in file_path else file_path
+            for start_line, end_line in ranges:
+                code = self.read_source_lines(file_path, start_line, end_line)
+                if code:
+                    if start_line == end_line:
+                        parts.append(f"// {filename}:{start_line}")
+                    else:
+                        parts.append(f"// {filename}:{start_line}-{end_line}")
+                    parts.append(code)
+                    if not code.endswith('\n'):
+                        parts.append('\n')
+
+        return "".join(parts) if parts else "// Source code not found"

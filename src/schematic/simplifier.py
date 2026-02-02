@@ -48,6 +48,36 @@ class CombLocationInfo:
 
 
 @dataclass
+class ProcNodeInfo:
+    """Information about a PROC node in simplified graph."""
+    node_id: str
+    label: str
+    source_location: Optional[SourceLocation] = None  # Parsed from PROC label
+
+
+@dataclass
+class CombNodeInfo:
+    """Information about a COMB node in simplified graph."""
+    node_id: str
+    comb_type: str  # "IN_COMB" / "OUT_COMB" / "COMB"
+    node_count: int
+    location_info: CombLocationInfo
+    source_locations: List[SourceLocation] = field(default_factory=list)  # Full paths for reading source
+    associated_proc: Optional[str] = None
+
+
+@dataclass
+class SimplifiedGraph:
+    """Structured representation of a simplified schematic."""
+    module_name: str
+    proc_nodes: Dict[str, ProcNodeInfo] = field(default_factory=dict)
+    comb_nodes: Dict[str, CombNodeInfo] = field(default_factory=dict)
+    io_ports: Dict[str, str] = field(default_factory=dict)  # node_id -> port_label
+    submodules: Dict[str, str] = field(default_factory=dict)  # node_id -> instance_name
+    edges: List[Tuple[str, str]] = field(default_factory=list)  # (src_id, dst_id)
+
+
+@dataclass
 class DotNode:
     """A node in the DOT graph."""
     node_id: str
@@ -574,6 +604,212 @@ class DotSimplifier:
         else:
             return self._simplify_by_connected_component(boundary_nodes, nodes_to_merge)
 
+    def simplify_to_graph(self) -> Optional[SimplifiedGraph]:
+        """Execute simplification and return structured SimplifiedGraph."""
+        boundary_nodes = self.graph.get_boundary_nodes()
+        nodes_to_merge = self.graph.get_nodes_to_merge()
+
+        if not nodes_to_merge:
+            # Return graph with only boundary nodes
+            return self._build_graph_from_original(boundary_nodes)
+
+        if self.strategy == "proc_group":
+            return self._build_proc_group_graph(boundary_nodes, nodes_to_merge)
+        else:
+            # For now, only proc_group strategy is fully supported
+            return None
+
+    def _parse_proc_source_location(self, label: str) -> Optional[SourceLocation]:
+        """Parse PROC label to extract source location.
+
+        Label format: "PROC $43221\\n/path/to/file.v:1877.1-1907.4"
+        """
+        match = re.search(r'PROC \$\d+\\n(.+?):(\d+)\.\d+-(\d+)\.\d+', label)
+        if match:
+            file_path = match.group(1)
+            start_line = int(match.group(2))
+            end_line = int(match.group(3))
+            return SourceLocation(file_path=file_path, start_line=start_line, end_line=end_line)
+        return None
+
+    def _build_proc_group_graph(self, boundary_nodes: Set[str],
+                                 nodes_to_merge: Set[str]) -> SimplifiedGraph:
+        """Build SimplifiedGraph using proc_group strategy."""
+        components = self.graph.find_connected_components(nodes_to_merge)
+        proc_groups = self.graph.group_by_proc_block(nodes_to_merge)
+
+        graph = SimplifiedGraph(module_name=self.parser.graph_name)
+
+        comb_nodes_mapping: Dict[str, str] = {}  # node_id -> comb_id
+        comb_info: Dict[str, Tuple[str, int]] = {}  # comb_id -> (label, count)
+        comb_locations: Dict[str, CombLocationInfo] = {}  # comb_id -> location info
+        comb_source_locs: Dict[str, List[SourceLocation]] = {}  # comb_id -> source locations
+
+        # Build COMB nodes (same logic as original)
+        for comp_idx, component in enumerate(components):
+            has_logic = any(
+                self.parser.nodes.get(node_id) and
+                self.parser.nodes[node_id].node_type == 'comb_logic'
+                for node_id in component
+            )
+            if not has_logic:
+                continue
+
+            comb_logic_nodes = [
+                node_id for node_id in component
+                if self.parser.nodes.get(node_id) and
+                self.parser.nodes[node_id].node_type == 'comb_logic'
+            ]
+
+            associated_procs: Dict[str, Set[str]] = {}
+            for node_id in component:
+                for proc_id, groups in proc_groups.items():
+                    if node_id in groups["input"]:
+                        if proc_id not in associated_procs:
+                            associated_procs[proc_id] = set()
+                        associated_procs[proc_id].add("input")
+                    if node_id in groups["output"]:
+                        if proc_id not in associated_procs:
+                            associated_procs[proc_id] = set()
+                        associated_procs[proc_id].add("output")
+
+            if associated_procs:
+                primary_proc = sorted(associated_procs.keys())[0]
+                directions = associated_procs[primary_proc]
+
+                if "input" in directions and "output" in directions:
+                    comb_id = f"{primary_proc}_comb_{comp_idx}"
+                    label = "COMB"
+                elif "input" in directions:
+                    comb_id = f"{primary_proc}_in_comb_{comp_idx}"
+                    label = "IN_COMB"
+                else:
+                    comb_id = f"{primary_proc}_out_comb_{comp_idx}"
+                    label = "OUT_COMB"
+            else:
+                comb_id = f"comb_{comp_idx}"
+                label = "COMB"
+
+            comb_info[comb_id] = (label, len(comb_logic_nodes))
+
+            location_info = CombLocationInfo()
+            source_locs = []
+            for node_id in comb_logic_nodes:
+                node = self.parser.nodes.get(node_id)
+                if node and node.cell_id and node.cell_id in self.cell_locations:
+                    loc = self.cell_locations[node.cell_id]
+                    location_info.add_location(loc.file_path, loc.start_line)
+                    source_locs.append(loc)
+                    self._covered_cell_ids.add(node.cell_id)
+
+            comb_locations[comb_id] = location_info
+            comb_source_locs[comb_id] = source_locs
+
+            for node_id in comb_logic_nodes:
+                comb_nodes_mapping[node_id] = comb_id
+
+        # Handle orphaned comb_logic nodes
+        for node_id in nodes_to_merge:
+            if node_id not in comb_nodes_mapping:
+                node = self.parser.nodes.get(node_id)
+                if node and node.node_type == 'comb_logic':
+                    if "_orphan_comb" not in comb_info:
+                        comb_info["_orphan_comb"] = ("COMB", 0)
+                        comb_locations["_orphan_comb"] = CombLocationInfo()
+                        comb_source_locs["_orphan_comb"] = []
+                    comb_nodes_mapping[node_id] = "_orphan_comb"
+                    label, count = comb_info["_orphan_comb"]
+                    comb_info["_orphan_comb"] = (label, count + 1)
+
+        comb_info = {k: v for k, v in comb_info.items() if v[1] > 0}
+
+        new_edges = self._generate_new_edges(nodes_to_merge, comb_nodes_mapping)
+
+        # Keep only COMB nodes referenced by edges
+        used_combs = set()
+        for edge in new_edges:
+            if edge.src_node in comb_info:
+                used_combs.add(edge.src_node)
+            if edge.dst_node in comb_info:
+                used_combs.add(edge.dst_node)
+
+        comb_info = {k: v for k, v in comb_info.items() if k in used_combs}
+
+        # Build COMB nodes for SimplifiedGraph
+        for comb_id, (comb_type, node_count) in comb_info.items():
+            # Extract associated_proc from comb_id
+            assoc_proc = None
+            if '_' in comb_id and comb_id.startswith('p'):
+                parts = comb_id.split('_')
+                if parts[0].startswith('p') and parts[0][1:].isdigit():
+                    assoc_proc = parts[0]
+
+            graph.comb_nodes[comb_id] = CombNodeInfo(
+                node_id=comb_id,
+                comb_type=comb_type,
+                node_count=node_count,
+                location_info=comb_locations.get(comb_id, CombLocationInfo()),
+                source_locations=comb_source_locs.get(comb_id, []),
+                associated_proc=assoc_proc
+            )
+
+        # Build PROC nodes
+        for node_id in boundary_nodes:
+            node = self.parser.nodes.get(node_id)
+            if node:
+                if node.node_type == 'proc':
+                    source_loc = self._parse_proc_source_location(node.label)
+                    graph.proc_nodes[node_id] = ProcNodeInfo(
+                        node_id=node_id,
+                        label=node.label,
+                        source_location=source_loc
+                    )
+                    if node.cell_id and node.cell_id in self.cell_locations:
+                        self._covered_cell_ids.add(node.cell_id)
+                elif node.node_type == 'io_port':
+                    graph.io_ports[node_id] = node.label
+                elif node.node_type == 'submodule':
+                    # Extract instance name from label (format: {inputs}|instance_name\nmodule_type|{outputs})
+                    match = re.search(r'\|([^|{}<>]+?)\\n', node.label)
+                    instance_name = match.group(1).strip() if match else node_id
+                    graph.submodules[node_id] = instance_name
+
+        # Build edges
+        for edge in new_edges:
+            graph.edges.append((edge.src_node, edge.dst_node))
+
+        # Completeness verification
+        self._verify_completeness()
+
+        return graph
+
+    def _build_graph_from_original(self, boundary_nodes: Set[str]) -> SimplifiedGraph:
+        """Build SimplifiedGraph from original DOT (no merging)."""
+        graph = SimplifiedGraph(module_name=self.parser.graph_name)
+
+        for node_id in boundary_nodes:
+            node = self.parser.nodes.get(node_id)
+            if node:
+                if node.node_type == 'proc':
+                    source_loc = self._parse_proc_source_location(node.label)
+                    graph.proc_nodes[node_id] = ProcNodeInfo(
+                        node_id=node_id,
+                        label=node.label,
+                        source_location=source_loc
+                    )
+                elif node.node_type == 'io_port':
+                    graph.io_ports[node_id] = node.label
+                elif node.node_type == 'submodule':
+                    match = re.search(r'\|([^|{}<>]+?)\\n', node.label)
+                    instance_name = match.group(1).strip() if match else node_id
+                    graph.submodules[node_id] = instance_name
+
+        for edge in self.parser.edges:
+            if edge.src_node in boundary_nodes and edge.dst_node in boundary_nodes:
+                graph.edges.append((edge.src_node, edge.dst_node))
+
+        return graph
+
     def _simplify_by_proc_group(self, boundary_nodes: Set[str],
                                  nodes_to_merge: Set[str]) -> str:
         """Simplify by grouping combinational logic per PROC block."""
@@ -1073,3 +1309,35 @@ def simplify_dot_content(
         verbose=verbose
     )
     return simplifier.simplify()
+
+
+def simplify_dot_to_graph(
+    content: str,
+    strategy: str = "proc_group",
+    cell_locations: Optional[Dict[str, SourceLocation]] = None,
+    remove_signals: Optional[List[str]] = None,
+    verbose: bool = False
+) -> Optional[SimplifiedGraph]:
+    """Simplify DOT content and return structured SimplifiedGraph.
+
+    Args:
+        content: Raw DOT file content from Yosys
+        strategy: "proc_group" (default) or "connected_component"
+        cell_locations: Optional mapping of cell IDs to SourceLocation objects
+        remove_signals: Optional list of signal name patterns to remove
+            (fnmatch-style, e.g. ["*rst*", "cpurst_b", "*scan_en*"])
+        verbose: Enable completeness verification warnings
+
+    Returns:
+        SimplifiedGraph object or None if simplification failed
+    """
+    parser = DotParser()
+    parser.parse(content)
+
+    simplifier = DotSimplifier(
+        parser, strategy=strategy,
+        cell_locations=cell_locations,
+        remove_signals=remove_signals,
+        verbose=verbose
+    )
+    return simplifier.simplify_to_graph()

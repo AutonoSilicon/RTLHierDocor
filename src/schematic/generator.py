@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any, List, Set, Tuple
 from pathlib import Path
 
 from core.source_extractor import extract_module_locations
-from schematic.simplifier import simplify_dot_content
+from schematic.simplifier import simplify_dot_content, simplify_dot_to_graph, SimplifiedGraph
 
 
 class SchematicGenerator:
@@ -97,6 +97,47 @@ class SchematicGenerator:
         )
 
         return raw_dot, simplified_dot
+
+    def generate_simplified_graph(
+        self,
+        module_name: str
+    ) -> Optional[SimplifiedGraph]:
+        """Generate SimplifiedGraph for a module.
+
+        Args:
+            module_name: Name of the module
+
+        Returns:
+            SimplifiedGraph object or None if generation failed
+        """
+        raw_dot = self._backend.generate_dot(module_name)
+        if not raw_dot:
+            return None
+
+        if not self._simplify:
+            return None
+
+        # Extract cell locations for source annotations
+        cell_locations = self._extract_cell_locations(module_name)
+
+        # Build effective remove_signals for this module:
+        # global patterns + traced per-module port names
+        clean_name = module_name.lstrip("\\")
+        effective_signals = list(self._remove_signals)
+        if clean_name in self._traced_signals:
+            for port_name in self._traced_signals[clean_name]:
+                if port_name not in effective_signals:
+                    effective_signals.append(port_name)
+
+        graph = simplify_dot_to_graph(
+            raw_dot,
+            strategy=self._strategy,
+            cell_locations=cell_locations,
+            remove_signals=effective_signals if effective_signals else None,
+            verbose=self._verbose
+        )
+
+        return graph
 
     def _extract_cell_locations(self, module_name: str) -> Dict:
         """Extract cell source locations from the module via Yosys backend."""

@@ -7,9 +7,10 @@ from datetime import datetime
 @dataclass
 class ModuleDocState:
     module_name: str
-    status: str  # "pending" | "pass1_done" | "pass2_done" | "failed"
+    status: str  # "pending" | "pass1_done" | "pass2_done" | "pass2_5_done" | "failed"
     pass1_overview: Optional[str] = None
     pass2_description: Optional[str] = None
+    pass2_5_mermaid: Optional[str] = None
     error: Optional[str] = None
     timestamp: Optional[str] = None
 
@@ -63,6 +64,13 @@ class ProgressTracker:
         state.timestamp = datetime.now().isoformat()
         self.save()
 
+    def update_pass2_5(self, module_name: str, mermaid: str):
+        state = self.get_state(module_name)
+        state.pass2_5_mermaid = mermaid
+        state.status = "pass2_5_done"
+        state.timestamp = datetime.now().isoformat()
+        self.save()
+
     def mark_failed(self, module_name: str, error: str):
         state = self.get_state(module_name)
         state.status = "failed"
@@ -76,7 +84,11 @@ class ProgressTracker:
 
     def is_pass2_done(self, module_name: str) -> bool:
         state = self.states.get(module_name)
-        return state and state.status == "pass2_done"
+        return state and state.status in ["pass2_done", "pass2_5_done"]
+
+    def is_pass2_5_done(self, module_name: str) -> bool:
+        state = self.states.get(module_name)
+        return state and state.status == "pass2_5_done"
 
     def clear(self):
         self.states.clear()
