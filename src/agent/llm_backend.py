@@ -2,7 +2,7 @@ import os
 import asyncio
 import datetime
 from abc import ABC, abstractmethod
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Tuple
 
 class LLMBackend(ABC):
     """Abstract base class for LLM backends."""
@@ -12,13 +12,19 @@ class LLMBackend(ABC):
         self._semaphore = asyncio.Semaphore(3)  # Max 3 concurrent requests
 
     @abstractmethod
-    async def generate(self, system: str, prompt: str, log_path: str = "debug.md") -> str:
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md") -> Tuple[str, Dict[str, int]]:
         """Generate text from the LLM.
 
         Args:
             system: System prompt
             prompt: User prompt
             log_path: Path for debug log file
+            
+        Returns:
+            Tuple of (generated_text, token_stats) where token_stats is a dict with:
+            - input_tokens: number of input tokens
+            - output_tokens: number of output tokens
+            - total_tokens: total tokens used
         """
         pass
 
@@ -89,10 +95,19 @@ class AnthropicBackend(LLMBackend):
 
                 response = await self.client.messages.create(**kwargs)
                 result = response.content[0].text
+                
+                # Extract token usage
+                token_stats = {
+                    "input_tokens": response.usage.input_tokens if hasattr(response, 'usage') else 0,
+                    "output_tokens": response.usage.output_tokens if hasattr(response, 'usage') else 0,
+                    "total_tokens": 0
+                }
+                token_stats["total_tokens"] = token_stats["input_tokens"] + token_stats["output_tokens"]
+                
                 self._log_call(system, prompt, self.model, log_path)
-                return result
+                return result, token_stats
             except Exception as e:
-                return f"Error calling Anthropic API: {str(e)}"
+                return f"Error calling Anthropic API: {str(e)}", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
 class OpenAIBackend(LLMBackend):
     """Backend using OpenAI's Chat Completion API with function calling support."""
@@ -281,14 +296,22 @@ class OpenAIBackend(LLMBackend):
                     else:
                         # No more tool calls, we have the final response
                         result = assistant_message.content
+                        
+                        # Extract token usage from final response
+                        token_stats = {
+                            "input_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'prompt_tokens') else 0,
+                            "output_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'completion_tokens') else 0,
+                            "total_tokens": response.usage.total_tokens if hasattr(response, 'usage') and hasattr(response.usage, 'total_tokens') else 0
+                        }
+                        
                         self._log_call(system, prompt, self.model, log_path)
-                        return result if result else "Error: OpenAI returned empty response."
+                        return (result if result else "Error: OpenAI returned empty response."), token_stats
                 
                 # If we hit max iterations
-                return "Error: Maximum function calling iterations reached."
+                return "Error: Maximum function calling iterations reached.", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
                 
             except Exception as e:
-                return f"Error calling OpenAI API: {str(e)}"
+                return f"Error calling OpenAI API: {str(e)}", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
 class AgentSDKBackend(LLMBackend):
     """Backend using Claude Agent SDK (claude-code-sdk).
@@ -350,9 +373,13 @@ class AgentSDKBackend(LLMBackend):
 
                 result = "\n".join(text_parts)
                 self._log_call(system, prompt, f"agent_sdk/{self.model}", log_path)
-                return result if result else "Error: Agent SDK returned empty response."
+                
+                # Agent SDK doesn't provide token stats, return zeros
+                token_stats = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                
+                return (result if result else "Error: Agent SDK returned empty response."), token_stats
             except Exception as e:
-                return f"Error calling Claude Agent SDK: {str(e)}"
+                return f"Error calling Claude Agent SDK: {str(e)}", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
 def get_llm_backend(config: Any, resolver: Optional[Any] = None, graphs: Optional[Dict[str, Any]] = None) -> LLMBackend:
     """Factory to get the configured LLM backend.

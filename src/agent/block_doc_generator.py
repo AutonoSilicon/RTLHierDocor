@@ -79,7 +79,7 @@ class BlockDocGenerator:
         )
 
         # Call LLM
-        doc = await self.llm.generate(prompts.BLOCK_SYSTEM, prompt, log_path=self.log_path)
+        doc, token_stats = await self.llm.generate(prompts.BLOCK_SYSTEM, prompt, log_path=self.log_path)
 
         return (proc_id, doc)
 
@@ -113,7 +113,7 @@ class BlockDocGenerator:
         )
 
         # Call LLM
-        doc = await self.llm.generate(prompts.BLOCK_SYSTEM, prompt, log_path=self.log_path)
+        doc, token_stats = await self.llm.generate(prompts.BLOCK_SYSTEM, prompt, log_path=self.log_path)
 
         return (comb_id, doc)
 

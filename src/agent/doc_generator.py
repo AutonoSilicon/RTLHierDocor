@@ -42,6 +42,7 @@ class AgentDocGenerator:
         self._processed_pass2: set = set()
         self._processed_pass2_5: set = set()
         self._mermaid_summaries: Dict[str, str] = {}  # module_name -> 精简版 mermaid
+        self._token_stats: Dict[str, List[Dict[str, int]]] = {}  # module_name -> list of token stats per pass
 
     def _should_skip(self, module_name: str) -> bool:
         """Check if a module should be skipped based on skip_modules patterns."""
@@ -308,7 +309,15 @@ class AgentDocGenerator:
         )
 
         log_path = self._module_log_path(module_name, "pass1_preview")
-        preview = await self.llm.generate(prompts.PASS1_SYSTEM, prompt, log_path=log_path)
+        preview, token_stats = await self.llm.generate(prompts.PASS1_SYSTEM, prompt, log_path=log_path)
+
+        # Record token stats
+        if module_name not in self._token_stats:
+            self._token_stats[module_name] = []
+        self._token_stats[module_name].append({
+            "pass": "pass1",
+            **token_stats
+        })
 
         # Save results (internally still stored as pass1_overview in tracker)
         self.tracker.update_pass1(module_name, preview)
@@ -412,7 +421,15 @@ class AgentDocGenerator:
             system = prompts.PASS2_NONLEAF_SYSTEM
 
         log_path = self._module_log_path(module_name, "pass2_description")
-        description = await self.llm.generate(system, prompt, log_path=log_path)
+        description, token_stats = await self.llm.generate(system, prompt, log_path=log_path)
+
+        # Record token stats
+        if module_name not in self._token_stats:
+            self._token_stats[module_name] = []
+        self._token_stats[module_name].append({
+            "pass": "pass2",
+            **token_stats
+        })
 
         self.tracker.update_pass2(module_name, description)
         self._save_module_file(module_name, "description.md", description)
@@ -448,7 +465,8 @@ class AgentDocGenerator:
             "instances": [node.instance_name], # In Pass 1, we might only see one instance initially
             "ports": self.resolver.get_port_summary(module_name).split('\n'),
             "source_path": self.resolver.resolve_path(module_name),
-            "children": [c.module_name for c in node.children.values()]
+            "children": [c.module_name for c in node.children.values()],
+            "token_stats": self._token_stats.get(module_name, [])
         }
 
         with open(module_dir / "metadata.json", 'w', encoding='utf-8') as f:
@@ -559,7 +577,15 @@ class AgentDocGenerator:
 
         # Call LLM
         log_path = self._module_log_path(module_name, "pass2_5_module")
-        full_mermaid = await self.llm.generate(prompts.PASS2_5_MODULE_SYSTEM, prompt, log_path=log_path)
+        full_mermaid, token_stats = await self.llm.generate(prompts.PASS2_5_MODULE_SYSTEM, prompt, log_path=log_path)
+
+        # Record token stats
+        if module_name not in self._token_stats:
+            self._token_stats[module_name] = []
+        self._token_stats[module_name].append({
+            "pass": "pass2_5",
+            **token_stats
+        })
 
         return full_mermaid
 
