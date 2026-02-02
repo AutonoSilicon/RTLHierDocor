@@ -40,6 +40,7 @@ class AgentDocGenerator:
         self._graphs: Dict[str, SimplifiedGraph] = {}  # module_name -> SimplifiedGraph
         self._processed_pass1: set = set()
         self._processed_pass2: set = set()
+        self._processed_pass2_1: set = set()  # Track Pass 2.1 completion
         self._processed_pass2_5: set = set()
         self._mermaid_summaries: Dict[str, str] = {}  # module_name -> 精简版 mermaid
         self._token_stats: Dict[str, List[Dict[str, int]]] = {}  # module_name -> list of token stats per pass
@@ -73,6 +74,10 @@ class AgentDocGenerator:
         # Pass 2: Bottom-up Detailed Documentation (with block-level docs)
         print("[INFO] Running Pass 2: Bottom-up Detailed Documentation...")
         await self._run_pass2(self.hierarchy, "该模块是设计的顶层模块。")
+
+        # Pass 2.1: Design Highlight/Trick Identification
+        print("[INFO] Running Pass 2.1: Design Highlight Identification...")
+        await self._run_pass2_1(self.hierarchy)
 
         # Pass 2.5: Mermaid Flowchart Generation
         print("[INFO] Running Pass 2.5: Mermaid Flowchart Generation...")
@@ -309,7 +314,7 @@ class AgentDocGenerator:
         )
 
         log_path = self._module_log_path(module_name, "pass1_preview")
-        preview, token_stats = await self.llm.generate(prompts.PASS1_SYSTEM, prompt, log_path=log_path)
+        preview, token_stats = await self.llm.generate(prompts.PASS1_SYSTEM, prompt, log_path=log_path, disable_thinking=True)
 
         # Record token stats
         if module_name not in self._token_stats:
@@ -433,6 +438,7 @@ class AgentDocGenerator:
 
         self.tracker.update_pass2(module_name, description)
         self._save_module_file(module_name, "description.md", description)
+        self._save_metadata(node)
         return description
 
     def _module_log_path(self, module_name: str, pass_name: str) -> str:
@@ -471,6 +477,162 @@ class AgentDocGenerator:
 
         with open(module_dir / "metadata.json", 'w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+    # ==================== Pass 2.1: Design Highlight/Trick Identification ====================
+
+    async def _run_pass2_1(self, node: Any) -> str:
+        """Pass 2.1: Bottom-up design highlight identification.
+
+        Returns the highlights summary for this module (for parent to use).
+        """
+        module_name = node.module_name
+
+        # Skip/limit checks (same as Pass 2)
+        if self._should_skip(module_name):
+            print(f"[INFO] [Pass 2.1] Skipping module {module_name} (matches skip pattern)")
+            return ""
+
+        if self.max_modules > 0 and module_name not in self._processed_pass1:
+            return ""
+
+        # 1. Recurse children first (bottom-up)
+        children_highlights = {}
+        for child in node.children.values():
+            highlights = await self._run_pass2_1(child)
+            if highlights:
+                children_highlights[child.module_name] = highlights
+
+        # 2. Already done?
+        if module_name in self._processed_pass2_1:
+            state = self.tracker.get_state(module_name)
+            return state.pass2_1_highlights or ""
+
+        if self.tracker.is_pass2_1_done(module_name):
+            self._processed_pass2_1.add(module_name)
+            state = self.tracker.get_state(module_name)
+            return state.pass2_1_highlights or ""
+
+        # 3. Check if we have necessary context (need Pass 2 description)
+        if not self.tracker.is_pass2_done(module_name):
+            print(f"  [Pass 2.1] Skipping {module_name} (Pass 2 not completed)")
+            self._processed_pass2_1.add(module_name)
+            return ""
+
+        # 4. Generate design highlights
+        print(f"  [Pass 2.1] Analyzing design highlights for {module_name}...")
+        
+        try:
+            highlights = await self._generate_design_highlights(
+                node, children_highlights
+            )
+            
+            if highlights:
+                self._save_module_file(module_name, "design_highlights.md", highlights)
+                self.tracker.update_pass2_1(module_name, highlights)
+            
+            self._processed_pass2_1.add(module_name)
+            self._save_metadata(node)
+            return highlights
+
+        except Exception as e:
+            print(f"  [ERROR] [Pass 2.1] Failed to generate highlights for {module_name}: {e}")
+            self._processed_pass2_1.add(module_name)
+            return ""
+
+    async def _generate_design_highlights(
+        self, node: Any, children_highlights: Dict[str, str]
+    ) -> str:
+        """Generate design highlights/tricks documentation for a module.
+
+        Args:
+            node: HierarchyNode for the module
+            children_highlights: Dict mapping child module names to their highlights
+
+        Returns:
+            Markdown document with design highlights analysis
+        """
+        module_name = node.module_name
+        
+        # Get module description from Pass 2
+        state = self.tracker.get_state(module_name)
+        module_description = state.pass2_description or "无功能描述"
+        
+        # Port summary
+        port_summary = self.resolver.get_port_summary(module_name)
+        
+        # Get graph description and block descriptions if available
+        graph_description = ""
+        block_descriptions = ""
+        
+        if module_name in self._graphs:
+            graph = self._graphs[module_name]
+            graph_description = self._format_graph_description(graph)
+            
+            # We can reuse block docs if they were generated in Pass 2
+            # For simplicity, we'll just get them again or from cache
+            block_log_path = self._module_log_path(module_name, "block")
+            if (self.modules_dir / module_name / "block_docs.json").exists():
+                with open(self.modules_dir / module_name / "block_docs.json", 'r') as f:
+                    block_docs = json.load(f)
+                parts = []
+                for block_id, doc_text in sorted(block_docs.items()):
+                    parts.append(f"### {block_id}:")
+                    parts.append(doc_text)
+                    parts.append("")
+                block_descriptions = "\n".join(parts)
+        
+        # Get source code (truncated if needed)
+        source_code = self.resolver.read_source(module_name) or "Source not found."
+        if len(source_code.split('\n')) > self.max_source_lines:
+            lines = source_code.split('\n')
+            source_code = '\n'.join(lines[:self.max_source_lines]) + f"\n\n// ... (truncated, {len(lines) - self.max_source_lines} more lines)"
+        
+        # Format children highlights
+        children_highlights_str = ""
+        if children_highlights:
+            parts = []
+            for child_name, highlights in sorted(children_highlights.items()):
+                # Extract just the key points from child, not full doc
+                # Look for "设计点" sections or take first few paragraphs
+                lines = highlights.split('\n')
+                # Take first 20 lines as summary
+                summary_lines = lines[:20] if len(lines) > 20 else lines
+                summary = '\n'.join(summary_lines)
+                if len(lines) > 20:
+                    summary += "\n\n[... 更多内容见子模块文档]"
+                parts.append(f"## 子模块 {child_name} 的关键设计点:\n{summary}\n")
+            children_highlights_str = "\n".join(parts)
+        else:
+            children_highlights_str = "无子模块设计点参考"
+        
+        # Format prompt
+        prompt = prompts.PASS2_1_PROMPT.format(
+            module_name=module_name,
+            module_description=module_description,
+            port_summary=port_summary,
+            graph_description=graph_description if graph_description else "无拓扑结构信息",
+            block_descriptions=block_descriptions if block_descriptions else "无逻辑块文档",
+            source_code=f"```verilog\n{source_code}\n```",
+            children_highlights=children_highlights_str
+        )
+        
+        # Call LLM
+        log_path = self._module_log_path(module_name, "pass2_1_highlights")
+        highlights, token_stats = await self.llm.generate(
+            prompts.PASS2_1_SYSTEM, 
+            prompt, 
+            log_path=log_path
+        )
+        
+        # Record token stats
+        if module_name not in self._token_stats:
+            self._token_stats[module_name] = []
+        self._token_stats[module_name].append({
+            "pass": "pass2_1",
+            **token_stats
+        })
+        
+        return highlights
 
     # ==================== Pass 2.5: Mermaid Flowchart Generation ====================
 
@@ -530,6 +692,7 @@ class AgentDocGenerator:
             self.tracker.update_pass2_5(module_name, full_mermaid)
 
             self._processed_pass2_5.add(module_name)
+            self._save_metadata(node)
             return summary
 
         except Exception as e:

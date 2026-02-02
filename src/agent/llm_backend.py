@@ -73,20 +73,23 @@ class AnthropicBackend(LLMBackend):
             print("[ERROR] 'anthropic' package not installed. Run 'pip install anthropic'.")
             self.client = None
 
-    async def generate(self, system: str, prompt: str, log_path: str = "debug.md") -> str:
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md", disable_thinking: bool = False) -> Tuple[str, Dict[str, int]]:
         if not self.client:
-            return "Error: Anthropic client not initialized."
+            return "Error: Anthropic client not initialized.", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         async with self._semaphore:
             try:
+                # Use thinking mode unless explicitly disabled
+                use_thinking = self.thinking and not disable_thinking
+                
                 kwargs = {
                     "model": self.model,
-                    "max_tokens": 4096 if not self.thinking else 16384,
+                    "max_tokens": 4096 if not use_thinking else 16384,
                     "system": system,
                     "messages": [{"role": "user", "content": prompt}]
                 }
 
-                if self.thinking:
+                if use_thinking:
                     # Support for Claude 3.7+ thinking mode
                     kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8192}
                     # When thinking is enabled, max_tokens must be > budget_tokens
@@ -223,9 +226,9 @@ class OpenAIBackend(LLMBackend):
             available_blocks = list(graph.proc_nodes.keys()) + list(graph.comb_nodes.keys())
             return f"Error: Block '{block_id}' not found in module '{module_name}'. Available blocks: {', '.join(available_blocks[:10])}"
 
-    async def generate(self, system: str, prompt: str, log_path: str = "debug.md") -> str:
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md", disable_thinking: bool = False) -> Tuple[str, Dict[str, int]]:
         if not self.client:
-            return "Error: OpenAI client not initialized."
+            return "Error: OpenAI client not initialized.", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         async with self._semaphore:
             try:
@@ -244,6 +247,9 @@ class OpenAIBackend(LLMBackend):
                 max_iterations = 10
                 iteration = 0
                 
+                # Use thinking mode unless explicitly disabled
+                use_thinking = self.thinking and not disable_thinking
+                
                 while iteration < max_iterations:
                     iteration += 1
                     
@@ -258,7 +264,7 @@ class OpenAIBackend(LLMBackend):
                         kwargs["tool_choice"] = "auto"
 
                     # Common pattern for thinking/reasoning models in OpenAI-compatible APIs (e.g. DeepSeek)
-                    if self.thinking:
+                    if use_thinking:
                         kwargs["extra_body"] = {"enable_thinking": True}
 
                     response = await self.client.chat.completions.create(**kwargs)
@@ -343,9 +349,9 @@ class AgentSDKBackend(LLMBackend):
             print("[ERROR] 'claude-code-sdk' package not installed. "
                   "Run 'pip install claude-code-sdk'.")
 
-    async def generate(self, system: str, prompt: str, log_path: str = "debug.md") -> str:
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md", disable_thinking: bool = False) -> Tuple[str, Dict[str, int]]:
         if not self._sdk_available:
-            return "Error: claude-code-sdk not installed."
+            return "Error: claude-code-sdk not installed.", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
         from claude_code_sdk import query, ClaudeCodeOptions
 
