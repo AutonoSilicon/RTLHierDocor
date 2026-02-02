@@ -1,7 +1,7 @@
 import os
-import asyncio
 import json
 import fnmatch
+from collections import defaultdict
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
@@ -131,6 +131,78 @@ class AgentDocGenerator:
         for child in node.children.values():
             await self._run_pass1(child, current_preview)
 
+    def _format_block_sources_topological(self, graph: SimplifiedGraph, module_name: str) -> str:
+        """Format block source code in topological order.
+
+        Args:
+            graph: SimplifiedGraph object
+            module_name: Module name for source resolution
+
+        Returns:
+            Formatted source code sections for all blocks
+        """
+        # Build adjacency list for topological sort
+        adj = defaultdict(list)
+        in_degree = defaultdict(int)
+        all_blocks = set()
+
+        # Add all PROC and COMB blocks
+        for proc_id in graph.proc_nodes.keys():
+            all_blocks.add(proc_id)
+            in_degree[proc_id] = 0
+
+        for comb_id in graph.comb_nodes.keys():
+            all_blocks.add(comb_id)
+            in_degree[comb_id] = 0
+
+        # Build graph from edges (only between blocks, not I/O ports)
+        for src, dst in graph.edges:
+            if src in all_blocks and dst in all_blocks:
+                adj[src].append(dst)
+                in_degree[dst] = in_degree.get(dst, 0) + 1
+
+        # Topological sort (Kahn's algorithm)
+        queue = [node for node in all_blocks if in_degree[node] == 0]
+        topo_order = []
+
+        while queue:
+            # Sort for deterministic order
+            queue.sort()
+            node = queue.pop(0)
+            topo_order.append(node)
+
+            for neighbor in adj[node]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+
+        # If there are remaining nodes (cycle or disconnected), add them sorted
+        remaining = sorted(all_blocks - set(topo_order))
+        topo_order.extend(remaining)
+
+        # Format source code for each block
+        parts = []
+        for block_id in topo_order:
+            if block_id in graph.proc_nodes:
+                proc_info = graph.proc_nodes[block_id]
+                if proc_info.source_location:
+                    source = self.resolver.read_block_source([proc_info.source_location])
+                    loc = proc_info.source_location
+                    filename = loc.file_path.split('/')[-1] if '/' in loc.file_path else loc.file_path
+                    parts.append(f"### PROC {block_id} ({filename}:{loc.start_line}-{loc.end_line}):")
+                    parts.append(f"```verilog\n{source}\n```\n")
+            elif block_id in graph.comb_nodes:
+                comb_info = graph.comb_nodes[block_id]
+                if comb_info.source_locations:
+                    source = self.resolver.read_block_source(comb_info.source_locations)
+                    loc_label = comb_info.location_info.get_display_label().replace("\\n", ", ")
+                    type_label = comb_info.comb_type
+                    assoc_info = f" (关联 {comb_info.associated_proc})" if comb_info.associated_proc else ""
+                    parts.append(f"### COMB {block_id} [{type_label}{assoc_info}] ({loc_label}):")
+                    parts.append(f"```verilog\n{source}\n```\n")
+
+        return "\n".join(parts) if parts else "无逻辑块源代码"
+
     def _format_graph_description(self, graph: SimplifiedGraph) -> str:
         """Format SimplifiedGraph as a text description for LLM.
 
@@ -166,29 +238,19 @@ class AgentDocGenerator:
                 else:
                     parts.append(f"- {comb_id} [{type_label}{assoc_info}{node_info}]")
 
-        # I/O ports
-        if graph.io_ports:
-            parts.append("\n## I/O 端口:")
-            port_items = [f"{label.strip()}" for port_id, label in sorted(graph.io_ports.items())]
-            parts.append("- " + ", ".join(port_items))
-
         # Submodules
         if graph.submodules:
             parts.append("\n## 子模块实例:")
             for submod_id, instance_name in sorted(graph.submodules.items()):
                 parts.append(f"- {instance_name}")
 
-        # Connectivity overview
+        # Connectivity (full edge list for topology understanding)
         if graph.edges:
             parts.append("\n## 连接关系:")
-            # Sample a few representative edges (to avoid overwhelming the LLM)
-            sample_edges = graph.edges[:10]
-            for src, dst in sample_edges:
+            for src, dst in graph.edges:
                 src_name = self._resolve_node_name_for_desc(src, graph)
                 dst_name = self._resolve_node_name_for_desc(dst, graph)
                 parts.append(f"- {src_name} → {dst_name}")
-            if len(graph.edges) > 10:
-                parts.append(f"- ... (共 {len(graph.edges)} 条连接)")
 
         return "\n".join(parts) if parts else "无简化结构信息"
 
@@ -222,10 +284,12 @@ class AgentDocGenerator:
         # Use SimplifiedGraph if available, otherwise fallback to source code
         if module_name in self._graphs:
             graph_description = self._format_graph_description(self._graphs[module_name])
+            block_sources = self._format_block_sources_topological(self._graphs[module_name], module_name)
         else:
             # Fallback: use truncated source code
             source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
             graph_description = f"源代码 (前 {self.max_source_lines} 行):\n```verilog\n{source_code}\n```"
+            block_sources = ""  # No block sources available
             if module_name not in self._graphs and self.schematic_gen:
                 print(f"  [WARN] Module {module_name}: using source fallback (no SimplifiedGraph)")
 
@@ -234,7 +298,8 @@ class AgentDocGenerator:
             ancestor_context=ancestor_context,
             port_summary=port_summary,
             children_summary=children_summary,
-            graph_description=graph_description
+            graph_description=graph_description,
+            block_sources=block_sources
         )
 
         log_path = self._module_log_path(module_name, "pass1_preview")
@@ -429,12 +494,9 @@ class AgentDocGenerator:
         graph = self._graphs[module_name]
 
         try:
-            # Step A: Block-level flowcharts (concurrent)
-            block_fragments = await self._generate_all_block_flowcharts(module_name, graph)
-
-            # Step B: Integrate into full module flowchart
+            # Generate full module behavioral flowchart in one shot
             full_mermaid = await self._generate_module_flowchart(
-                module_name, graph, block_fragments, children_summaries
+                module_name, graph, children_summaries
             )
             self._save_module_file(module_name, "flowchart.mmd", full_mermaid)
 
@@ -453,115 +515,27 @@ class AgentDocGenerator:
             self._processed_pass2_5.add(module_name)
             return ""
 
-    async def _generate_all_block_flowcharts(
-        self, module_name: str, graph: SimplifiedGraph
-    ) -> Dict[str, str]:
-        """Generate flowchart fragments for all PROC and COMB blocks concurrently."""
-        tasks = []
-
-        # Generate for all PROC blocks
-        for proc_id, proc_info in graph.proc_nodes.items():
-            tasks.append(self._generate_block_flowchart(
-                module_name, graph, proc_id, "PROC", proc_info
-            ))
-
-        # Generate for all COMB blocks
-        for comb_id, comb_info in graph.comb_nodes.items():
-            tasks.append(self._generate_block_flowchart(
-                module_name, graph, comb_id, comb_info.comb_type, comb_info
-            ))
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Filter exceptions and build result dict
-        block_fragments = {}
-        for result in results:
-            if isinstance(result, tuple) and len(result) == 2:
-                block_id, fragment = result
-                block_fragments[block_id] = fragment
-            elif isinstance(result, Exception):
-                print(f"  [WARN] Block flowchart generation failed: {result}")
-
-        return block_fragments
-
-    async def _generate_block_flowchart(
-        self, module_name: str, graph: SimplifiedGraph,
-        block_id: str, block_type: str, block_info: Any
-    ) -> tuple:
-        """Generate Mermaid flowchart fragment for a single block."""
-        # Read source code snippet
-        if hasattr(block_info, 'source_location') and block_info.source_location:
-            # PROC block
-            source_snippet = self.resolver.read_block_source([block_info.source_location])
-        elif hasattr(block_info, 'source_locations') and block_info.source_locations:
-            # COMB block
-            source_snippet = self.resolver.read_block_source(block_info.source_locations)
-        else:
-            source_snippet = "// Source location not available"
-
-        # Get connectivity info
-        upstream, downstream = self._get_connectivity_with_signals(block_id, graph)
-
-        # Format prompt
-        prompt = prompts.PASS2_5_BLOCK_PROMPT.format(
-            module_name=module_name,
-            block_id=block_id,
-            block_type=block_type,
-            upstream=upstream,
-            downstream=downstream,
-            source_snippet=source_snippet
-        )
-
-        # Call LLM
-        log_path = self._module_log_path(module_name, "pass2_5_blocks")
-        fragment = await self.llm.generate(prompts.PASS2_5_BLOCK_SYSTEM, prompt, log_path=log_path)
-
-        return (block_id, fragment)
-
-    def _get_connectivity_with_signals(self, block_id: str, graph: SimplifiedGraph) -> tuple:
-        """Extract upstream and downstream connectivity with signal names."""
-        upstream_ids = [src for src, dst in graph.edges if dst == block_id]
-        downstream_ids = [dst for src, dst in graph.edges if src == block_id]
-
-        upstream_names = [self._resolve_node_name_with_signal(node_id, graph) for node_id in upstream_ids]
-        downstream_names = [self._resolve_node_name_with_signal(node_id, graph) for node_id in downstream_ids]
-
-        upstream_str = ", ".join(upstream_names) if upstream_names else "无"
-        downstream_str = ", ".join(downstream_names) if downstream_names else "无"
-
-        return upstream_str, downstream_str
-
-    def _resolve_node_name_with_signal(self, node_id: str, graph: SimplifiedGraph) -> str:
-        """Resolve node ID to a name with signal info (for connectivity description)."""
-        if node_id in graph.proc_nodes:
-            return f"PROC({node_id})"
-        if node_id in graph.comb_nodes:
-            comb_info = graph.comb_nodes[node_id]
-            return f"{comb_info.comb_type}({node_id})"
-        if node_id in graph.io_ports:
-            port_label = graph.io_ports[node_id]
-            return f"端口: {port_label}"
-        if node_id in graph.submodules:
-            instance_name = graph.submodules[node_id]
-            return f"子模块: {instance_name}"
-        return node_id
-
     async def _generate_module_flowchart(
         self, module_name: str, graph: SimplifiedGraph,
-        block_fragments: Dict[str, str], children_summaries: Dict[str, str]
+        children_summaries: Dict[str, str]
     ) -> str:
-        """Integrate block fragments and child summaries into full module flowchart."""
-        # Format port list
-        port_lines = []
-        for port_id, label in sorted(graph.io_ports.items()):
-            port_lines.append(f"  {label}")
-        port_list = "\n".join(port_lines) if port_lines else "无端口"
+        """Generate full module behavioral flowchart in one shot.
 
-        # Format block fragments
-        fragment_lines = []
-        for block_id, fragment in sorted(block_fragments.items()):
-            fragment_lines.append(f"## Block {block_id}:\n{fragment}\n")
-        block_fragments_str = "\n".join(fragment_lines) if fragment_lines else "无 block 片段"
+        Uses the topological graph structure and block source code (same as PASS 1)
+        to produce a data/control-centric behavioral Mermaid flowchart.
+        """
+        # Get module preview from PASS 1
+        state = self.tracker.get_state(module_name)
+        preview = state.pass1_overview or "无预览"
+
+        # Port summary
+        port_summary = self.resolver.get_port_summary(module_name)
+
+        # Graph description (topology with metadata, same format as PASS 1)
+        graph_description = self._format_graph_description(graph)
+
+        # Block source code in topological order (same format as PASS 1)
+        block_sources = self._format_block_sources_topological(graph, module_name)
 
         # Format children summaries
         child_lines = []
@@ -569,23 +543,14 @@ class AgentDocGenerator:
             child_lines.append(f"## 子模块 {child_name}:\n{summary}\n")
         children_str = "\n".join(child_lines) if child_lines else "无子模块"
 
-        # Format edges summary
-        edge_lines = []
-        for src, dst in graph.edges[:20]:  # Sample first 20 edges
-            src_name = self._resolve_node_name_for_desc(src, graph)
-            dst_name = self._resolve_node_name_for_desc(dst, graph)
-            edge_lines.append(f"  {src_name} → {dst_name}")
-        if len(graph.edges) > 20:
-            edge_lines.append(f"  ... (共 {len(graph.edges)} 条连接)")
-        edges_summary = "\n".join(edge_lines) if edge_lines else "无连接"
-
         # Format prompt
         prompt = prompts.PASS2_5_MODULE_PROMPT.format(
             module_name=module_name,
-            port_list=port_list,
-            block_fragments=block_fragments_str,
-            children_summaries=children_str,
-            edges_summary=edges_summary
+            preview=preview,
+            port_summary=port_summary,
+            graph_description=graph_description,
+            block_sources=block_sources,
+            children_summaries=children_str
         )
 
         # Call LLM
@@ -596,10 +561,13 @@ class AgentDocGenerator:
 
     async def _generate_summary_flowchart(self, module_name: str, full_mermaid: str) -> str:
         """Generate simplified flowchart summary for parent module."""
+        state = self.tracker.get_state(module_name)
+        preview = state.pass1_overview or "无预览"
         port_summary = self.resolver.get_port_summary(module_name)
 
         prompt = prompts.PASS2_5_SUMMARY_PROMPT.format(
             module_name=module_name,
+            preview=preview,
             full_mermaid=full_mermaid,
             port_summary=port_summary
         )

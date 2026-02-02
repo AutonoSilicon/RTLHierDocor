@@ -1,11 +1,16 @@
 import os
+import asyncio
 import datetime
 from abc import ABC, abstractmethod
 from typing import List, Optional, Any
 
 class LLMBackend(ABC):
     """Abstract base class for LLM backends."""
-    
+
+    def __init__(self):
+        # Semaphore to limit concurrent LLM API calls (prevent rate limiting)
+        self._semaphore = asyncio.Semaphore(3)  # Max 3 concurrent requests
+
     @abstractmethod
     async def generate(self, system: str, prompt: str, log_path: str = "debug.md") -> str:
         """Generate text from the LLM.
@@ -47,8 +52,9 @@ class LLMBackend(ABC):
 
 class AnthropicBackend(LLMBackend):
     """Backend using Anthropic's Messages API."""
-    
+
     def __init__(self, model: str = "claude-3-5-sonnet-20241022", api_key: Optional[str] = None, base_url: Optional[str] = None, thinking: bool = False):
+        super().__init__()
         try:
             import anthropic
             self.client = anthropic.AsyncAnthropic(
@@ -65,32 +71,34 @@ class AnthropicBackend(LLMBackend):
         if not self.client:
             return "Error: Anthropic client not initialized."
 
-        try:
-            kwargs = {
-                "model": self.model,
-                "max_tokens": 4096 if not self.thinking else 16384,
-                "system": system,
-                "messages": [{"role": "user", "content": prompt}]
-            }
+        async with self._semaphore:
+            try:
+                kwargs = {
+                    "model": self.model,
+                    "max_tokens": 4096 if not self.thinking else 16384,
+                    "system": system,
+                    "messages": [{"role": "user", "content": prompt}]
+                }
 
-            if self.thinking:
-                # Support for Claude 3.7+ thinking mode
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8192}
-                # When thinking is enabled, max_tokens must be > budget_tokens
-                if kwargs["max_tokens"] <= 8192:
-                    kwargs["max_tokens"] = 16384
+                if self.thinking:
+                    # Support for Claude 3.7+ thinking mode
+                    kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8192}
+                    # When thinking is enabled, max_tokens must be > budget_tokens
+                    if kwargs["max_tokens"] <= 8192:
+                        kwargs["max_tokens"] = 16384
 
-            response = await self.client.messages.create(**kwargs)
-            result = response.content[0].text
-            self._log_call(system, prompt, self.model, log_path)
-            return result
-        except Exception as e:
-            return f"Error calling Anthropic API: {str(e)}"
+                response = await self.client.messages.create(**kwargs)
+                result = response.content[0].text
+                self._log_call(system, prompt, self.model, log_path)
+                return result
+            except Exception as e:
+                return f"Error calling Anthropic API: {str(e)}"
 
 class OpenAIBackend(LLMBackend):
     """Backend using OpenAI's Chat Completion API."""
-    
+
     def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None, base_url: Optional[str] = None, thinking: bool = False):
+        super().__init__()
         try:
             import openai
             self.client = openai.AsyncOpenAI(
@@ -107,26 +115,27 @@ class OpenAIBackend(LLMBackend):
         if not self.client:
             return "Error: OpenAI client not initialized."
 
-        try:
-            kwargs = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": prompt}
-                ]
-            }
+        async with self._semaphore:
+            try:
+                kwargs = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt}
+                    ]
+                }
 
-            # Common pattern for thinking/reasoning models in OpenAI-compatible APIs (e.g. DeepSeek)
-            if self.thinking:
-                # Some providers use specific parameters in extra_body
-                kwargs["extra_body"] = {"enable_thinking": True}
+                # Common pattern for thinking/reasoning models in OpenAI-compatible APIs (e.g. DeepSeek)
+                if self.thinking:
+                    # Some providers use specific parameters in extra_body
+                    kwargs["extra_body"] = {"enable_thinking": True}
 
-            response = await self.client.chat.completions.create(**kwargs)
-            result = response.choices[0].message.content
-            self._log_call(system, prompt, self.model, log_path)
-            return result
-        except Exception as e:
-            return f"Error calling OpenAI API: {str(e)}"
+                response = await self.client.chat.completions.create(**kwargs)
+                result = response.choices[0].message.content
+                self._log_call(system, prompt, self.model, log_path)
+                return result
+            except Exception as e:
+                return f"Error calling OpenAI API: {str(e)}"
 
 class AgentSDKBackend(LLMBackend):
     """Backend using Claude Agent SDK (claude-code-sdk).
@@ -144,6 +153,7 @@ class AgentSDKBackend(LLMBackend):
         max_turns: int = 10,
         allowed_tools: Optional[List[str]] = None
     ):
+        super().__init__()
         self.model = model
         self.cwd = cwd or os.getcwd()
         self.max_turns = max_turns
@@ -163,32 +173,33 @@ class AgentSDKBackend(LLMBackend):
 
         from claude_code_sdk import query, ClaudeCodeOptions
 
-        try:
-            options = ClaudeCodeOptions(
-                system_prompt=system,
-                allowed_tools=self.allowed_tools,
-                max_turns=self.max_turns,
-                cwd=self.cwd,
-                model=self.model,
-                permission_mode="acceptEdits",
-            )
+        async with self._semaphore:
+            try:
+                options = ClaudeCodeOptions(
+                    system_prompt=system,
+                    allowed_tools=self.allowed_tools,
+                    max_turns=self.max_turns,
+                    cwd=self.cwd,
+                    model=self.model,
+                    permission_mode="acceptEdits",
+                )
 
-            text_parts = []
-            async for message in query(
-                prompt=prompt,
-                options=options
-            ):
-                # message types: AssistantMessage, ResultMessage, etc.
-                if hasattr(message, 'content') and isinstance(message.content, list):
-                    for block in message.content:
-                        if hasattr(block, 'text'):
-                            text_parts.append(block.text)
+                text_parts = []
+                async for message in query(
+                    prompt=prompt,
+                    options=options
+                ):
+                    # message types: AssistantMessage, ResultMessage, etc.
+                    if hasattr(message, 'content') and isinstance(message.content, list):
+                        for block in message.content:
+                            if hasattr(block, 'text'):
+                                text_parts.append(block.text)
 
-            result = "\n".join(text_parts)
-            self._log_call(system, prompt, f"agent_sdk/{self.model}", log_path)
-            return result if result else "Error: Agent SDK returned empty response."
-        except Exception as e:
-            return f"Error calling Claude Agent SDK: {str(e)}"
+                result = "\n".join(text_parts)
+                self._log_call(system, prompt, f"agent_sdk/{self.model}", log_path)
+                return result if result else "Error: Agent SDK returned empty response."
+            except Exception as e:
+                return f"Error calling Claude Agent SDK: {str(e)}"
 
 def get_llm_backend(config: Any) -> LLMBackend:
     """Factory to get the configured LLM backend."""
