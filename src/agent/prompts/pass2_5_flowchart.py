@@ -15,13 +15,20 @@ PASS2_5_MODULE_SYSTEM = """你是硬件微架构文档专家。你的任务是�
    - 一个 PROC 块如果实现单一功能，对应 1 个行为节点即可；
    - 一个 PROC 块如果包含状态机或多路选择，可展开为判断 + 多个行为分支；
    - 简单的赋值 COMB 块可合并到相邻的行为节点中，不必独立出现。
-4. **信号标注**：所有节点和边都必须标注具体的 RTL 信号名，信号名必须来自源代码，不可编造或用中文描述替代。
-   - **边标注**：每条边使用 `-->|"信号名"|` 标注传输的数据信号或控制条件信号。
-   - **节点标注**：节点文字中用括号附注该节点关联的核心信号，
-     如 `alloc_rob["分配 ROB 表项<br/>(rob_entry_*, rob_wen)"]`。
+   - 输入和输出端口要保证全面覆盖，但不必逐一列举每个端口，同功能用途的端口信号组可以合并为一个块。
+4. **信号标注与 BLOCK ID 映射**：所有节点和边都必须标注具体的 RTL 信号名和对应的 BLOCK 块 ID。
+   - **边标注**：每条边必须严格遵循 Mermaid 语法：`A -->|"信号名"| B`
+     * 标注传输的数据信号或控制条件信号
+   - **节点标注**：节点文字中必须包含两部分信息：
+     * **功能描述**：数据做了什么（如"分配 ROB 表项"）
+     * **BLOCK ID + 核心信号**：用括号附注该节点对应的逻辑块 ID 和核心信号
+     * 格式示例：`alloc_rob["分配 ROB 表项<br/>[PROC_2] (rob_entry_*, rob_wen)"]`
+     * 如果一个节点涉及多个 BLOCK，标注主要的 BLOCK ID 即可
+     * BLOCK ID 必须来自"电路拓扑结构"章节中列出的 PROC_N、COMB_N、IN_COMB_N、OUT_COMB_N
    - **信号分组**：同一前缀的多个信号用正则通配表示，避免逐一罗列。
-     如 `ifu_ibuf_inst*` 表示 `ifu_ibuf_inst0~inst3`，`dp_ex1_src[0-2]` 表示 `dp_ex1_src0, src1, src2`。
-   - 多个信号可逗号分隔（如 `-->|"valid, ready"|`）。
+     如 `ifu_ibuf_inst*` 表示 `ifu_ibuf_inst0~inst3`，`dp_ex1_src[0-2]` 表示 `dp_ex1_src0, src1, src2`
+   - 多个信号可逗号分隔（如 `-->|"valid, ready"| next_node`）
+   - **I/O 端口节点**：输入/输出端口节点不需要标注 BLOCK ID，只需标注信号名
 5. **量化精确**：从代码中提取具体的结构参数，在节点描述中显式标注，不可模糊化。包括：
    - **通道/路数**：并行处理通道数（如"2路取指"、"4路发射仲裁"、"双端口读取"）
    - **表项/深度**：缓冲区、表、FIFO 的容量（如"8表项 ROB 分配"、"64项 BTB 查询"）
@@ -49,30 +56,53 @@ PASS2_5_MODULE_SYSTEM = """你是硬件微架构文档专家。你的任务是�
 
 ### Part 1: 行为流程图（必须）
 
+**语法规范（必须严格遵守）：**
+- 边的连接必须使用完整语法：`源节点 -->|"标签"| 目标节点`
+- 不允许：`源节点 -->|"标签" 目标节点`（缺少第二个 `|`）
+- 不允许：`源节点 --> 目标节点|"标签"`（标签位置错误）
+
+**示例结构（注意 BLOCK ID 标注）：**
 ```mermaid
 flowchart TD
     subgraph inputs["输入"]
-        in_xxx(["信号组描述"])
+        in_req(["请求输入信号<br/>(req_valid, req_addr, req_data)"])
     end
 
-    subgraph 功能阶段名["阶段描述"]
-        节点定义...
+    subgraph 仲裁与分配["仲裁与分配阶段"]
+        arb["优先级仲裁<br/>[PROC_0] (arb_grant*, arb_req*)"]
+        alloc["分配缓冲表项<br/>[PROC_1] (buf_entry*, buf_wen)"]
+        check{"资源可用检查<br/>[COMB_0] (buf_full)"}
     end
 
     subgraph children["子模块"]
-        subgraph sub_xxx["实例名: 模块类型"]
-            精简流程...
+        subgraph fifo_inst["u_fifo: ct_fifo"]
+            fifo_push["FIFO 压入"]
+            fifo_pop["FIFO 弹出"]
         end
     end
 
     subgraph outputs["输出"]
-        out_xxx(["信号组描述"])
+        out_resp(["响应输出信号<br/>(resp_valid, resp_data)"])
     end
 
-    连接边...
+    %% 边连接示例 - 必须遵循语法
+    in_req -->|"req_valid, req_addr"| arb
+    arb -->|"grant"| check
+    check -->|"!buf_full"| alloc
+    check -->|"buf_full"| in_req
+    alloc -->|"entry_idx, data"| fifo_push
+    fifo_pop -->|"pop_data"| out_resp
 
-    style 节点 fill:#颜色
+    style arb fill:#e1f5ff
+    style alloc fill:#e1f5ff
+    style check fill:#fff4e1
 ```
+
+**关键点**：
+- 每个功能节点都必须标注 `[BLOCK_ID]`，如 `[PROC_0]`、`[COMB_0]`
+- BLOCK ID 必须与拓扑结构中的实际 ID 对应
+- I/O 端口节点（inputs/outputs）不需要 BLOCK ID
+- 子模块内部流程可以不标注 BLOCK ID（因为属于子模块的实现细节）
 
 ### Part 2: 状态机图（仅当存在 FSM 时）
 
@@ -96,6 +126,11 @@ stateDiagram-v2
 
 ## 具体规则
 
+- **BLOCK ID 映射（强制要求）**：
+  * 每个代表逻辑处理的节点都必须在节点文字中标注对应的 BLOCK ID（格式：`[PROC_N]` 或 `[COMB_N]`）
+  * BLOCK ID 必须来自"电路拓扑结构"章节中列出的实际块 ID
+  * 这使得读者可以从流程图直接定位到具体的 RTL 实现代码
+  * I/O 端口节点和子模块实例节点不需要标注 BLOCK ID
 - I/O 端口：按功能分组（如"时钟与复位"、"数据输入"、"控制输出"），不要逐个列举所有端口
 - 子模块：用 subgraph 包裹。你会收到子模块的完整流程图，自行决定如何概括以合理适配本级抽象层次——
   可用少量节点提炼其核心数据通路，也可保留关键分支，尽可能不要原样复制完整流程图（除非其规模较小）
@@ -134,4 +169,15 @@ PASS2_5_MODULE_PROMPT = """
 1. 不要直接翻译代码结构，而是提炼出数据处理的功能行为和控制判断逻辑。
 2. 复杂块的功能分析文档可帮助理解，但最终流程图应基于完整源代码和拓扑结构。
 3. 如果源代码中存在显式 FSM（case 状态机），请在 flowchart 之后额外输出 stateDiagram-v2。
+4. **【强制要求】每个功能节点必须标注对应的 BLOCK ID**：
+   - 格式：`node_id["功能描述<br/>[BLOCK_ID] (信号名)"]`
+   - 示例：`arbitrate["4路仲裁选择<br/>[PROC_0] (arb_grant*, arb_req*)"]`
+   - BLOCK ID 从"电路拓扑结构"章节获取（如 PROC_0, COMB_1, IN_COMB_0, OUT_COMB_0）
+   - 这使得读者可以从流程图直接定位到 RTL 源代码实现
+
+**关键语法要求（必须严格遵守，否则图表无法渲染）：**
+- Mermaid 边连接必须使用完整格式：`A -->|"label"| B`
+- 禁止使用不完整格式：`A -->|"label" B`（这会导致解析错误）
+- 每条带标签的边都必须有前后两个竖线 `|...|`
+- 节点标注必须包含 BLOCK ID：`node["描述<br/>[BLOCK_ID] (信号)"]`
 """

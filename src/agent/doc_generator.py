@@ -144,18 +144,19 @@ class AgentDocGenerator:
             if node.module_name not in self._processed_pass1:
                 return
 
-        module_name = node.module_name
-
+        # Process current module (only if not already done in this session)
         if module_name not in self._processed_pass1:
             if not self.tracker.is_pass1_done(module_name):
                 await self._generate_module_preview(node, ancestor_context)
+            else:
+                print(f"  [Pass 1] Module {module_name} already has preview (skipping LLM)")
             self._processed_pass1.add(module_name)
 
         # Get current preview to pass down (stored as pass1_overview internally)
         state = self.tracker.get_state(module_name)
         current_preview = state.pass1_overview or ""
         
-        # For children, pass current preview as context
+        # Always recurse to children (to ensure they are processed with current context)
         for child in node.children.values():
             await self._run_pass1(child, current_preview)
 
@@ -175,11 +176,27 @@ class AgentDocGenerator:
         if self.max_modules > 0 and module_name not in self._processed_pass1:
             return
 
-        # Check if already done
+        # 1. Check if already processed in this session (before recursion)
+        if module_name in getattr(self, '_processed_pass1_5', set()):
+            # Already processed, just recurse children (which should also be cached)
+            for child in node.children.values():
+                await self._run_pass1_5(child)
+            return
+        
+        # Initialize the set if not already done
+        if not hasattr(self, '_processed_pass1_5'):
+            self._processed_pass1_5 = set()
+
+        # 2. Check if already done in persistent storage
         if self.tracker.is_pass1_5_done(module_name):
-            print(f"  [Pass 1.5] Module {module_name} already has block docs")
+            self._processed_pass1_5.add(module_name)
+            print(f"  [Pass 1.5] Module {module_name} already has block docs (skipping LLM)")
+            # Still need to recurse children
+            for child in node.children.values():
+                await self._run_pass1_5(child)
             return
 
+        # 3. Generate (only if not already done)
         print(f"  [Pass 1.5] Generating block-level docs for {module_name}...")
 
         # Generate block-level docs if SimplifiedGraph is available
@@ -226,6 +243,7 @@ class AgentDocGenerator:
 
         # Update tracker
         self.tracker.update_pass1_5(module_name, "done")
+        self._processed_pass1_5.add(module_name)
 
         # Recurse to children
         for child in node.children.values():
@@ -374,6 +392,54 @@ class AgentDocGenerator:
             return graph.submodules[node_id]
         return node_id
 
+    def _format_block_summaries(self, module_name: str) -> str:
+        """Format block summaries (high-level overview without full source code).
+
+        Reads the block_docs.json file generated in Pass 1.5 and provides
+        only the first 3 lines of each block's documentation as a summary.
+        LLM can use read_block_source tool to get detailed implementation if needed.
+
+        Args:
+            module_name: Module name
+
+        Returns:
+            Formatted block summaries
+        """
+        block_docs_file = self.modules_dir / module_name / "block_docs.json"
+
+        if not block_docs_file.exists():
+            return "无逻辑块摘要信息（可使用 read_block_source 工具查看详细源码）"
+
+        try:
+            import json
+            with open(block_docs_file, 'r', encoding='utf-8') as f:
+                block_docs = json.load(f)
+
+            if not block_docs:
+                return "无逻辑块摘要信息"
+
+            parts = []
+            for block_id, doc_text in sorted(block_docs.items()):
+                # Extract first 3 lines as summary
+                lines = doc_text.split('\n')
+                summary_lines = [line for line in lines[:3] if line.strip()]
+                if not summary_lines:
+                    summary_lines = ["功能描述未生成"]
+
+                summary = '\n'.join(summary_lines)
+                parts.append(f"### {block_id}:")
+                parts.append(summary)
+                if len(lines) > 3:
+                    parts.append("...")
+                parts.append("")  # Empty line
+
+            parts.append("\n**说明**: 以上为各逻辑块的功能摘要。如需查看具体实现细节，可使用 `read_block_source(module_name=\"{}\", block_id=\"<BLOCK_ID>\")` 工具。".format(module_name))
+
+            return "\n".join(parts)
+        except Exception as e:
+            print(f"[WARN] Failed to read block summaries for {module_name}: {e}")
+            return f"读取逻辑块摘要失败（可使用 read_block_source 工具查看源码）"
+
     async def _generate_module_preview(self, node: Any, ancestor_context: str):
         module_name = node.module_name
         print(f"  [Pass 1] Generating preview for {module_name}...")
@@ -472,9 +538,20 @@ class AgentDocGenerator:
         preview = state.pass1_overview or ""
         port_summary = self.resolver.get_port_summary(module_name)
 
-        # Read block docs from file (generated in Pass 1.5)
-        block_docs_file = self.modules_dir / module_name / "block_docs.md"
-        block_descriptions = block_docs_file.read_text() if block_docs_file.exists() else "无逻辑块文档"
+        # Get graph description (topology) if available
+        graph_description = ""
+        if module_name in self._graphs:
+            graph = self._graphs[module_name]
+            graph_description = self._format_graph_description(graph)
+            num_blocks = len(graph.proc_nodes) + len(graph.comb_nodes)
+            print(f"    [Context] Topology: {len(graph.proc_nodes)} PROC + {len(graph.comb_nodes)} COMB blocks")
+        else:
+            graph_description = "无拓扑结构信息"
+            print(f"    [Context] No topology available")
+
+        # Generate block summaries (high-level, without full source code)
+        block_summaries = self._format_block_summaries(module_name)
+        print(f"    [Context] Block summaries: using 3-line previews (LLM can call read_block_source for details)")
 
         # Get Pass 2.1 and Pass 2.5 results from tracker
         design_highlights = state.pass2_1_highlights or "无设计亮点分析"
@@ -485,7 +562,8 @@ class AgentDocGenerator:
                 module_name=module_name,
                 preview=preview,
                 port_summary=port_summary,
-                block_descriptions=block_descriptions,
+                graph_description=graph_description,
+                block_summaries=block_summaries,
                 design_highlights=design_highlights,
                 flowchart=flowchart
             )
@@ -497,7 +575,8 @@ class AgentDocGenerator:
                 module_name=module_name,
                 preview=preview,
                 children_descriptions=children_summary,
-                block_descriptions=block_descriptions,
+                graph_description=graph_description,
+                block_summaries=block_summaries,
                 design_highlights=design_highlights,
                 flowchart=flowchart
             )
@@ -573,30 +652,32 @@ class AgentDocGenerator:
         if self.max_modules > 0 and module_name not in self._processed_pass1:
             return ""
 
-        # 1. Recurse children first (bottom-up)
+        # 1. Recurse children first (ALWAYS, even if this module is already done)
         children_highlights = {}
         for child in node.children.values():
             highlights = await self._run_pass2_1(child)
             if highlights:
                 children_highlights[child.module_name] = highlights
 
-        # 2. Already done?
+        # 2. Check if already processed in this session
         if module_name in self._processed_pass2_1:
             state = self.tracker.get_state(module_name)
             return state.pass2_1_highlights or ""
 
+        # 3. Check if already done in persistent storage
         if self.tracker.is_pass2_1_done(module_name):
             self._processed_pass2_1.add(module_name)
             state = self.tracker.get_state(module_name)
+            print(f"  [Pass 2.1] Module {module_name} already has design highlights (skipping LLM)")
             return state.pass2_1_highlights or ""
 
-        # 3. Check if we have necessary context (need Pass 1.5 block docs)
+        # 4. Check if we have necessary context (need Pass 1.5 block docs)
         if not self.tracker.is_pass1_5_done(module_name):
             print(f"  [Pass 2.1] Skipping {module_name} (Pass 1.5 not completed)")
             self._processed_pass2_1.add(module_name)
             return ""
 
-        # 4. Generate design highlights
+        # 5. Generate design highlights
         print(f"  [Pass 2.1] Analyzing design highlights for {module_name}...")
         
         try:
@@ -694,13 +775,30 @@ class AgentDocGenerator:
             children_highlights=children_highlights_str
         )
         
-        # Call LLM
+        # Call LLM (disable tools if no logical blocks exist)
         log_path = self._module_log_path(module_name, "pass2_1_highlights")
-        highlights, token_stats = await self.llm.generate(
-            PASS2_1_SYSTEM, 
-            prompt, 
-            log_path=log_path
+        
+        # Check if module has any logical blocks (for tool availability)
+        has_logical_blocks = module_name in self._graphs and (
+            self._graphs[module_name].proc_nodes or self._graphs[module_name].comb_nodes
         )
+        
+        if not has_logical_blocks and hasattr(self.llm, 'set_context'):
+            # Temporarily disable tools by setting context without graphs
+            self.llm.set_context(resolver=None, graphs=None)
+            highlights, token_stats = await self.llm.generate(
+                PASS2_1_SYSTEM, 
+                prompt, 
+                log_path=log_path
+            )
+            # Restore context with graphs
+            self.llm.set_context(resolver=self.resolver, graphs=self._graphs)
+        else:
+            highlights, token_stats = await self.llm.generate(
+                PASS2_1_SYSTEM, 
+                prompt, 
+                log_path=log_path
+            )
         
         # Record token stats
         if module_name not in self._token_stats:
@@ -729,25 +827,27 @@ class AgentDocGenerator:
         if self.max_modules > 0 and module_name not in self._processed_pass1:
             return ""
 
-        # 1. Recurse children first
+        # 1. Recurse children first (ALWAYS, even if this module is already done)
         children_summaries = {}
         for child in node.children.values():
             summary = await self._run_pass2_5(child)
             if summary:
                 children_summaries[child.module_name] = summary
 
-        # 2. Already done?
+        # 2. Check if already processed in this session
         if module_name in self._processed_pass2_5:
             return self._mermaid_summaries.get(module_name, "")
 
+        # 3. Check if already done in persistent storage
         if self.tracker.is_pass2_5_done(module_name):
             self._processed_pass2_5.add(module_name)
             state = self.tracker.get_state(module_name)
             if state.pass2_5_mermaid:
                 self._mermaid_summaries[module_name] = state.pass2_5_mermaid
+                print(f"  [Pass 2.5] Module {module_name} already has flowchart (skipping LLM)")
             return state.pass2_5_mermaid or ""
 
-        # 3. Generate
+        # 4. Generate (only if not already done)
         if module_name not in self._graphs:
             print(f"  [Pass 2.5] Skipping {module_name} (no SimplifiedGraph)")
             self._processed_pass2_5.add(module_name)
@@ -758,20 +858,20 @@ class AgentDocGenerator:
 
         try:
             # Generate full module behavioral flowchart in one shot
-            full_mermaid = await self._generate_module_flowchart(
+            # (returns only the mermaid code, other content goes to debug log)
+            mermaid_code = await self._generate_module_flowchart(
                 module_name, graph, children_summaries
             )
-            self._save_module_file(module_name, "flowchart.mmd", full_mermaid)
+            
+            # Store mermaid for summary (parent module uses it)
+            self._mermaid_summaries[module_name] = mermaid_code
 
-            # Use full mermaid as summary — parent module decides how to summarize
-            self._mermaid_summaries[module_name] = full_mermaid
-
-            # Update tracker
-            self.tracker.update_pass2_5(module_name, full_mermaid)
+            # Update tracker with mermaid code
+            self.tracker.update_pass2_5(module_name, mermaid_code)
 
             self._processed_pass2_5.add(module_name)
             self._save_metadata(node)
-            return full_mermaid
+            return mermaid_code
 
         except Exception as e:
             print(f"  [ERROR] [Pass 2.5] Failed to generate flowchart for {module_name}: {e}")
@@ -826,9 +926,40 @@ class AgentDocGenerator:
             children_summaries=children_str
         )
 
-        # Call LLM
+        # Check if module has any logical blocks (for tool availability)
+        has_logical_blocks = bool(graph.proc_nodes or graph.comb_nodes)
+        
+        # Call LLM (disable tools if no logical blocks exist)
         log_path = self._module_log_path(module_name, "pass2_5_module")
-        full_mermaid, token_stats = await self.llm.generate(PASS2_5_MODULE_SYSTEM, prompt, log_path=log_path)
+        if not has_logical_blocks and hasattr(self.llm, 'set_context'):
+            # Temporarily disable tools by setting context without graphs
+            self.llm.set_context(resolver=None, graphs=None)
+            full_output, token_stats = await self.llm.generate(PASS2_5_MODULE_SYSTEM, prompt, log_path=log_path)
+            # Restore context with graphs
+            self.llm.set_context(resolver=self.resolver, graphs=self._graphs)
+        else:
+            full_output, token_stats = await self.llm.generate(PASS2_5_MODULE_SYSTEM, prompt, log_path=log_path)
+
+        # Extract mermaid diagram and other content
+        from agent.llm_backend import LLMBackend
+        mermaid_code, other_content = LLMBackend._extract_mermaid_and_content(full_output)
+        
+        # Save mermaid diagram to flowchart.mmd
+        if mermaid_code:
+            self._save_module_file(module_name, "flowchart.mmd", mermaid_code)
+        
+        # Append other content (text, thinking) to debug log
+        if other_content:
+            try:
+                debug_file_path = str(self.modules_dir / module_name / "debug_pass2_5_module.md")
+                with open(debug_file_path, 'a', encoding='utf-8') as f:
+                    f.write("\n\n" + "="*80 + "\n")
+                    f.write("## Pass 2.5 Additional Content (文本说明与思考过程)\n")
+                    f.write("="*80 + "\n\n")
+                    f.write(other_content)
+                    f.write("\n\n")
+            except Exception as e:
+                print(f"  [WARN] Failed to append content to debug log: {e}")
 
         # Record token stats
         if module_name not in self._token_stats:
@@ -838,5 +969,5 @@ class AgentDocGenerator:
             **token_stats
         })
 
-        return full_mermaid
+        return mermaid_code
 

@@ -11,6 +11,105 @@ class LLMBackend(ABC):
         # Semaphore to limit concurrent LLM API calls (prevent rate limiting)
         self._semaphore = asyncio.Semaphore(3)  # Max 3 concurrent requests
 
+    @staticmethod
+    def _extract_mermaid_and_content(text: str) -> tuple[str, str]:
+        """Extract mermaid diagram and remaining content from LLM response.
+        
+        Separates the mermaid code block from other content (text, thinking, etc).
+        
+        Args:
+            text: Raw text from LLM
+            
+        Returns:
+            Tuple of (mermaid_code, other_content)
+                - mermaid_code: Pure mermaid diagram without ```mermaid tags
+                - other_content: Everything else (text, thinking, etc)
+        """
+        if not text:
+            return "", ""
+        
+        import re
+        
+        # Extract mermaid code block (with or without language tag)
+        mermaid_pattern = r'```mermaid\s*(.*?)\s*```'
+        mermaid_matches = re.findall(mermaid_pattern, text, flags=re.DOTALL)
+        
+        if mermaid_matches:
+            # Use the first mermaid block if multiple exist
+            mermaid_code = mermaid_matches[0].strip()
+            # Remove all mermaid blocks from original text
+            other_content = re.sub(mermaid_pattern, '', text, flags=re.DOTALL).strip()
+        else:
+            mermaid_code = ""
+            other_content = text.strip()
+        
+        return mermaid_code, other_content
+
+    @staticmethod
+        """Extract thinking process and clean output from LLM response.
+        
+        Some models (DeepSeek, Claude with thinking) include thinking process
+        in <think> tags. This function extracts them separately.
+        
+        Args:
+            text: Raw text from LLM
+            
+        Returns:
+            Tuple of (clean_output, thinking_content)
+        """
+        if not text:
+            return text, ""
+        
+        import re
+        
+        # Extract all thinking blocks
+        thinking_blocks = re.findall(r'<think>(.*?)</think>', text, flags=re.DOTALL)
+        thinking_content = '\n\n---\n\n'.join(thinking_blocks) if thinking_blocks else ""
+        
+        # Remove thinking tags from output
+        cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        # Also remove any orphaned closing tags
+        cleaned = re.sub(r'</think>', '', cleaned)
+        # Clean up excessive whitespace left by tag removal
+        cleaned = re.sub(r'\n\n\n+', '\n\n', cleaned)
+        
+        return cleaned.strip(), thinking_content.strip()
+
+    @staticmethod
+    def _clean_thinking_tags(text: str) -> str:
+        """Remove <think>...</think> tags from LLM output.
+        
+        Deprecated: Use _extract_thinking_content instead to preserve thinking.
+        """
+        if not text:
+            return text
+        
+        import re
+        cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        cleaned = re.sub(r'</think>', '', cleaned)
+        cleaned = re.sub(r'\n\n\n+', '\n\n', cleaned)
+        return cleaned.strip()
+
+    def _append_thinking_to_log(self, thinking_content: str, log_path: str):
+        """Append thinking content to debug log file.
+        
+        Args:
+            thinking_content: Extracted thinking process text
+            log_path: Path to the debug log file
+        """
+        if not thinking_content:
+            return
+        
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write("\n\n" + "="*80 + "\n")
+                f.write("## Thinking Process (推理过程)\n")
+                f.write("="*80 + "\n\n")
+                f.write(thinking_content)
+                f.write("\n\n")
+        except Exception as e:
+            print(f"[WARN] Failed to append thinking to log: {e}")
+
     @abstractmethod
     async def generate(self, system: str, prompt: str, log_path: str = "debug.md") -> Tuple[str, Dict[str, int]]:
         """Generate text from the LLM.
@@ -99,6 +198,13 @@ class AnthropicBackend(LLMBackend):
                 response = await self.client.messages.create(**kwargs)
                 result = response.content[0].text
                 
+                # Extract and save thinking process (if thinking mode was used)
+                if result and use_thinking:
+                    clean_result, thinking_content = self._extract_thinking_content(result)
+                    if thinking_content:
+                        self._append_thinking_to_log(thinking_content, log_path)
+                    result = clean_result
+                
                 # Extract token usage
                 token_stats = {
                     "input_tokens": response.usage.input_tokens if hasattr(response, 'usage') else 0,
@@ -173,49 +279,71 @@ class OpenAIBackend(LLMBackend):
 
     def _execute_tool(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
         """Execute a tool call and return the result."""
+        print(f"    [TOOL CALL] {tool_name}({', '.join(f'{k}={repr(v)}' for k, v in tool_args.items())})")
+
         if tool_name == "read_block_source":
-            return self._read_block_source(
+            result = self._read_block_source(
                 tool_args.get("module_name", ""),
                 tool_args.get("block_id", "")
             )
+            # Log result summary (first line only to avoid spam)
+            first_line = result.split('\n')[0] if result else ""
+            if result.startswith("Error:"):
+                print(f"    [TOOL RESULT] ❌ {first_line}")
+            else:
+                source_lines = result.count('\n')
+                print(f"    [TOOL RESULT] ✓ {first_line} ({source_lines} lines)")
+            return result
         else:
+            print(f"    [TOOL RESULT] ❌ Unknown tool: {tool_name}")
             return f"Unknown tool: {tool_name}"
 
     def _read_block_source(self, module_name: str, block_id: str) -> str:
         """Read source code for a specific PROC or COMB block.
-        
+
         Args:
             module_name: Name of the module
-            block_id: ID of the block (e.g., 'PROC_0', 'COMB_1')
-            
+            block_id: ID of the block (e.g., 'PROC_0', 'COMB_1', 'p0', 'c1')
+
         Returns:
             Source code string or error message
         """
         if not self.resolver:
             return "Error: SourceResolver not available"
-        
+
         if not module_name:
             return "Error: module_name is required"
-        
+
         if not block_id:
             return "Error: block_id is required"
-        
+
         # Get the SimplifiedGraph for this module
         graph = self.graphs.get(module_name)
         if not graph:
             return f"Error: No graph found for module '{module_name}'"
-        
+
+        # Normalize block_id: support both 'PROC_11' and 'p11' formats
+        normalized_id = block_id
+        if block_id.startswith("PROC_"):
+            normalized_id = "p" + block_id[5:]  # PROC_11 -> p11
+        elif block_id.startswith("COMB_"):
+            normalized_id = "c" + block_id[5:]  # COMB_11 -> c11
+        elif block_id.startswith("IN_COMB_"):
+            normalized_id = "c" + block_id[8:]  # IN_COMB_11 -> c11
+        elif block_id.startswith("OUT_COMB_"):
+            normalized_id = "c" + block_id[9:]  # OUT_COMB_11 -> c11
+
         # Find the block in PROC or COMB nodes
-        if block_id in graph.proc_nodes:
-            proc_info = graph.proc_nodes[block_id]
+        if normalized_id in graph.proc_nodes:
+            proc_info = graph.proc_nodes[normalized_id]
             if proc_info.source_location:
                 source = self.resolver.read_block_source([proc_info.source_location])
                 return f"# PROC Block: {block_id}\n{source}"
             else:
                 return f"Error: No source location available for PROC block '{block_id}'"
         
-        elif block_id in graph.comb_nodes:
-            comb_info = graph.comb_nodes[block_id]
+        elif normalized_id in graph.comb_nodes:
+            comb_info = graph.comb_nodes[normalized_id]
             if comb_info.source_locations:
                 source = self.resolver.read_block_source(comb_info.source_locations)
                 return f"# COMB Block: {block_id} ({comb_info.comb_type})\n{source}"
@@ -281,14 +409,17 @@ class OpenAIBackend(LLMBackend):
                     
                     # Check if there are tool calls to process
                     if hasattr(assistant_message, 'tool_calls') and assistant_message.tool_calls:
+                        num_calls = len(assistant_message.tool_calls)
+                        print(f"    [LLM] Requesting {num_calls} tool call(s)...")
+
                         # Process each tool call
                         for tool_call in assistant_message.tool_calls:
                             function_name = tool_call.function.name
                             function_args = json.loads(tool_call.function.arguments)
-                            
+
                             # Execute the tool
                             tool_result = self._execute_tool(function_name, function_args)
-                            
+
                             # Add tool response to messages
                             messages.append({
                                 "role": "tool",
@@ -296,12 +427,20 @@ class OpenAIBackend(LLMBackend):
                                 "name": function_name,
                                 "content": tool_result
                             })
-                        
+
+                        print(f"    [LLM] Continuing generation with tool results...")
                         # Continue loop to get next response from LLM
                         continue
                     else:
                         # No more tool calls, we have the final response
                         result = assistant_message.content
+                        
+                        # Extract and save thinking process (for DeepSeek and other thinking models)
+                        if result and use_thinking:
+                            clean_result, thinking_content = self._extract_thinking_content(result)
+                            if thinking_content:
+                                self._append_thinking_to_log(thinking_content, log_path)
+                            result = clean_result
                         
                         # Extract token usage from final response
                         token_stats = {

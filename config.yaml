@@ -38,12 +38,12 @@ verbose: true
 agent:
   backend: "openai"              # anthropic | openai | agent_sdk
   model: "glm-4.7"
-  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"                      # Custom LLM API base URL if needed
+  base_url: "https://open.bigmodel.cn/api/paas/v4/"                      # Custom LLM API base URL if needed
   thinking: true                   # Enable thinking/reasoning mode
   skip_modules:                     # Modules matching these patterns will be skipped
     - "ct_had*"
-  max_source_lines: 5000            # Truncate source files after N lines
+  max_source_lines: 10000            # Truncate source files after N lines
   resume: true                      # Resume from last checkpoint
   code_base_path: "$CODE_BASE_PATH" # Base path for source file resolution
   max_modules: 0                    # 0 = all, N = limit for debugging
-  api_key: "sk-37663dd917e64c14bb73aa2b0ccb44a6"    # Or use ANTHROPIC_API_KEY env var
+  api_key: "941daa47276a40998a357e4485b03581.cjwMaOjjocv3xJXa"    # Or use ANTHROPIC_API_KEY env var
