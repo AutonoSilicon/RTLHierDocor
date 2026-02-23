@@ -321,56 +321,129 @@ class AgentDocGenerator:
 
         return "\n".join(parts) if parts else "无逻辑块源代码"
 
-    def _format_graph_description(self, graph: SimplifiedGraph) -> str:
+    def _format_graph_description(self, graph: SimplifiedGraph, include_source: bool = True) -> str:
         """Format SimplifiedGraph as a text description for LLM.
 
         Args:
             graph: SimplifiedGraph object
+            include_source: Whether to include source code for each block
 
         Returns:
-            Formatted text description
+            Formatted text description with connectivity and source code embedded in each block
         """
+        # Build adjacency lists for quick lookup
+        predecessors: Dict[str, List[str]] = {}  # node -> list of predecessors
+        successors: Dict[str, List[str]] = {}    # node -> list of successors
+        
+        all_nodes = set(graph.proc_nodes.keys()) | set(graph.comb_nodes.keys()) | \
+                    set(graph.io_ports.keys()) | set(graph.submodules.keys())
+        
+        for node in all_nodes:
+            predecessors[node] = []
+            successors[node] = []
+        
+        for src, dst in graph.edges:
+            if src in all_nodes and dst in all_nodes:
+                successors[src].append(dst)
+                predecessors[dst].append(src)
+        
+        def format_conn_list(node_ids: List[str], graph: SimplifiedGraph) -> str:
+            """Format a list of connected node IDs as readable names."""
+            if not node_ids:
+                return "None"
+            names = []
+            for node_id in node_ids:
+                name = self._resolve_node_name_for_desc(node_id, graph)
+                # Add type hint for clarity
+                if node_id in graph.proc_nodes:
+                    name = f"{name}(PROC)"
+                elif node_id in graph.comb_nodes:
+                    comb_type = graph.comb_nodes[node_id].comb_type
+                    name = f"{name}({comb_type})"
+                elif node_id in graph.submodules:
+                    name = f"{name}(submodule)"
+                elif node_id in graph.io_ports:
+                    name = f"{name}(port)"
+                names.append(name)
+            return ", ".join(names)
+        
+        def get_source_for_block(block_id: str, graph: SimplifiedGraph) -> str:
+            """Get source code for a block."""
+            if block_id in graph.proc_nodes:
+                proc_info = graph.proc_nodes[block_id]
+                if proc_info.source_location:
+                    source = self.resolver.read_block_source([proc_info.source_location])
+                    return source
+            elif block_id in graph.comb_nodes:
+                comb_info = graph.comb_nodes[block_id]
+                if comb_info.source_locations:
+                    source = self.resolver.read_block_source(comb_info.source_locations)
+                    return source
+            return ""
+        
         parts = []
 
-        # PROC blocks
+        # PROC blocks with connectivity and source
         if graph.proc_nodes:
-            parts.append("## 时序逻辑块 (PROC):")
+            parts.append("## Sequential Logic Blocks (PROC):")
             for proc_id, proc_info in sorted(graph.proc_nodes.items()):
+                # Basic info
                 if proc_info.source_location:
                     loc = proc_info.source_location
                     filename = loc.file_path.split('/')[-1] if '/' in loc.file_path else loc.file_path
-                    parts.append(f"- {proc_id}: {filename}:{loc.start_line}-{loc.end_line}")
+                    parts.append(f"- **{proc_id}** ({filename}:{loc.start_line}-{loc.end_line})")
                 else:
-                    parts.append(f"- {proc_id}")
+                    parts.append(f"- **{proc_id}**")
+                # Connectivity
+                parts.append(f"  - Inputs from: {format_conn_list(predecessors.get(proc_id, []), graph)}")
+                parts.append(f"  - Outputs to: {format_conn_list(successors.get(proc_id, []), graph)}")
+                # Source code
+                if include_source:
+                    source = get_source_for_block(proc_id, graph)
+                    if source:
+                        parts.append(f"  - Source:")
+                        parts.append(f"    ```verilog")
+                        for line in source.strip().split('\n'):
+                            parts.append(f"    {line}")
+                        parts.append(f"    ```")
 
-        # COMB blocks
+        # COMB blocks with connectivity and source
         if graph.comb_nodes:
-            parts.append("\n## 组合逻辑块 (COMB):")
+            parts.append("\n## Combinational Logic Blocks (COMB):")
             for comb_id, comb_info in sorted(graph.comb_nodes.items()):
+                # Basic info
                 type_label = comb_info.comb_type
-                assoc_info = f" (关联 {comb_info.associated_proc})" if comb_info.associated_proc else ""
-                node_info = f" ({comb_info.node_count}个节点)"
+                node_info = f"{comb_info.node_count} nodes"
                 loc_label = comb_info.location_info.get_display_label().replace("\\n", ", ")
+                
+                header = f"- **{comb_id}** [{type_label}, {node_info}]"
                 if loc_label:
-                    parts.append(f"- {comb_id} [{type_label}{assoc_info}{node_info}]: {loc_label}")
-                else:
-                    parts.append(f"- {comb_id} [{type_label}{assoc_info}{node_info}]")
+                    header += f" ({loc_label})"
+                parts.append(header)
+                
+                # Connectivity
+                parts.append(f"  - Inputs from: {format_conn_list(predecessors.get(comb_id, []), graph)}")
+                parts.append(f"  - Outputs to: {format_conn_list(successors.get(comb_id, []), graph)}")
+                # Source code
+                if include_source:
+                    source = get_source_for_block(comb_id, graph)
+                    if source:
+                        parts.append(f"  - Source:")
+                        parts.append(f"    ```verilog")
+                        for line in source.strip().split('\n'):
+                            parts.append(f"    {line}")
+                        parts.append(f"    ```")
 
-        # Submodules
+        # Submodules with connectivity (no source for submodules)
         if graph.submodules:
-            parts.append("\n## 子模块实例:")
+            parts.append("\n## Submodule Instances:")
             for submod_id, instance_name in sorted(graph.submodules.items()):
-                parts.append(f"- {instance_name}")
+                parts.append(f"- **{instance_name}**")
+                # Connectivity
+                parts.append(f"  - Inputs from: {format_conn_list(predecessors.get(submod_id, []), graph)}")
+                parts.append(f"  - Outputs to: {format_conn_list(successors.get(submod_id, []), graph)}")
 
-        # Connectivity (full edge list for topology understanding)
-        if graph.edges:
-            parts.append("\n## 连接关系:")
-            for src, dst in graph.edges:
-                src_name = self._resolve_node_name_for_desc(src, graph)
-                dst_name = self._resolve_node_name_for_desc(dst, graph)
-                parts.append(f"- {src_name} → {dst_name}")
-
-        return "\n".join(parts) if parts else "无简化结构信息"
+        return "\n".join(parts) if parts else "No simplified structure information"
 
     def _resolve_node_name_for_desc(self, node_id: str, graph: SimplifiedGraph) -> str:
         """Resolve node ID to a short name for graph description.
@@ -380,14 +453,15 @@ class AgentDocGenerator:
             graph: SimplifiedGraph
 
         Returns:
-            Short node name
+            Short node name (returns ID for COMB nodes instead of type)
         """
         if node_id in graph.proc_nodes:
             return node_id
         if node_id in graph.comb_nodes:
-            return graph.comb_nodes[node_id].comb_type
+            # Return the COMB ID (e.g., "p32_in_comb_13") instead of just type
+            return node_id
         if node_id in graph.io_ports:
-            return graph.io_ports[node_id].strip()[:20]  # Truncate long port names
+            return graph.io_ports[node_id].strip()[:30]  # Truncate long port names
         if node_id in graph.submodules:
             return graph.submodules[node_id]
         return node_id

@@ -46,6 +46,7 @@ class LLMBackend(ABC):
         return mermaid_code, other_content
 
     @staticmethod
+    def _extract_thinking_content(text: str) -> tuple[str, str]:
         """Extract thinking process and clean output from LLM response.
         
         Some models (DeepSeek, Claude with thinking) include thinking process
