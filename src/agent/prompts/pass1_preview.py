@@ -8,23 +8,20 @@ PASS1_SYSTEM = """你是RTL设计分析专家。
 """
 
 PASS1_PROMPT = """
-# 模块名称: 
+# Module Name: 
 {module_name}
 
-# 父模块预览:
+# Parent Module Preview:
 {ancestor_context}
 
-# 端口列表:
+# Port List:
 {port_summary}
 
-# 子模块列表:
+# Submodule List:
 {children_summary}
 
-# 结构化电路描述:
+# Structured Circuit Description:
 {graph_description}
 
-# 逻辑块源代码（按拓扑序）:
-{block_sources}
-
-请根据以上信息，为该模块生成1个段落的预览（Preview）。
+Please generate a 1-paragraph preview for this module based on the information above.
 """

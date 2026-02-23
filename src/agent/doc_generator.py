@@ -324,6 +324,8 @@ class AgentDocGenerator:
     def _format_graph_description(self, graph: SimplifiedGraph, include_source: bool = True) -> str:
         """Format SimplifiedGraph as a text description for LLM.
 
+        Blocks are ordered in topological order (data flow direction).
+
         Args:
             graph: SimplifiedGraph object
             include_source: Whether to include source code for each block
@@ -381,65 +383,100 @@ class AgentDocGenerator:
                     return source
             return ""
         
+        # Compute topological order for blocks only (PROC + COMB)
+        all_blocks = set(graph.proc_nodes.keys()) | set(graph.comb_nodes.keys())
+        
+        # Build adjacency for topological sort (only between blocks)
+        adj = defaultdict(list)
+        in_degree = defaultdict(int)
+        
+        for block_id in all_blocks:
+            in_degree[block_id] = 0
+        
+        for src, dst in graph.edges:
+            if src in all_blocks and dst in all_blocks:
+                adj[src].append(dst)
+                in_degree[dst] += 1
+        
+        # Kahn's algorithm for topological sort
+        queue = sorted([node for node in all_blocks if in_degree[node] == 0])
+        topo_order = []
+        
+        while queue:
+            node = queue.pop(0)
+            topo_order.append(node)
+            
+            for neighbor in sorted(adj[node]):
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    # Insert in sorted position to maintain deterministic order
+                    queue.append(neighbor)
+                    queue.sort()
+        
+        # Add any remaining (disconnected or cycle)
+        remaining = sorted(all_blocks - set(topo_order))
+        topo_order.extend(remaining)
+        
         parts = []
 
-        # PROC blocks with connectivity and source
-        if graph.proc_nodes:
-            parts.append("## Sequential Logic Blocks (PROC):")
-            for proc_id, proc_info in sorted(graph.proc_nodes.items()):
-                # Basic info
+        # Output all blocks in topological order (mixed PROC and COMB)
+        block_parts = []
+        
+        for block_id in topo_order:
+            block_section = []
+            
+            if block_id in graph.proc_nodes:
+                proc_info = graph.proc_nodes[block_id]
+                
+                # Basic info for PROC
                 if proc_info.source_location:
                     loc = proc_info.source_location
                     filename = loc.file_path.split('/')[-1] if '/' in loc.file_path else loc.file_path
-                    parts.append(f"- **{proc_id}** ({filename}:{loc.start_line}-{loc.end_line})")
+                    block_section.append(f"- **{block_id}** [PROC] ({filename}:{loc.start_line}-{loc.end_line})")
                 else:
-                    parts.append(f"- **{proc_id}**")
-                # Connectivity
-                parts.append(f"  - Inputs from: {format_conn_list(predecessors.get(proc_id, []), graph)}")
-                parts.append(f"  - Outputs to: {format_conn_list(successors.get(proc_id, []), graph)}")
-                # Source code
-                if include_source:
-                    source = get_source_for_block(proc_id, graph)
-                    if source:
-                        parts.append(f"  - Source:")
-                        parts.append(f"    ```verilog")
-                        for line in source.strip().split('\n'):
-                            parts.append(f"    {line}")
-                        parts.append(f"    ```")
-
-        # COMB blocks with connectivity and source
-        if graph.comb_nodes:
-            parts.append("\n## Combinational Logic Blocks (COMB):")
-            for comb_id, comb_info in sorted(graph.comb_nodes.items()):
-                # Basic info
+                    block_section.append(f"- **{block_id}** [PROC]")
+                    
+            elif block_id in graph.comb_nodes:
+                comb_info = graph.comb_nodes[block_id]
+                
+                # Basic info for COMB
                 type_label = comb_info.comb_type
                 node_info = f"{comb_info.node_count} nodes"
                 loc_label = comb_info.location_info.get_display_label().replace("\\n", ", ")
                 
-                header = f"- **{comb_id}** [{type_label}, {node_info}]"
+                header = f"- **{block_id}** [{type_label}, {node_info}]"
                 if loc_label:
                     header += f" ({loc_label})"
-                parts.append(header)
-                
-                # Connectivity
-                parts.append(f"  - Inputs from: {format_conn_list(predecessors.get(comb_id, []), graph)}")
-                parts.append(f"  - Outputs to: {format_conn_list(successors.get(comb_id, []), graph)}")
-                # Source code
-                if include_source:
-                    source = get_source_for_block(comb_id, graph)
-                    if source:
-                        parts.append(f"  - Source:")
-                        parts.append(f"    ```verilog")
-                        for line in source.strip().split('\n'):
-                            parts.append(f"    {line}")
-                        parts.append(f"    ```")
+                block_section.append(header)
+            else:
+                continue
+            
+            # Connectivity (for both PROC and COMB)
+            block_section.append(f"  - Inputs from: {format_conn_list(predecessors.get(block_id, []), graph)}")
+            block_section.append(f"  - Outputs to: {format_conn_list(successors.get(block_id, []), graph)}")
+            
+            # Source code
+            if include_source:
+                source = get_source_for_block(block_id, graph)
+                if source:
+                    block_section.append(f"  - Source:")
+                    block_section.append(f"    ```verilog")
+                    for line in source.strip().split('\n'):
+                        block_section.append(f"    {line}")
+                    block_section.append(f"    ```")
+            
+            block_parts.append("\n".join(block_section))
+        
+        # Add all blocks section
+        if block_parts:
+            parts.append("## Circuit Blocks (in topological order):")
+            parts.append("\n\n".join(block_parts))
 
-        # Submodules with connectivity (no source for submodules)
+        # Submodules with connectivity (alphabetical order)
         if graph.submodules:
             parts.append("\n## Submodule Instances:")
             for submod_id, instance_name in sorted(graph.submodules.items()):
                 parts.append(f"- **{instance_name}**")
-                # Connectivity
                 parts.append(f"  - Inputs from: {format_conn_list(predecessors.get(submod_id, []), graph)}")
                 parts.append(f"  - Outputs to: {format_conn_list(successors.get(submod_id, []), graph)}")
 
@@ -523,13 +560,12 @@ class AgentDocGenerator:
 
         # Use SimplifiedGraph if available, otherwise fallback to source code
         if module_name in self._graphs:
-            graph_description = self._format_graph_description(self._graphs[module_name])
-            block_sources = self._format_block_sources_topological(self._graphs[module_name], module_name)
+            # graph_description now includes source code embedded in each block (topological order)
+            graph_description = self._format_graph_description(self._graphs[module_name], include_source=True)
         else:
             # Fallback: use truncated source code
             source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
-            graph_description = f"源代码 (前 {self.max_source_lines} 行):\n```verilog\n{source_code}\n```"
-            block_sources = ""  # No block sources available
+            graph_description = f"Source code (first {self.max_source_lines} lines):\n```verilog\n{source_code}\n```"
             if module_name not in self._graphs and self.schematic_gen:
                 print(f"  [WARN] Module {module_name}: using source fallback (no SimplifiedGraph)")
 
@@ -538,8 +574,7 @@ class AgentDocGenerator:
             ancestor_context=ancestor_context,
             port_summary=port_summary,
             children_summary=children_summary,
-            graph_description=graph_description,
-            block_sources=block_sources
+            graph_description=graph_description
         )
 
         log_path = self._module_log_path(module_name, "pass1_preview")
@@ -612,20 +647,18 @@ class AgentDocGenerator:
         preview = state.pass1_overview or ""
         port_summary = self.resolver.get_port_summary(module_name)
 
-        # Get graph description (topology) if available
+        # Get structured graph description with full source code (complete information)
         graph_description = ""
         if module_name in self._graphs:
             graph = self._graphs[module_name]
-            graph_description = self._format_graph_description(graph)
+            graph_description = self._format_graph_description(graph, include_source=True)
             num_blocks = len(graph.proc_nodes) + len(graph.comb_nodes)
-            print(f"    [Context] Topology: {len(graph.proc_nodes)} PROC + {len(graph.comb_nodes)} COMB blocks")
+            print(f"    [Context] Topology: {len(graph.proc_nodes)} PROC + {len(graph.comb_nodes)} COMB blocks (with full source)")
         else:
-            graph_description = "无拓扑结构信息"
-            print(f"    [Context] No topology available")
-
-        # Generate block summaries (high-level, without full source code)
-        block_summaries = self._format_block_summaries(module_name)
-        print(f"    [Context] Block summaries: using 3-line previews (LLM can call read_block_source for details)")
+            # Fallback: use source code
+            source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
+            graph_description = f"```verilog\n{source_code}\n```"
+            print(f"    [Context] No topology available, using source fallback")
 
         # Get Pass 2.1 and Pass 2.5 results from tracker
         design_highlights = state.pass2_1_highlights or "无设计亮点分析"
@@ -637,7 +670,6 @@ class AgentDocGenerator:
                 preview=preview,
                 port_summary=port_summary,
                 graph_description=graph_description,
-                block_summaries=block_summaries,
                 design_highlights=design_highlights,
                 flowchart=flowchart
             )
@@ -650,14 +682,18 @@ class AgentDocGenerator:
                 preview=preview,
                 children_descriptions=children_summary,
                 graph_description=graph_description,
-                block_summaries=block_summaries,
                 design_highlights=design_highlights,
                 flowchart=flowchart
             )
             system = PASS2_NONLEAF_SYSTEM
 
         log_path = self._module_log_path(module_name, "pass2_description")
-        description, token_stats = await self.llm.generate(system, prompt, log_path=log_path)
+        description, token_stats = await self.llm.generate(
+            system, 
+            prompt, 
+            log_path=log_path,
+            tools_enabled=False
+        )
 
         # Record token stats
         if module_name not in self._token_stats:
@@ -793,17 +829,16 @@ class AgentDocGenerator:
         # Port summary
         port_summary = self.resolver.get_port_summary(module_name)
         
-        # Get graph description and block descriptions if available
+        # Get structured graph description (with embedded source code, same as Pass 1)
         graph_description = ""
         block_descriptions = ""
         
         if module_name in self._graphs:
             graph = self._graphs[module_name]
-            graph_description = self._format_graph_description(graph)
+            # Use include_source=True to embed source code in topological order (Pass 1 style)
+            graph_description = self._format_graph_description(graph, include_source=True)
             
-            # We can reuse block docs if they were generated in Pass 2
-            # For simplicity, we'll just get them again or from cache
-            block_log_path = self._module_log_path(module_name, "block")
+            # Read block docs from Pass 1.5
             if (self.modules_dir / module_name / "block_docs.json").exists():
                 with open(self.modules_dir / module_name / "block_docs.json", 'r') as f:
                     block_docs = json.load(f)
@@ -813,12 +848,10 @@ class AgentDocGenerator:
                     parts.append(doc_text)
                     parts.append("")
                 block_descriptions = "\n".join(parts)
-        
-        # Get source code (truncated if needed)
-        source_code = self.resolver.read_source(module_name) or "Source not found."
-        if len(source_code.split('\n')) > self.max_source_lines:
-            lines = source_code.split('\n')
-            source_code = '\n'.join(lines[:self.max_source_lines]) + f"\n\n// ... (truncated, {len(lines) - self.max_source_lines} more lines)"
+        else:
+            # Fallback: use truncated source code
+            source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
+            graph_description = f"```verilog\n{source_code}\n```"
         
         # Format children highlights
         children_highlights_str = ""
@@ -826,53 +859,37 @@ class AgentDocGenerator:
             parts = []
             for child_name, highlights in sorted(children_highlights.items()):
                 # Extract just the key points from child, not full doc
-                # Look for "设计点" sections or take first few paragraphs
                 lines = highlights.split('\n')
                 # Take first 20 lines as summary
                 summary_lines = lines[:20] if len(lines) > 20 else lines
                 summary = '\n'.join(summary_lines)
                 if len(lines) > 20:
                     summary += "\n\n[... 更多内容见子模块文档]"
-                parts.append(f"## 子模块 {child_name} 的关键设计点:\n{summary}\n")
+                parts.append(f"## 子模块 {child_name}:\n{summary}\n")
             children_highlights_str = "\n".join(parts)
         else:
             children_highlights_str = "无子模块设计点参考"
         
-        # Format prompt
+        # Format prompt (aligned with Pass 1 structure)
         prompt = PASS2_1_PROMPT.format(
             module_name=module_name,
             preview=preview,
             port_summary=port_summary,
             graph_description=graph_description if graph_description else "无拓扑结构信息",
             block_descriptions=block_descriptions if block_descriptions else "无逻辑块文档",
-            source_code=f"```verilog\n{source_code}\n```",
             children_highlights=children_highlights_str
         )
         
         # Call LLM (disable tools if no logical blocks exist)
         log_path = self._module_log_path(module_name, "pass2_1_highlights")
         
-        # Check if module has any logical blocks (for tool availability)
-        has_logical_blocks = module_name in self._graphs and (
-            self._graphs[module_name].proc_nodes or self._graphs[module_name].comb_nodes
+        # Generate design highlights (complete info in prompt, disable tools)
+        highlights, token_stats = await self.llm.generate(
+            PASS2_1_SYSTEM, 
+            prompt, 
+            log_path=log_path,
+            tools_enabled=False
         )
-        
-        if not has_logical_blocks and hasattr(self.llm, 'set_context'):
-            # Temporarily disable tools by setting context without graphs
-            self.llm.set_context(resolver=None, graphs=None)
-            highlights, token_stats = await self.llm.generate(
-                PASS2_1_SYSTEM, 
-                prompt, 
-                log_path=log_path
-            )
-            # Restore context with graphs
-            self.llm.set_context(resolver=self.resolver, graphs=self._graphs)
-        else:
-            highlights, token_stats = await self.llm.generate(
-                PASS2_1_SYSTEM, 
-                prompt, 
-                log_path=log_path
-            )
         
         # Record token stats
         if module_name not in self._token_stats:
@@ -968,11 +985,8 @@ class AgentDocGenerator:
         # Port summary
         port_summary = self.resolver.get_port_summary(module_name)
 
-        # Graph description (topology with metadata, same format as PASS 1)
-        graph_description = self._format_graph_description(graph)
-
-        # Block source code in topological order (same format as PASS 1)
-        block_sources = self._format_block_sources_topological(graph, module_name)
+        # Graph description (topology with embedded source, same format as PASS 1)
+        graph_description = self._format_graph_description(graph, include_source=True)
 
         # Block descriptions: read from Pass 1.5 saved file (guaranteed to exist)
         block_desc_file = self.modules_dir / module_name / "block_docs.md"
@@ -989,30 +1003,24 @@ class AgentDocGenerator:
             child_lines.append(f"## 子模块 {child_name}:\n{summary}\n")
         children_str = "\n".join(child_lines) if child_lines else "无子模块"
 
-        # Format prompt
+        # Format prompt (aligned with Pass 1 structure - no block_sources)
         prompt = PASS2_5_MODULE_PROMPT.format(
             module_name=module_name,
             preview=preview,
             port_summary=port_summary,
             graph_description=graph_description,
-            block_sources=block_sources,
             block_descriptions=block_descriptions,
             children_summaries=children_str
         )
 
-        # Check if module has any logical blocks (for tool availability)
-        has_logical_blocks = bool(graph.proc_nodes or graph.comb_nodes)
-        
-        # Call LLM (disable tools if no logical blocks exist)
+        # Call LLM (complete info in prompt, disable tools)
         log_path = self._module_log_path(module_name, "pass2_5_module")
-        if not has_logical_blocks and hasattr(self.llm, 'set_context'):
-            # Temporarily disable tools by setting context without graphs
-            self.llm.set_context(resolver=None, graphs=None)
-            full_output, token_stats = await self.llm.generate(PASS2_5_MODULE_SYSTEM, prompt, log_path=log_path)
-            # Restore context with graphs
-            self.llm.set_context(resolver=self.resolver, graphs=self._graphs)
-        else:
-            full_output, token_stats = await self.llm.generate(PASS2_5_MODULE_SYSTEM, prompt, log_path=log_path)
+        full_output, token_stats = await self.llm.generate(
+            PASS2_5_MODULE_SYSTEM, 
+            prompt, 
+            log_path=log_path,
+            tools_enabled=False
+        )
 
         # Extract mermaid diagram and other content
         from agent.llm_backend import LLMBackend

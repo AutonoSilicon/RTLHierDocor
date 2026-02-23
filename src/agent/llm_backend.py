@@ -112,13 +112,16 @@ class LLMBackend(ABC):
             print(f"[WARN] Failed to append thinking to log: {e}")
 
     @abstractmethod
-    async def generate(self, system: str, prompt: str, log_path: str = "debug.md") -> Tuple[str, Dict[str, int]]:
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md",
+                       disable_thinking: bool = False, tools_enabled: bool = True) -> Tuple[str, Dict[str, int]]:
         """Generate text from the LLM.
 
         Args:
             system: System prompt
             prompt: User prompt
             log_path: Path for debug log file
+            disable_thinking: Whether to disable thinking mode
+            tools_enabled: Whether to enable function calling tools
             
         Returns:
             Tuple of (generated_text, token_stats) where token_stats is a dict with:
@@ -173,7 +176,8 @@ class AnthropicBackend(LLMBackend):
             print("[ERROR] 'anthropic' package not installed. Run 'pip install anthropic'.")
             self.client = None
 
-    async def generate(self, system: str, prompt: str, log_path: str = "debug.md", disable_thinking: bool = False) -> Tuple[str, Dict[str, int]]:
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md", 
+                       disable_thinking: bool = False, tools_enabled: bool = True) -> Tuple[str, Dict[str, int]]:
         if not self.client:
             return "Error: Anthropic client not initialized.", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
@@ -355,7 +359,20 @@ class OpenAIBackend(LLMBackend):
             available_blocks = list(graph.proc_nodes.keys()) + list(graph.comb_nodes.keys())
             return f"Error: Block '{block_id}' not found in module '{module_name}'. Available blocks: {', '.join(available_blocks[:10])}"
 
-    async def generate(self, system: str, prompt: str, log_path: str = "debug.md", disable_thinking: bool = False) -> Tuple[str, Dict[str, int]]:
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md", 
+                       disable_thinking: bool = False, tools_enabled: bool = True) -> Tuple[str, Dict[str, int]]:
+        """Generate text from the LLM.
+        
+        Args:
+            system: System prompt
+            prompt: User prompt
+            log_path: Path for debug log file
+            disable_thinking: Whether to disable thinking mode
+            tools_enabled: Whether to enable function calling tools (default: True)
+        
+        Returns:
+            Tuple of (generated_text, token_stats)
+        """
         if not self.client:
             return "Error: OpenAI client not initialized.", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
@@ -369,8 +386,8 @@ class OpenAIBackend(LLMBackend):
                     {"role": "user", "content": prompt}
                 ]
 
-                # Add tools if resolver is available
-                tools = self._get_tools_definition() if self.resolver else None
+                # Add tools if resolver is available AND tools are enabled
+                tools = self._get_tools_definition() if (self.resolver and tools_enabled) else None
                 
                 # Maximum number of function call iterations to prevent infinite loops
                 max_iterations = 10
@@ -489,7 +506,8 @@ class AgentSDKBackend(LLMBackend):
             print("[ERROR] 'claude-code-sdk' package not installed. "
                   "Run 'pip install claude-code-sdk'.")
 
-    async def generate(self, system: str, prompt: str, log_path: str = "debug.md", disable_thinking: bool = False) -> Tuple[str, Dict[str, int]]:
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md", 
+                       disable_thinking: bool = False, tools_enabled: bool = True) -> Tuple[str, Dict[str, int]]:
         if not self._sdk_available:
             return "Error: claude-code-sdk not installed.", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 

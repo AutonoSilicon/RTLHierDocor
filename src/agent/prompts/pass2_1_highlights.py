@@ -46,20 +46,35 @@ PASS2_1_SYSTEM = """你是一位资深数字IC架构师。任务是深入分析R
 - 宁缺毋滥：只写真正有价值的设计点，忽略常规的硬件设计思路、平庸代码。
 - 拒绝流水账：不要翻译Verilog。
 - 术语专业：使用标准术语 (e.g., Backpressure, Arbiter, Clock Gating)。
+- 完整信息：电路拓扑结构中已包含所有 RTL 源代码，无需额外工具即可分析。
 """
 
 PASS2_1_PROMPT = """
-# 待分析模块: {module_name}
+# 模块名称: {module_name}
 
-## 输入上下文
-- **功能预览**: {preview}
-- **端口摘要**: {port_summary}
-- **电路拓扑**: {graph_description}
-- **关键逻辑**: {block_descriptions}
-- **源代码**:
-{source_code}
-- **子模块设计点**: {children_highlights}
+# 模块功能预览:
+{preview}
+
+# I/O 端口:
+{port_summary}
+
+# 电路拓扑结构（PROC/COMB 逻辑块连接图，按拓扑序，含源代码）:
+{graph_description}
+
+# 复杂逻辑块功能分析:
+{block_descriptions}
+
+# 子模块关键设计点:
+{children_highlights}
 
 ## 执行指令
-基于上述信息，识别并分析该模块的关键设计技巧(Design Highlights)。请严格遵循System Prompt的格式要求输出。
+基于上述完整信息，识别并分析该模块的关键设计技巧(Design Highlights)。
+
+**重要提示**：
+1. 电路拓扑结构已按数据流拓扑序排列，包含所有逻辑块的完整 RTL 源代码
+2. 每个逻辑块的信息包括：类型标识、源码位置、输入输出连接关系、嵌入式源代码
+3. 复杂逻辑块的功能分析提供了高层次理解，可辅助快速把握核心功能
+4. 所有源代码已完整提供，可直接分析，无需额外请求
+
+请严格遵循 System Prompt 的格式要求输出。
 """
