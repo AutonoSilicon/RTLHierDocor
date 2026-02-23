@@ -61,9 +61,6 @@ PASS2_1_PROMPT = """
 # 电路拓扑结构（PROC/COMB 逻辑块连接图，按拓扑序，含源代码）:
 {graph_description}
 
-# 复杂逻辑块功能分析:
-{block_descriptions}
-
 # 子模块关键设计点:
 {children_highlights}
 
