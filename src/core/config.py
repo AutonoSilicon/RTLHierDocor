@@ -329,7 +329,7 @@ class ProjectConfig:
         """
         errors = []
 
-        if command in ("generate", "hierarchy", "schematic", "docor"):
+        if command in ("generate", "hierarchy", "schematic", "docor", "connectivity"):
             if not self.filelist and not self.rtlil:
                 errors.append("Either 'filelist' or 'rtlil' must be specified "
                               "(via config.yaml design section or CLI -f/-r)")

@@ -12,9 +12,30 @@ Usage:
 """
 
 import argparse
+import json
+import os
 import sys
+from contextlib import contextmanager
 
 from core.config import load_project_config, ProjectConfig
+
+
+@contextmanager
+def _suppress_stdout_stderr():
+    """Suppress native stdout/stderr (including C/C++ extension output)."""
+    saved_stdout = os.dup(1)
+    saved_stderr = os.dup(2)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        os.dup2(saved_stdout, 1)
+        os.dup2(saved_stderr, 2)
+        os.close(saved_stdout)
+        os.close(saved_stderr)
+        os.close(devnull)
 
 
 def _load_config(args) -> ProjectConfig:
@@ -74,6 +95,9 @@ def cmd_hierarchy(args):
     if cfg.rtlil:
         success = backend.load_rtlil(cfg.rtlil)
     else:
+        if not cfg.filelist:
+            print("Error: filelist is required when rtlil is not provided", file=sys.stderr)
+            return 1
         success = backend.load_filelist(cfg.filelist, cfg.top_module, use_cache=True)
 
     if not success:
@@ -122,6 +146,9 @@ def cmd_schematic(args):
     if cfg.rtlil:
         success = backend.load_rtlil(cfg.rtlil)
     else:
+        if not cfg.filelist:
+            print("Error: filelist is required when rtlil is not provided", file=sys.stderr)
+            return 1
         success = backend.load_filelist(cfg.filelist, cfg.top_module, use_cache=True)
 
     if not success:
@@ -189,6 +216,9 @@ def cmd_docor(args):
     if cfg.rtlil:
         success = backend.load_rtlil(cfg.rtlil)
     else:
+        if not cfg.filelist:
+            print("Error: filelist is required when rtlil is not provided", file=sys.stderr)
+            return 1
         success = backend.load_filelist(cfg.filelist, cfg.top_module, use_cache=True)
 
     if not success:
@@ -249,6 +279,89 @@ def cmd_docor(args):
     # Run async generator
     asyncio.run(generator.run())
     return 0
+
+
+def cmd_connectivity(args):
+    """Check signal connectivity on after-proc schematic for a module."""
+    from core import YosysBackend, ConnectivityChecker
+    from schematic import SchematicGenerator
+
+    cfg = _load_config(args)
+    directed = not getattr(args, 'undirected', False)
+
+    def _emit_json_and_return(exit_code: int, error: str = "", result_dict=None):
+        payload = {
+            "module": module_name.lstrip("\\") if module_name else "",
+            "from_signal": from_signal or "",
+            "to_signal": to_signal or "",
+            "directed": directed,
+            "exists": False,
+            "matched_from_nodes": [],
+            "matched_to_nodes": [],
+            "path_nodes": []
+        }
+        if result_dict:
+            payload.update(result_dict)
+        if error:
+            payload["error"] = error
+        print(json.dumps(payload, ensure_ascii=False))
+        return exit_code
+
+    module_name = getattr(args, 'module', None)
+    if not module_name:
+        return _emit_json_and_return(1, "--module/-m is required for connectivity command")
+
+    from_signal = getattr(args, 'from_signal', None)
+    to_signal = getattr(args, 'to_signal', None)
+    if not from_signal or not to_signal:
+        return _emit_json_and_return(1, "--from-signal and --to-signal are required")
+
+    errors = cfg.validate("connectivity")
+    if errors:
+        return _emit_json_and_return(1, "; ".join(errors))
+
+    backend = YosysBackend(cache_dir=cfg.cache_dir, verbose=False)
+
+    with _suppress_stdout_stderr():
+        if cfg.rtlil:
+            success = backend.load_rtlil(cfg.rtlil)
+        else:
+            if not cfg.filelist:
+                return _emit_json_and_return(1, "filelist is required when rtlil is not provided")
+            success = backend.load_filelist(cfg.filelist, cfg.top_module, use_cache=True)
+
+    if not success:
+        return _emit_json_and_return(1, "Failed to load design")
+
+    with _suppress_stdout_stderr():
+        proc_ok = backend.run_proc()
+    if not proc_ok:
+        return _emit_json_and_return(1, "Failed to run proc on design")
+
+    schematic_gen = SchematicGenerator(
+        backend,
+        verbose=False,
+        simplify=False,
+        strategy=cfg.strategy
+    )
+
+    with _suppress_stdout_stderr():
+        proc_dot = schematic_gen.generate_from_proc_design(module_name)
+    if not proc_dot:
+        return _emit_json_and_return(1, f"Failed to generate afterproc schematic for {module_name}")
+
+    checker = ConnectivityChecker(verbose=False)
+    result = checker.check_connectivity(
+        dot_content=proc_dot,
+        from_signal=from_signal,
+        to_signal=to_signal,
+        module_name=module_name.lstrip("\\"),
+        directed=directed,
+    )
+
+    print(json.dumps(result.to_dict(), ensure_ascii=False))
+
+    return 0 if result.exists else 1
 
 
 def main():
@@ -322,6 +435,24 @@ def main():
                             default=None,
                             help="Simplification strategy (overrides config)")
 
+    # ── connectivity command ──
+    conn_parser = subparsers.add_parser("connectivity",
+        help="Check if a path exists between two signals on after-proc schematic")
+    conn_parser.add_argument("-f", "--filelist",
+                             help="RTL filelist path (overrides config)")
+    conn_parser.add_argument("-r", "--rtlil",
+                             help="Pre-compiled RTLIL file path (overrides config)")
+    conn_parser.add_argument("-t", "--top",
+                             help="Top module name (overrides config)")
+    conn_parser.add_argument("-m", "--module", required=True,
+                             help="Target module to check connectivity on")
+    conn_parser.add_argument("--from-signal", required=True,
+                             help="Start signal name (exact label match)")
+    conn_parser.add_argument("--to-signal", required=True,
+                             help="End signal name (exact label match)")
+    conn_parser.add_argument("--undirected", action="store_true",
+                             help="Treat graph as undirected (default: directed)")
+
 
     # ── docor command ──
     doc_parser = subparsers.add_parser("docor",
@@ -361,6 +492,8 @@ def main():
         return cmd_hierarchy(args)
     elif args.command == "schematic":
         return cmd_schematic(args)
+    elif args.command == "connectivity":
+        return cmd_connectivity(args)
     elif args.command == "docor":
         return cmd_docor(args)
 

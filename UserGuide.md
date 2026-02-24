@@ -63,6 +63,29 @@ python3 -m rtl_hier_docor.cli schematic \
     -o output.dot
 ```
 
+### 信号连通性检查（afterproc）
+
+给定起点信号和终点信号，检查在 `proc` 后原理图中是否存在路径。
+
+```bash
+python3 -m cli connectivity \
+    -f /path/to/filelist.f \
+    -t top_module_name \
+    -m module_name \
+    --from-signal start_sig \
+    --to-signal end_sig
+```
+
+可选参数：
+- `--undirected`：按无向图检查（默认按有向边）
+
+输出：
+- 始终输出一个完整 JSON（单行），包含 `exists`、`path_nodes`、`matched_from_nodes`、`matched_to_nodes` 等字段
+
+返回码：
+- `0`：存在路径
+- `1`：不存在路径或执行失败
+
 ## 输入格式
 
 ### Filelist 格式

@@ -5,6 +5,7 @@ from .hierarchy_builder import HierarchyBuilder
 from .source_extractor import SourceExtractor
 from .config import load_config, load_project_config, get_remove_signals, ProjectConfig
 from .signal_tracer import SignalTracer, trace_remove_signals
+from .connectivity_checker import ConnectivityChecker, ConnectivityResult
 
 __all__ = [
     "YosysBackend",
@@ -16,4 +17,6 @@ __all__ = [
     "ProjectConfig",
     "SignalTracer",
     "trace_remove_signals",
+    "ConnectivityChecker",
+    "ConnectivityResult",
 ]
