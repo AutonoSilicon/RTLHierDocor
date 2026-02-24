@@ -99,10 +99,51 @@ class SourceExtractor:
             for attr_id in cell.attributes:
                 attr_name = attr_id.str()
                 if "src" in attr_name.lower():
-                    src_value = str(cell.attributes[attr_id])
-                    return SourceLocation.parse(src_value)
+                    raw_src_value = str(cell.attributes[attr_id])
+                    decoded_src_value = self._decode_yosys_attr_string(raw_src_value)
+                    location = self._parse_src_candidates(decoded_src_value)
+                    if location:
+                        return location
         except:
             pass
+        return None
+
+    def _decode_yosys_attr_string(self, raw_value: str) -> str:
+        """Decode Yosys string attribute value into human-readable text.
+
+        pyosys may expose string attributes as either:
+        - plain text: /path/file.v:123.4-123.20
+        - binary bitstring (8 bits per ASCII char)
+        """
+        if not raw_value:
+            return ""
+
+        compact = re.sub(r'\s+', '', raw_value)
+        if compact and re.fullmatch(r'[01]+', compact) and len(compact) % 8 == 0:
+            try:
+                chars = [chr(int(compact[i:i + 8], 2)) for i in range(0, len(compact), 8)]
+                decoded = ''.join(chars)
+                return decoded.strip().strip('"')
+            except Exception:
+                return raw_value
+
+        return raw_value.strip().strip('"')
+
+    def _parse_src_candidates(self, src_value: str) -> Optional[SourceLocation]:
+        """Parse first valid location from possibly multi-source src string."""
+        if not src_value:
+            return None
+
+        # Yosys may join multiple source spans with '|'.
+        candidates = [part.strip() for part in src_value.split('|') if part.strip()]
+        if not candidates:
+            candidates = [src_value]
+
+        for candidate in candidates:
+            location = SourceLocation.parse(candidate)
+            if location:
+                return location
+
         return None
 
     def _parse_location_from_name(self, cell_name: str) -> Optional[SourceLocation]:

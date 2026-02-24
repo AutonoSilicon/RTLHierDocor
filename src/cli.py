@@ -18,6 +18,7 @@ import re
 import sys
 from contextlib import contextmanager
 from tempfile import NamedTemporaryFile
+from pathlib import Path
 
 from core.config import load_project_config, ProjectConfig
 from models import SourceLocation
@@ -342,6 +343,22 @@ def cmd_connectivity(args):
     cfg = _load_config(args)
     directed = not getattr(args, 'undirected', False)
 
+    def _safe_name(text) -> str:
+        sanitized = re.sub(r'[^A-Za-z0-9_.-]+', '_', text or '')
+        return sanitized.strip('_') or 'sig'
+
+    def _default_output_path() -> Path:
+        out_base = Path(cfg.output_dir) / "pathcheck"
+        filename = (
+            f"{_safe_name(module_name)}"
+            f"__{_safe_name(from_signal)}"
+            f"__to__{_safe_name(to_signal)}.json"
+        )
+        return out_base / filename
+
+    requested_output = getattr(args, 'output', None)
+    output_path = Path(requested_output) if requested_output else None
+
     def _emit_json_and_return(exit_code: int, error: str = "", result_dict=None):
         payload = {
             "module": module_name.lstrip("\\") if module_name else "",
@@ -357,6 +374,11 @@ def cmd_connectivity(args):
             payload.update(result_dict)
         if error:
             payload["error"] = error
+
+        final_output = output_path if output_path else _default_output_path()
+        payload["output_file"] = str(final_output)
+        final_output.parent.mkdir(parents=True, exist_ok=True)
+        final_output.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         print(json.dumps(payload, ensure_ascii=False))
         return exit_code
 
@@ -421,8 +443,13 @@ def cmd_connectivity(args):
         cell_locations=cell_locations,
     )
 
-    print(json.dumps(result.to_dict(), ensure_ascii=False))
+    final_payload = result.to_dict()
+    final_output = output_path if output_path else _default_output_path()
+    final_payload["output_file"] = str(final_output)
+    final_output.parent.mkdir(parents=True, exist_ok=True)
+    final_output.write_text(json.dumps(final_payload, ensure_ascii=False), encoding="utf-8")
 
+    print(json.dumps(final_payload, ensure_ascii=False))
     return 0 if result.exists else 1
 
 
@@ -514,6 +541,8 @@ def main():
                              help="End signal name (exact label match)")
     conn_parser.add_argument("--undirected", action="store_true",
                              help="Treat graph as undirected (default: directed)")
+    conn_parser.add_argument("-o", "--output",
+                             help="Output JSON file path (default: <output_dir>/pathcheck/<auto_name>.json)")
 
 
     # ── docor command ──

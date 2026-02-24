@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from collections import deque, defaultdict
 from typing import Dict, List, Optional, Set
 import re
+import sys
 
 from schematic.simplifier import DotParser, DotEdge
 from models import SourceLocation
@@ -133,12 +134,44 @@ class ConnectivityChecker:
         """Build adjacency list from parsed DOT edges."""
         adjacency: Dict[str, Set[str]] = defaultdict(set)
 
+        port_name_maps: Dict[str, Dict[str, str]] = {}
+        cell_types: Dict[str, str] = {}
+        for node_id, node in parser.nodes.items():
+            cell_types[node_id] = self._extract_cell_type(node.label)
+            port_name_maps[node_id] = self._extract_port_name_map(node.label)
+
         for edge in parser.edges:
+            if self._is_control_only_edge(edge, cell_types, port_name_maps):
+                continue
+
             adjacency[edge.src_node].add(edge.dst_node)
             if not directed:
                 adjacency[edge.dst_node].add(edge.src_node)
 
         return adjacency
+
+    def _is_control_only_edge(
+        self,
+        edge: DotEdge,
+        cell_types: Dict[str, str],
+        port_name_maps: Dict[str, Dict[str, str]],
+    ) -> bool:
+        """Return True when an edge carries control-only dependency (not data flow).
+
+        Current rule: skip edges driving MUX select ports so connectivity search
+        focuses on data propagation path.
+        """
+        dst_cell_type = cell_types.get(edge.dst_node, "")
+        if dst_cell_type not in self._mux_types:
+            return False
+
+        dst_port_id = self._normalize_port_id(edge.dst_port)
+        if not dst_port_id:
+            return False
+
+        port_name_map = port_name_maps.get(edge.dst_node, {})
+        dst_port_name = port_name_map.get(dst_port_id, dst_port_id).upper()
+        return bool(re.match(r"^(S|SEL|S\d+|SEL\d+)(\[\d+\])?$", dst_port_name))
 
     def _find_first_path(
         self,
@@ -209,6 +242,7 @@ class ConnectivityChecker:
             incoming_edges[edge.dst_node].append(edge)
 
         conditions: List[Dict[str, object]] = []
+        warned_cell_types: Set[str] = set()
 
         for node_id in path_nodes:
             node = parser.nodes.get(node_id)
@@ -252,7 +286,26 @@ class ConnectivityChecker:
                     )
                     conditions.append(point)
 
+            if self._is_unknown_candidate_conditional_cell(cell_type):
+                if cell_type not in warned_cell_types:
+                    print(
+                        f"[WARN] connectivity: unknown conditional-like cell type '{cell_type}' encountered on path at node {node_id}",
+                        file=sys.stderr,
+                    )
+                    warned_cell_types.add(cell_type)
+
         return conditions
+
+    def _is_unknown_candidate_conditional_cell(self, cell_type: str) -> bool:
+        """Heuristic detection for conditional-like cells not in whitelist."""
+        if not cell_type:
+            return False
+        if cell_type in self._mux_types or cell_type in self._sequential_conditional_types:
+            return False
+
+        token = cell_type.lower()
+        keywords = ("mux", "dff", "ff", "latch", "flop")
+        return any(keyword in token for keyword in keywords)
 
     def _extract_cell_type(self, label: str) -> str:
         """Extract cell type token like $mux/$adff from record label."""
