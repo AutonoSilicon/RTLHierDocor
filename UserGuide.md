@@ -89,10 +89,14 @@ python3 -m cli connectivity \
 
 可选参数：
 - `--undirected`：按无向图检查（默认按有向边）
+- `--max-paths`：最多返回多少条 simple path（默认 0，不限）
+- `--max-depth`：每条路径最多包含多少个节点（默认 0，不限）
 - `-o/--output`：自定义输出 JSON 文件路径
 
 输出：
-- 始终输出一个完整 JSON（单行），包含 `exists`、`path_nodes`、`matched_from_nodes`、`matched_to_nodes` 等字段
+- 始终输出一个完整 JSON（单行），包含 `exists`、`path_nodes`、`all_path_nodes`、`path_count`、`truncated`、`matched_from_nodes`、`matched_to_nodes` 等字段
+- `path_nodes` 保留为兼容字段（第一条见证路径）；`all_path_nodes` 为点对点之间提取到的全部路径列表
+- `path_conditions` 按路径返回条件点（每条路径一个条件集合）；`conditions` 为去重后的全量条件点集合
 - 默认同时写入：`<output_dir>/pathcheck/<module>__<from>__to__<to>.json`
 - 连通性按“数据路径”检查：会过滤控制边（如 `$mux/$procmux` 的 `S/SEL` 输入、时序单元的 `CLK/reset/EN` 等控制端口输入），避免把控制信号误判为数据可达
 - 条件传播点在 `conditions` 字段中返回：

@@ -7,7 +7,7 @@ Phase-1 goal:
 
 from dataclasses import dataclass, field
 from collections import deque, defaultdict
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 import re
 import sys
 
@@ -27,8 +27,12 @@ class ConnectivityResult:
     matched_from_nodes: List[str] = field(default_factory=list)
     matched_to_nodes: List[str] = field(default_factory=list)
     path_nodes: List[str] = field(default_factory=list)
+    all_path_nodes: List[List[str]] = field(default_factory=list)
+    path_count: int = 0
+    truncated: bool = False
     has_conditions: bool = False
     conditions: List[Dict[str, object]] = field(default_factory=list)
+    path_conditions: List[Dict[str, object]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, object]:
         """Convert result to serializable dict."""
@@ -41,8 +45,12 @@ class ConnectivityResult:
             "matched_from_nodes": self.matched_from_nodes,
             "matched_to_nodes": self.matched_to_nodes,
             "path_nodes": self.path_nodes,
+            "all_path_nodes": self.all_path_nodes,
+            "path_count": self.path_count,
+            "truncated": self.truncated,
             "has_conditions": self.has_conditions,
             "conditions": self.conditions,
+            "path_conditions": self.path_conditions,
         }
 
 
@@ -71,6 +79,8 @@ class ConnectivityChecker:
         module_name: str = "",
         directed: bool = True,
         cell_locations: Optional[Dict[str, SourceLocation]] = None,
+        max_paths: int = 0,
+        max_depth: int = 0,
     ) -> ConnectivityResult:
         """Check if a path exists from `from_signal` to `to_signal`.
 
@@ -103,26 +113,54 @@ class ConnectivityChecker:
                 exists=False,
                 matched_from_nodes=from_nodes,
                 matched_to_nodes=to_nodes,
-                path_nodes=[]
+                path_nodes=[],
+                all_path_nodes=[],
+                path_count=0,
+                truncated=False,
             )
 
         adjacency = self._build_adjacency(parser, directed=directed)
-        path = self._find_first_path(adjacency, from_nodes, set(to_nodes))
-        conditions = self._extract_path_conditions(parser, path or [])
-        if cell_locations:
-            conditions = self._attach_source_locations(conditions, cell_locations)
+        all_paths, truncated = self._find_all_simple_paths(
+            adjacency,
+            from_nodes,
+            set(to_nodes),
+            max_paths=max_paths,
+            max_depth=max_depth,
+        )
+
+        path = all_paths[0] if all_paths else None
+
+        path_conditions: List[Dict[str, object]] = []
+        all_conditions: List[Dict[str, object]] = []
+        for index, one_path in enumerate(all_paths):
+            one_conditions = self._extract_path_conditions(parser, one_path)
+            if cell_locations:
+                one_conditions = self._attach_source_locations(one_conditions, cell_locations)
+
+            path_conditions.append({
+                "path_index": index,
+                "path_nodes": one_path,
+                "conditions": one_conditions,
+            })
+            all_conditions.extend(one_conditions)
+
+        conditions = self._dedup_conditions(all_conditions)
 
         return ConnectivityResult(
             module_name=module_name,
             from_signal=from_signal,
             to_signal=to_signal,
             directed=directed,
-            exists=bool(path),
+            exists=bool(all_paths),
             matched_from_nodes=from_nodes,
             matched_to_nodes=to_nodes,
             path_nodes=path or [],
+            all_path_nodes=all_paths,
+            path_count=len(all_paths),
+            truncated=truncated,
             has_conditions=bool(conditions),
-            conditions=conditions
+            conditions=conditions,
+            path_conditions=path_conditions,
         )
 
     def find_signal_nodes(self, parser: DotParser, signal_name: str) -> List[str]:
@@ -232,6 +270,83 @@ class ConnectivityChecker:
                 queue.append(nxt)
 
         return None
+
+    def _find_all_simple_paths(
+        self,
+        adjacency: Dict[str, Set[str]],
+        source_nodes: List[str],
+        target_nodes: Set[str],
+        max_paths: int = 0,
+        max_depth: int = 0,
+    ) -> Tuple[List[List[str]], bool]:
+        """Enumerate all simple paths from any source to any target.
+
+        Args:
+            adjacency: Directed or undirected adjacency set.
+            source_nodes: Start node candidates.
+            target_nodes: Target node set.
+            max_paths: Hard cap for returned path count. 0 means unlimited.
+            max_depth: Hard cap for node count in each path. 0 means unlimited.
+
+        Returns:
+            Tuple of (all paths, truncated flag).
+        """
+        all_paths: List[List[str]] = []
+        truncated = False
+
+        unique_sources: List[str] = []
+        seen_sources: Set[str] = set()
+        for source in source_nodes:
+            if source in seen_sources:
+                continue
+            seen_sources.add(source)
+            unique_sources.append(source)
+
+        for source in unique_sources:
+            if max_paths > 0 and len(all_paths) >= max_paths:
+                truncated = True
+                break
+
+            if source in target_nodes:
+                all_paths.append([source])
+                if max_paths > 0 and len(all_paths) >= max_paths:
+                    truncated = True
+                    break
+
+            initial_neighbors = iter(sorted(adjacency.get(source, set())))
+            stack: List[Tuple[str, List[str], Set[str], object]] = [
+                (source, [source], {source}, initial_neighbors)
+            ]
+
+            while stack:
+                if max_paths > 0 and len(all_paths) >= max_paths:
+                    truncated = True
+                    stack.clear()
+                    break
+
+                current_node, current_path, visited_nodes, neighbors_iter = stack[-1]
+
+                try:
+                    next_node = next(neighbors_iter)
+                except StopIteration:
+                    stack.pop()
+                    continue
+
+                if next_node in visited_nodes:
+                    continue
+
+                next_path = current_path + [next_node]
+                if max_depth > 0 and len(next_path) > max_depth:
+                    continue
+
+                if next_node in target_nodes:
+                    all_paths.append(next_path)
+                    continue
+
+                next_neighbors = iter(sorted(adjacency.get(next_node, set())))
+                stack.append((next_node, next_path, visited_nodes | {next_node}, next_neighbors))
+
+        return all_paths, truncated
 
     def _reconstruct_path(
         self,
@@ -448,3 +563,27 @@ class ConnectivityChecker:
         if not port_text:
             return ""
         return port_text.split(':', 1)[0]
+
+    def _dedup_conditions(self, conditions: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        """Remove duplicate condition points while preserving order."""
+        deduped: List[Dict[str, object]] = []
+        seen_keys: Set[str] = set()
+
+        for condition in conditions:
+            node_id = str(condition.get("node_id", ""))
+            kind = str(condition.get("kind", ""))
+            cell_type = str(condition.get("cell_type", ""))
+            condition_ports = condition.get("condition_ports", [])
+            if isinstance(condition_ports, list):
+                ports_key = ",".join(str(item) for item in condition_ports)
+            else:
+                ports_key = str(condition_ports)
+
+            key = f"{node_id}|{kind}|{cell_type}|{ports_key}"
+            if key in seen_keys:
+                continue
+
+            seen_keys.add(key)
+            deduped.append(condition)
+
+        return deduped

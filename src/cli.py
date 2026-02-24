@@ -368,7 +368,13 @@ def cmd_connectivity(args):
             "exists": False,
             "matched_from_nodes": [],
             "matched_to_nodes": [],
-            "path_nodes": []
+            "path_nodes": [],
+            "all_path_nodes": [],
+            "path_count": 0,
+            "truncated": False,
+            "has_conditions": False,
+            "conditions": [],
+            "path_conditions": [],
         }
         if result_dict:
             payload.update(result_dict)
@@ -441,6 +447,8 @@ def cmd_connectivity(args):
         module_name=module_name.lstrip("\\"),
         directed=directed,
         cell_locations=cell_locations,
+        max_paths=getattr(args, 'max_paths', 0),
+        max_depth=getattr(args, 'max_depth', 0),
     )
 
     final_payload = result.to_dict()
@@ -541,6 +549,10 @@ def main():
                              help="End signal name (exact label match)")
     conn_parser.add_argument("--undirected", action="store_true",
                              help="Treat graph as undirected (default: directed)")
+    conn_parser.add_argument("--max-paths", type=int, default=0,
+                             help="Maximum number of simple paths to return, 0 means unlimited")
+    conn_parser.add_argument("--max-depth", type=int, default=0,
+                             help="Maximum number of nodes in each path, 0 means unlimited")
     conn_parser.add_argument("-o", "--output",
                              help="Output JSON file path (default: <output_dir>/pathcheck/<auto_name>.json)")
 
