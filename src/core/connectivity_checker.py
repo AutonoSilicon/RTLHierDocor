@@ -55,6 +55,13 @@ class ConnectivityChecker:
             "$dff", "$adff", "$sdff", "$sdffe", "$dffe", "$dffsre", "$dlatch"
         }
         self._mux_types = {"$mux", "$pmux", "$procmux"}
+        self._mux_select_port_names = {"S", "SEL", "S0", "S1", "S2", "S3", "S4"}
+        self._sequential_condition_port_names = {
+            "EN", "CE", "LOAD", "GATE"
+        }
+        self._sequential_control_port_names = {
+            "CLK", "ARST", "SRST", "RST", "RESET", "SET", "CLR", "EN", "CE", "LOAD", "GATE"
+        }
 
     def check_connectivity(
         self,
@@ -162,16 +169,37 @@ class ConnectivityChecker:
         focuses on data propagation path.
         """
         dst_cell_type = cell_types.get(edge.dst_node, "")
-        if dst_cell_type not in self._mux_types:
-            return False
-
         dst_port_id = self._normalize_port_id(edge.dst_port)
         if not dst_port_id:
             return False
 
         port_name_map = port_name_maps.get(edge.dst_node, {})
         dst_port_name = port_name_map.get(dst_port_id, dst_port_id).upper()
-        return bool(re.match(r"^(S|SEL|S\d+|SEL\d+)(\[\d+\])?$", dst_port_name))
+
+        if dst_cell_type in self._mux_types:
+            if self._is_select_port_name(dst_port_name):
+                return True
+
+        if dst_cell_type in self._sequential_conditional_types:
+            if self._is_sequential_control_port_name(dst_port_name):
+                return True
+
+        return False
+
+    def _is_select_port_name(self, port_name: str) -> bool:
+        """Return True if port name looks like a mux select pin."""
+        if not port_name:
+            return False
+        if port_name in self._mux_select_port_names:
+            return True
+        return bool(re.match(r"^(S|SEL)\d+(\[\d+\])?$", port_name))
+
+    def _is_sequential_control_port_name(self, port_name: str) -> bool:
+        """Return True if port name is a sequential control pin (non-data)."""
+        if not port_name:
+            return False
+        base = re.sub(r'\[\d+\]$', '', port_name)
+        return base in self._sequential_control_port_names
 
     def _find_first_path(
         self,
@@ -256,7 +284,7 @@ class ConnectivityChecker:
             port_name_map = self._extract_port_name_map(node.label)
 
             if cell_type in self._mux_types:
-                condition_ports = self._find_ports_by_names(port_name_map, {"S", "SEL", "S0", "S1"})
+                condition_ports = self._find_ports_by_names(port_name_map, self._mux_select_port_names)
                 point = self._build_condition_point(
                     parser=parser,
                     node_id=node_id,
@@ -272,7 +300,7 @@ class ConnectivityChecker:
             if cell_type in self._sequential_conditional_types:
                 condition_ports = self._find_ports_by_names(
                     port_name_map,
-                    {"CLK", "ARST", "SRST", "EN", "CE", "SET", "CLR", "LOAD", "GATE"}
+                    self._sequential_condition_port_names
                 )
                 if condition_ports:
                     point = self._build_condition_point(
