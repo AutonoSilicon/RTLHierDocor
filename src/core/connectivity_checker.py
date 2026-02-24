@@ -8,8 +8,10 @@ Phase-1 goal:
 from dataclasses import dataclass, field
 from collections import deque, defaultdict
 from typing import Dict, List, Optional, Set
+import re
 
-from schematic.simplifier import DotParser
+from schematic.simplifier import DotParser, DotEdge
+from models import SourceLocation
 
 
 @dataclass
@@ -24,6 +26,8 @@ class ConnectivityResult:
     matched_from_nodes: List[str] = field(default_factory=list)
     matched_to_nodes: List[str] = field(default_factory=list)
     path_nodes: List[str] = field(default_factory=list)
+    has_conditions: bool = False
+    conditions: List[Dict[str, object]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, object]:
         """Convert result to serializable dict."""
@@ -36,6 +40,8 @@ class ConnectivityResult:
             "matched_from_nodes": self.matched_from_nodes,
             "matched_to_nodes": self.matched_to_nodes,
             "path_nodes": self.path_nodes,
+            "has_conditions": self.has_conditions,
+            "conditions": self.conditions,
         }
 
 
@@ -44,6 +50,10 @@ class ConnectivityChecker:
 
     def __init__(self, verbose: bool = False):
         self._verbose = verbose
+        self._sequential_conditional_types = {
+            "$dff", "$adff", "$sdff", "$sdffe", "$dffe", "$dffsre", "$dlatch"
+        }
+        self._mux_types = {"$mux", "$pmux", "$procmux"}
 
     def check_connectivity(
         self,
@@ -52,6 +62,7 @@ class ConnectivityChecker:
         to_signal: str,
         module_name: str = "",
         directed: bool = True,
+        cell_locations: Optional[Dict[str, SourceLocation]] = None,
     ) -> ConnectivityResult:
         """Check if a path exists from `from_signal` to `to_signal`.
 
@@ -89,6 +100,9 @@ class ConnectivityChecker:
 
         adjacency = self._build_adjacency(parser, directed=directed)
         path = self._find_first_path(adjacency, from_nodes, set(to_nodes))
+        conditions = self._extract_path_conditions(parser, path or [])
+        if cell_locations:
+            conditions = self._attach_source_locations(conditions, cell_locations)
 
         return ConnectivityResult(
             module_name=module_name,
@@ -98,7 +112,9 @@ class ConnectivityChecker:
             exists=bool(path),
             matched_from_nodes=from_nodes,
             matched_to_nodes=to_nodes,
-            path_nodes=path or []
+            path_nodes=path or [],
+            has_conditions=bool(conditions),
+            conditions=conditions
         )
 
     def find_signal_nodes(self, parser: DotParser, signal_name: str) -> List[str]:
@@ -182,3 +198,172 @@ class ConnectivityChecker:
             text = text[1:]
 
         return text
+
+    def _extract_path_conditions(self, parser: DotParser, path_nodes: List[str]) -> List[Dict[str, object]]:
+        """Extract conditional propagation points on a resolved path."""
+        if not path_nodes:
+            return []
+
+        incoming_edges: Dict[str, List[DotEdge]] = defaultdict(list)
+        for edge in parser.edges:
+            incoming_edges[edge.dst_node].append(edge)
+
+        conditions: List[Dict[str, object]] = []
+
+        for node_id in path_nodes:
+            node = parser.nodes.get(node_id)
+            if not node:
+                continue
+
+            cell_type = self._extract_cell_type(node.label)
+            if not cell_type:
+                continue
+
+            port_name_map = self._extract_port_name_map(node.label)
+
+            if cell_type in self._mux_types:
+                condition_ports = self._find_ports_by_names(port_name_map, {"S", "SEL", "S0", "S1"})
+                point = self._build_condition_point(
+                    parser=parser,
+                    node_id=node_id,
+                    cell_type=cell_type,
+                    kind="mux_select",
+                    condition_port_ids=condition_ports,
+                    incoming_edges=incoming_edges,
+                    port_name_map=port_name_map,
+                )
+                conditions.append(point)
+                continue
+
+            if cell_type in self._sequential_conditional_types:
+                condition_ports = self._find_ports_by_names(
+                    port_name_map,
+                    {"CLK", "ARST", "SRST", "EN", "CE", "SET", "CLR", "LOAD", "GATE"}
+                )
+                if condition_ports:
+                    point = self._build_condition_point(
+                        parser=parser,
+                        node_id=node_id,
+                        cell_type=cell_type,
+                        kind="sequential_condition",
+                        condition_port_ids=condition_ports,
+                        incoming_edges=incoming_edges,
+                        port_name_map=port_name_map,
+                    )
+                    conditions.append(point)
+
+        return conditions
+
+    def _extract_cell_type(self, label: str) -> str:
+        """Extract cell type token like $mux/$adff from record label."""
+        if not label:
+            return ""
+        match = re.search(r'\\n(\$[A-Za-z0-9_]+)\|', label)
+        if match:
+            return match.group(1)
+        return ""
+
+    def _extract_port_name_map(self, label: str) -> Dict[str, str]:
+        """Map port id (pNNN) -> logical port name (A/B/S/CLK/ARST/...)."""
+        port_map: Dict[str, str] = {}
+        if not label:
+            return port_map
+
+        for match in re.finditer(r'<([^>]+)>\s*([^|{}]+)', label):
+            port_id = match.group(1).strip()
+            port_name = match.group(2).strip()
+            if port_id:
+                port_map[port_id] = port_name
+
+        return port_map
+
+    def _find_ports_by_names(self, port_name_map: Dict[str, str], names: Set[str]) -> List[str]:
+        result: List[str] = []
+        upper_names = {name.upper() for name in names}
+        for port_id, port_name in port_name_map.items():
+            if port_name.upper() in upper_names:
+                result.append(port_id)
+        return sorted(result)
+
+    def _build_condition_point(
+        self,
+        parser: DotParser,
+        node_id: str,
+        cell_type: str,
+        kind: str,
+        condition_port_ids: List[str],
+        incoming_edges: Dict[str, List[DotEdge]],
+        port_name_map: Dict[str, str],
+    ) -> Dict[str, object]:
+        condition_inputs: List[Dict[str, str]] = []
+
+        cond_port_id_set = set(condition_port_ids)
+        for edge in incoming_edges.get(node_id, []):
+            dst_port = self._normalize_port_id(edge.dst_port)
+            if dst_port not in cond_port_id_set:
+                continue
+
+            src_node = parser.nodes.get(edge.src_node)
+            signal_name = self._node_signal_name(src_node, edge.src_node)
+            condition_inputs.append({
+                "port_id": dst_port,
+                "port_name": port_name_map.get(dst_port, dst_port),
+                "source_node": edge.src_node,
+                "source_signal": signal_name,
+            })
+
+        condition_ports = [port_name_map.get(port_id, port_id) for port_id in condition_port_ids]
+        return {
+            "node_id": node_id,
+            "node_label": self._node_signal_name(parser.nodes.get(node_id), node_id),
+            "cell_type": cell_type,
+            "kind": kind,
+            "condition_ports": condition_ports,
+            "condition_inputs": condition_inputs,
+        }
+
+    def _attach_source_locations(
+        self,
+        conditions: List[Dict[str, object]],
+        cell_locations: Dict[str, SourceLocation]
+    ) -> List[Dict[str, object]]:
+        """Attach source RTL locations to each condition point when available."""
+        for condition in conditions:
+            node_label = str(condition.get("node_label", ""))
+            cell_id = self._extract_cell_id_from_label(node_label)
+            if not cell_id:
+                continue
+
+            location = cell_locations.get(cell_id)
+            if location:
+                condition["source_locations"] = [location.to_dict()]
+
+        return conditions
+
+    def _extract_cell_id_from_label(self, label: str) -> str:
+        """Extract numeric cell id from DOT record label such as '$94320\\n$adff'."""
+        if not label:
+            return ""
+
+        match = re.search(r'\$(\d+)\\n\$', label)
+        if match:
+            return match.group(1)
+
+        return ""
+
+    def _node_signal_name(self, node, default_node_id: str) -> str:
+        """Best-effort readable node name for reporting."""
+        if not node:
+            return default_node_id
+
+        label = self._normalize_signal(getattr(node, "label", ""))
+        if label:
+            return label
+
+        return default_node_id
+
+    def _normalize_port_id(self, port_text: str) -> str:
+        """Normalize DOT port text like 'p703:w' into canonical port id 'p703'."""
+        if not port_text:
+            return ""
+        return port_text.split(':', 1)[0]

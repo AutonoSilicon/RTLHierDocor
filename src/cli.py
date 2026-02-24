@@ -14,10 +14,13 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sys
 from contextlib import contextmanager
+from tempfile import NamedTemporaryFile
 
 from core.config import load_project_config, ProjectConfig
+from models import SourceLocation
 
 
 @contextmanager
@@ -36,6 +39,55 @@ def _suppress_stdout_stderr():
         os.close(saved_stdout)
         os.close(saved_stderr)
         os.close(devnull)
+
+
+def _run_proc_with_log_capture(backend):
+    """Run proc pass and capture raw native logs from Yosys."""
+    saved_stdout = os.dup(1)
+    saved_stderr = os.dup(2)
+    with NamedTemporaryFile(mode='w+', delete=True) as tmp:
+        tmp_fd = tmp.fileno()
+        try:
+            os.dup2(tmp_fd, 1)
+            os.dup2(tmp_fd, 2)
+            ok = backend.run_proc()
+        finally:
+            os.dup2(saved_stdout, 1)
+            os.dup2(saved_stderr, 2)
+            os.close(saved_stdout)
+            os.close(saved_stderr)
+
+        tmp.flush()
+        tmp.seek(0)
+        text = tmp.read()
+    return ok, text
+
+
+def _parse_proc_cell_source_map(proc_log_text: str):
+    """Parse proc logs to map generated procdff cell IDs to source location."""
+    signal_re = re.compile(
+        r"Creating register for signal `\\([^.]*)\.\\([^']+)' using process `\\[^.]*\.\$proc\$(.+?):(\d+)\$(\d+)'."
+    )
+    cell_re = re.compile(r"created \$[a-z]+ cell `\$procdff\$(\d+)'", re.IGNORECASE)
+
+    result = {}
+    pending = None
+
+    for raw_line in proc_log_text.splitlines():
+        line = raw_line.strip()
+        sig_match = signal_re.search(line)
+        if sig_match:
+            file_path = sig_match.group(3)
+            line_num = int(sig_match.group(4))
+            pending = SourceLocation(file_path=file_path, start_line=line_num)
+            continue
+
+        cell_match = cell_re.search(line)
+        if cell_match and pending is not None:
+            result[cell_match.group(1)] = pending
+            pending = None
+
+    return result
 
 
 def _load_config(args) -> ProjectConfig:
@@ -284,6 +336,7 @@ def cmd_docor(args):
 def cmd_connectivity(args):
     """Check signal connectivity on after-proc schematic for a module."""
     from core import YosysBackend, ConnectivityChecker
+    from core.source_extractor import extract_module_locations
     from schematic import SchematicGenerator
 
     cfg = _load_config(args)
@@ -333,8 +386,7 @@ def cmd_connectivity(args):
     if not success:
         return _emit_json_and_return(1, "Failed to load design")
 
-    with _suppress_stdout_stderr():
-        proc_ok = backend.run_proc()
+    proc_ok, proc_log = _run_proc_with_log_capture(backend)
     if not proc_ok:
         return _emit_json_and_return(1, "Failed to run proc on design")
 
@@ -351,12 +403,22 @@ def cmd_connectivity(args):
         return _emit_json_and_return(1, f"Failed to generate afterproc schematic for {module_name}")
 
     checker = ConnectivityChecker(verbose=False)
+    module_obj = backend.get_module(module_name)
+    cell_locations = {}
+    if module_obj is not None:
+        cell_locations = extract_module_locations(module_obj, verbose=False)
+
+    proc_cell_locations = _parse_proc_cell_source_map(proc_log)
+    if proc_cell_locations:
+        cell_locations.update(proc_cell_locations)
+
     result = checker.check_connectivity(
         dot_content=proc_dot,
         from_signal=from_signal,
         to_signal=to_signal,
         module_name=module_name.lstrip("\\"),
         directed=directed,
+        cell_locations=cell_locations,
     )
 
     print(json.dumps(result.to_dict(), ensure_ascii=False))

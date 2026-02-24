@@ -81,6 +81,9 @@ python3 -m cli connectivity \
 
 输出：
 - 始终输出一个完整 JSON（单行），包含 `exists`、`path_nodes`、`matched_from_nodes`、`matched_to_nodes` 等字段
+- 条件传播点会在 `conditions` 字段中返回（如 `$mux` 的选择端口、`$adff/$dff` 的 `CLK/ARST/EN` 等条件端口来源）
+- 若可解析到 cell 源信息，`conditions[*].source_locations` 会给出对应 RTL 文件与行号
+- 对 `proc` 生成的寄存器（如 `$adff/$dff`）会优先通过 `proc` 日志回溯到对应 process 的源码行；部分 `$mux` 可能暂时无精确源码定位
 
 返回码：
 - `0`：存在路径
