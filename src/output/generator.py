@@ -87,7 +87,8 @@ class DocumentGenerator:
             "modules_total": 0,
             "schematics_generated": 0,
             "schematics_failed": 0,
-            "schematics_simplified": 0
+            "schematics_simplified": 0,
+            "schematics_afterproc": 0
         }
 
     @classmethod
@@ -155,6 +156,7 @@ class DocumentGenerator:
         self._log(f"Total modules: {self._stats['modules_total']}")
         self._log(f"Schematics generated: {self._stats['schematics_generated']}")
         self._log(f"Schematics simplified: {self._stats['schematics_simplified']}")
+        self._log(f"Schematics afterproc: {self._stats['schematics_afterproc']}")
         self._log(f"Schematics failed: {self._stats['schematics_failed']}")
         self._log(f"Output directory: {self.output_dir}")
 
@@ -164,6 +166,7 @@ class DocumentGenerator:
         """Create output directory structure."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
         (self.output_dir / "schematics").mkdir(exist_ok=True)
+        (self.output_dir / "afterproc").mkdir(exist_ok=True)
         if self.simplify:
             (self.output_dir / "simplified").mkdir(exist_ok=True)
 
@@ -275,7 +278,10 @@ class DocumentGenerator:
         )
         schematic_dir  = self.output_dir / "schematics"
         simplified_dir = self.output_dir / "simplified"
+        afterproc_dir  = self.output_dir / "afterproc"
 
+        # === Pass 1: Generate normal schematics (before proc) ===
+        self._log("\n--- Generating normal schematics ---")
         for i, module_name in enumerate(modules):
             clean_name = module_name.lstrip("\\")
             self._log(f"[{i+1}/{len(modules)}] {clean_name}", end=" ")
@@ -305,6 +311,32 @@ class DocumentGenerator:
             except Exception as e:
                 self._stats["schematics_failed"] += 1
                 self._log(f"- failed: {e}")
+
+        # === Pass 2: Generate afterproc schematics ===
+        # Run proc on entire design (destructive, but we don't need original design anymore)
+        self._log("\n--- Running 'proc' on entire design ---")
+        if self._backend.run_proc():
+            self._log("--- Generating afterproc schematics ---")
+            for i, module_name in enumerate(modules):
+                clean_name = module_name.lstrip("\\")
+                self._log(f"[{i+1}/{len(modules)}] {clean_name} (afterproc)", end=" ")
+
+                try:
+                    # Generate from proc'd design (no simplification for afterproc)
+                    proc_dot = generator.generate_from_proc_design(module_name)
+
+                    if proc_dot and len(proc_dot) > 100:
+                        proc_filepath = afterproc_dir / f"{clean_name}.dot"
+                        with open(proc_filepath, 'w') as f:
+                            f.write(proc_dot)
+                        self._stats["schematics_afterproc"] += 1
+                        self._log("- OK")
+                    else:
+                        self._log("- skipped (empty)")
+                except Exception as e:
+                    self._log(f"- failed: {e}")
+        else:
+            self._log("[WARN] Failed to run 'proc', skipping afterproc schematics")
 
     def _write_index(self) -> None:
         """Write index.json with metadata."""

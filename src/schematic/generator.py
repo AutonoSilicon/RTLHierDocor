@@ -56,6 +56,24 @@ class SchematicGenerator:
         """
         return self._backend.generate_dot(module_name)
 
+    def generate_from_proc_design(
+        self,
+        module_name: str
+    ) -> Optional[str]:
+        """Generate DOT schematic from a design that has already been processed by 'proc'.
+
+        This assumes 'proc' has already been run on the entire design via backend.run_proc().
+        The resulting schematic will show flip-flops ($adff) and multiplexers ($procmux)
+        instead of high-level process blocks.
+
+        Args:
+            module_name: Name of the module
+
+        Returns:
+            DOT content as string, or None if generation failed
+        """
+        return self._backend.generate_dot(module_name)
+
     def generate_simplified(
         self,
         module_name: str

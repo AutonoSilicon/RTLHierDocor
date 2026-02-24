@@ -372,3 +372,26 @@ class YosysBackend:
                 os.unlink(dot_path)
             except:
                 pass
+    
+    def run_proc(self) -> bool:
+        """Run 'proc' command on the entire design.
+        
+        This converts all processes (always blocks) to netlist elements
+        (flip-flops, latches, multiplexers). This is a destructive operation
+        that modifies the design in-place.
+        
+        Returns:
+            True if successful
+        """
+        if not self._design:
+            return False
+        
+        try:
+            ys.run_pass("proc", self._design)
+            if self._verbose:
+                print("[INFO] Ran 'proc' command on entire design")
+            return True
+        except Exception as e:
+            if self._verbose:
+                print(f"[WARN] Failed to run 'proc': {e}")
+            return False

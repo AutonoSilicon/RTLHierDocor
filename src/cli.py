@@ -322,6 +322,7 @@ def main():
                             default=None,
                             help="Simplification strategy (overrides config)")
 
+
     # ── docor command ──
     doc_parser = subparsers.add_parser("docor",
         help="Generate AI-powered hierarchical module documentation")
