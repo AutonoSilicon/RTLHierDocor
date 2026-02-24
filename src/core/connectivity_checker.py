@@ -163,6 +163,94 @@ class ConnectivityChecker:
             path_conditions=path_conditions,
         )
 
+    def render_paths_dot(
+        self,
+        dot_content: str,
+        result: ConnectivityResult,
+    ) -> str:
+        """Render original DOT with overlay highlights for discovered paths.
+
+        Args:
+            dot_content: Original module DOT content.
+            result: Connectivity result containing all paths.
+
+        Returns:
+            DOT text preserving original graph plus highlight overrides.
+        """
+        parser = DotParser()
+        parser.parse(dot_content)
+
+        path_nodes_set: Set[str] = set()
+        path_edges_set: Set[Tuple[str, str]] = set()
+        for one_path in result.all_path_nodes:
+            for node_id in one_path:
+                path_nodes_set.add(node_id)
+            for index in range(len(one_path) - 1):
+                path_edges_set.add((one_path[index], one_path[index + 1]))
+
+        from_nodes = set(result.matched_from_nodes)
+        to_nodes = set(result.matched_to_nodes)
+
+        if not path_nodes_set:
+            path_nodes_set.update(from_nodes)
+            path_nodes_set.update(to_nodes)
+
+        highlighted_edges: Set[Tuple[str, str]] = set()
+        for edge in parser.edges:
+            if (edge.src_node, edge.dst_node) in path_edges_set:
+                src_endpoint = self._format_dot_endpoint(edge.src_node, edge.src_port)
+                dst_endpoint = self._format_dot_endpoint(edge.dst_node, edge.dst_port)
+                highlighted_edges.add((src_endpoint, dst_endpoint))
+
+        overlay_lines: List[str] = []
+        overlay_lines.append("  // pathcheck highlight overlay")
+        overlay_lines.append(
+            f'  "_pathcheck_meta" [shape=note, color="gray40", fontcolor="gray20", '
+            f'label="{self._escape_dot_label(self._build_path_meta_label(result))}"];'
+        )
+
+        for node_id in sorted(path_nodes_set):
+            attrs: List[str] = ["penwidth=3.0"]
+
+            if node_id in from_nodes and node_id in to_nodes:
+                attrs.extend([
+                    'color="red4"',
+                    'fontcolor="red4"',
+                    'style="filled"',
+                    'fillcolor="salmon"',
+                ])
+            elif node_id in from_nodes:
+                attrs.extend([
+                    'color="red4"',
+                    'fontcolor="red4"',
+                    'style="filled"',
+                    'fillcolor="mistyrose"',
+                ])
+            elif node_id in to_nodes:
+                attrs.extend([
+                    'color="red4"',
+                    'fontcolor="red4"',
+                    'style="filled"',
+                    'fillcolor="lightcoral"',
+                ])
+            else:
+                attrs.extend([
+                    'color="red3"',
+                    'fontcolor="red3"',
+                    'style="filled"',
+                    'fillcolor="snow"',
+                ])
+
+            overlay_lines.append(f'  "{node_id}" [{", ".join(attrs)}];')
+
+        for src_endpoint, dst_endpoint in sorted(highlighted_edges):
+            overlay_lines.append(
+                f"  {src_endpoint} -> {dst_endpoint} "
+                '[color="red3", penwidth=3.4];'
+            )
+
+        return self._inject_dot_overrides(dot_content, overlay_lines)
+
     def find_signal_nodes(self, parser: DotParser, signal_name: str) -> List[str]:
         """Find DOT node IDs whose label exactly matches given signal name."""
         normalized_signal = self._normalize_signal(signal_name)
@@ -587,3 +675,36 @@ class ConnectivityChecker:
             deduped.append(condition)
 
         return deduped
+
+    def _escape_dot_label(self, text: str) -> str:
+        """Escape label text for safe DOT string embedding."""
+        escaped = text.replace('\\', '\\\\')
+        escaped = escaped.replace('"', '\\"')
+        return escaped
+
+    def _format_dot_endpoint(self, node_id: str, port_text: str) -> str:
+        """Build DOT endpoint text with optional port and compass."""
+        if not port_text:
+            return f'"{node_id}"'
+        return f'"{node_id}":{port_text}'
+
+    def _inject_dot_overrides(self, dot_content: str, overlay_lines: List[str]) -> str:
+        """Inject style override statements before final graph closing brace."""
+        content = dot_content.rstrip()
+        insert_at = content.rfind('}')
+        if insert_at == -1:
+            return content + "\n" + "\n".join(overlay_lines) + "\n"
+
+        prefix = content[:insert_at].rstrip()
+        suffix = content[insert_at:]
+        return prefix + "\n" + "\n".join(overlay_lines) + "\n" + suffix + "\n"
+
+    def _build_path_meta_label(self, result: ConnectivityResult) -> str:
+        """Build one-line metadata label for highlighted path view."""
+        text = (
+            f"pathcheck: {result.from_signal} -> {result.to_signal} | "
+            f"paths={result.path_count}"
+        )
+        if result.truncated:
+            text += " | truncated"
+        return text

@@ -375,6 +375,7 @@ def cmd_connectivity(args):
             "has_conditions": False,
             "conditions": [],
             "path_conditions": [],
+            "path_dot_file": "",
         }
         if result_dict:
             payload.update(result_dict)
@@ -453,6 +454,10 @@ def cmd_connectivity(args):
 
     final_payload = result.to_dict()
     final_output = output_path if output_path else _default_output_path()
+    path_dot_output = final_output.with_suffix(".paths.dot")
+    paths_dot_text = checker.render_paths_dot(proc_dot, result)
+    path_dot_output.write_text(paths_dot_text, encoding="utf-8")
+    final_payload["path_dot_file"] = str(path_dot_output)
     final_payload["output_file"] = str(final_output)
     final_output.parent.mkdir(parents=True, exist_ok=True)
     final_output.write_text(json.dumps(final_payload, ensure_ascii=False), encoding="utf-8")
