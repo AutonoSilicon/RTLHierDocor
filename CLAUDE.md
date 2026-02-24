@@ -58,6 +58,9 @@ python3 -m cli hierarchy -f <filelist.f> -t <top_module> --format ascii
 # Single module schematic
 python3 -m cli schematic -r <cached.il> -m <module_name> -o output.dot
 
+# Connectivity/path condition check (after-proc graph)
+python3 -m cli connectivity -m <module_name> --from-signal <src_sig> --to-signal <dst_sig> [-o out.json]
+
 # Disable simplification
 python3 -m cli generate --no-simplify
 
@@ -99,6 +102,18 @@ The CLI entry point is `src/cli.py`. The codebase follows a layered structure:
 4. Result: `Dict[module_name -> Set[port_names]]` — per-module exact port names to remove
 
 This ensures that a signal like `cpurst_b` at the top level is still removed in child modules even if the port is renamed (e.g., `rst_in`).
+
+### Connectivity / Pathcheck
+
+- Uses after-proc DOT netlist graph and checks directed data-path reachability.
+- Connectivity BFS filters control-only edges:
+  - mux select pins (`S/SEL/S*`)
+  - sequential control pins (`CLK/reset/EN/CE/LOAD/GATE` family)
+- Condition-point extraction semantics:
+  - mux: report select conditions
+  - sequential: report data-enable conditions only (`EN/CE/LOAD/GATE`)
+  - `CLK/reset` are intentionally excluded from condition points
+- Source locations on condition points come from decoded Yosys `src` attributes (binary-encoded strings are decoded), with proc-log fallback.
 
 ### Output Structure
 

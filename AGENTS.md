@@ -82,6 +82,9 @@ python3 -m cli hierarchy -f <filelist.f> -t <top_module> --format ascii
 # Single module schematic
 python3 -m cli schematic -r <cached.il> -m <module_name> -o output.dot
 
+# Connectivity/path condition check on after-proc graph
+python3 -m cli connectivity -m <module_name> --from-signal <src_sig> --to-signal <dst_sig> [-o out.json]
+
 # AI-powered documentation generation
 python3 -m cli docor -f <filelist.f> -t <top_module> -o <output_dir>
 ```
@@ -165,6 +168,18 @@ Multi-pass process in `AgentDocGenerator`:
 - **Pass 1.5**: Block-level documentation for large blocks
 - **Pass 2.1 + 2.5**: Parallel execution (highlights + flowchart generation)
 - **Pass 2**: Bottom-up synthesis documentation
+
+### Connectivity / Pathcheck Notes
+
+- `connectivity` uses the after-proc DOT graph and checks directed data-path reachability.
+- BFS excludes control-only edges to avoid false data connectivity:
+  - mux select pins (`S/SEL/S*`)
+  - sequential control pins (`CLK/reset/EN/CE/LOAD/GATE` family)
+- `conditions` currently reports:
+  - mux select conditions (`$mux/$pmux/$procmux`, select pins)
+  - sequential data-enable conditions only (`EN/CE/LOAD/GATE`)
+  - clock/reset are not emitted as condition points
+- `conditions[*].source_locations` are attached from decoded Yosys `src` attributes, with proc-log fallback when needed.
 
 ## Output Structure
 
