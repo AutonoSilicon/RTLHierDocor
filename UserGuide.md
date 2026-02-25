@@ -91,6 +91,8 @@ python3 -m cli connectivity \
 - `--undirected`：按无向图检查（默认按有向边）
 - `--max-paths`：最多返回多少条 simple path（默认 0，不限）
 - `--max-depth`：每条路径最多包含多少个节点（默认 0，不限）
+- `--dep-yaml`：读取 APV 风格 YAML，执行 `$dep -> local` 静态连通性批量检查
+- `--dep-task`：按任务 ID 过滤 dep 检查（逗号分隔，如 `ifu2idu,foo_task`）
 - `--path-overlay-mode`：路径可视化模式
     - `raw`（默认）：在 after-proc 原图上高亮，输出 `*.paths.dot`
     - `simplified`：在 after-proc 简化图上高亮，输出 `*.simplified.paths.dot`
@@ -129,6 +131,9 @@ python3 -m cli connectivity \
 - 始终输出一个完整 JSON（单行），包含 `exists`、`path_nodes`、`all_path_nodes`、`path_count`、`truncated`、`matched_from_nodes`、`matched_to_nodes` 等字段
 - `path_nodes` 保留为兼容字段（第一条见证路径）；`all_path_nodes` 为点对点之间提取到的全部路径列表
 - `path_conditions` 按路径返回条件点（每条路径一个条件集合）；`conditions` 为去重后的全量条件点集合
+- 当使用 `--dep-yaml` 时，JSON 额外包含：
+    - `dep_checks`：逐条 dep 关系的检查结果（含映射结果、通过/失败/跳过状态）
+    - `dep_summary`：总计、通过、失败、跳过统计
 - 路径可视化 DOT 由 `--path-overlay-mode` 决定：
     - `raw`：`*.paths.dot`
     - `simplified`：`*.simplified.paths.dot`
@@ -159,8 +164,8 @@ python3 -m cli connectivity \
     - 新增命中 COMB 的按需局部展开（含阈值保护）
 
 返回码：
-- `0`：存在路径
-- `1`：不存在路径或执行失败
+- 常规点对点模式：`0` 表示存在路径，`1` 表示不存在路径或执行失败
+- dep 批量模式：`0` 表示 dep 检查无失败项，`1` 表示存在失败项或执行失败
 
 ## 输入格式
 

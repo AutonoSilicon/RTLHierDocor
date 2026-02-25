@@ -338,6 +338,7 @@ def cmd_connectivity(args):
     """Check signal connectivity on after-proc schematic for a module."""
     from core import YosysBackend, ConnectivityChecker
     from core.source_extractor import extract_module_locations
+    from core.dep_condition_bridge import DepConditionBridge
     from schematic import SchematicGenerator
     from schematic.simplifier import simplify_dot_content_with_provenance
 
@@ -359,7 +360,13 @@ def cmd_connectivity(args):
 
     requested_output = getattr(args, 'output', None)
     output_path = Path(requested_output) if requested_output else None
+    dep_yaml_path = getattr(args, 'dep_yaml', None)
+    dep_task_filter_text = getattr(args, 'dep_task', None)
+    dep_task_filters = []
+    if dep_task_filter_text:
+        dep_task_filters = [part.strip() for part in dep_task_filter_text.split(',') if part.strip()]
     path_overlay_mode = getattr(args, 'path_overlay_mode', 'raw')
+    effective_overlay_mode = path_overlay_mode
     expand_max_combs = max(0, int(getattr(args, 'expand_max_combs', 8) or 0))
     expand_max_nodes = max(0, int(getattr(args, 'expand_max_nodes', 200) or 0))
 
@@ -399,7 +406,7 @@ def cmd_connectivity(args):
 
     from_signal = getattr(args, 'from_signal', None)
     to_signal = getattr(args, 'to_signal', None)
-    if not from_signal or not to_signal:
+    if not dep_yaml_path and (not from_signal or not to_signal):
         return _emit_json_and_return(1, "--from-signal and --to-signal are required")
 
     errors = cfg.validate("connectivity")
@@ -445,24 +452,145 @@ def cmd_connectivity(args):
     if proc_cell_locations:
         cell_locations.update(proc_cell_locations)
 
-    result = checker.check_connectivity(
-        dot_content=proc_dot,
-        from_signal=from_signal,
-        to_signal=to_signal,
-        module_name=module_name.lstrip("\\"),
-        directed=directed,
-        cell_locations=cell_locations,
-        max_paths=getattr(args, 'max_paths', 0),
-        max_depth=getattr(args, 'max_depth', 0),
-    )
+    result = None
+    if from_signal and to_signal:
+        result = checker.check_connectivity(
+            dot_content=proc_dot,
+            from_signal=from_signal,
+            to_signal=to_signal,
+            module_name=module_name.lstrip("\\"),
+            directed=directed,
+            cell_locations=cell_locations,
+            max_paths=getattr(args, 'max_paths', 0),
+            max_depth=getattr(args, 'max_depth', 0),
+        )
+        final_payload = result.to_dict()
+    else:
+        final_payload = {
+            "module": module_name.lstrip("\\"),
+            "from_signal": from_signal or "",
+            "to_signal": to_signal or "",
+            "directed": directed,
+            "exists": False,
+            "matched_from_nodes": [],
+            "matched_to_nodes": [],
+            "path_nodes": [],
+            "all_path_nodes": [],
+            "path_count": 0,
+            "truncated": False,
+            "has_conditions": False,
+            "conditions": [],
+            "path_conditions": [],
+        }
 
-    final_payload = result.to_dict()
+    dep_failed_count = 0
+    if dep_yaml_path:
+        bridge = DepConditionBridge()
+        dep_relations = bridge.extract_relations(
+            dep_yaml_path,
+            task_filters=dep_task_filters or None,
+        )
+
+        def _strip_indices(sig: str) -> str:
+            return re.sub(r"\[\s*\d+\s*(?::\s*\d+\s*)?\]", "", sig or "")
+
+        def _strip_patterns(sig: str) -> str:
+            return re.sub(r"\{\w+\}", "", sig or "")
+
+        def _signal_candidates(sig: str):
+            text = _strip_indices(_strip_patterns((sig or "").strip()))
+            if not text:
+                return []
+            candidates = [text]
+            if "." in text:
+                candidates.append(text.split(".")[-1])
+            uniq = []
+            seen = set()
+            for item in candidates:
+                key = item.lstrip("\\")
+                if key in seen:
+                    continue
+                seen.add(key)
+                uniq.append(key)
+            return uniq
+
+        def _resolve_signal_name(sig: str):
+            for candidate in _signal_candidates(sig):
+                matched_nodes = checker.find_signal_nodes_from_dot(proc_dot, candidate)
+                if matched_nodes:
+                    return candidate, matched_nodes
+            return "", []
+
+        dep_checks = []
+        for relation in dep_relations:
+            dep_ref_text = f"$dep.{relation.dep_task_id}.{relation.dep_signal}"
+            local_ref_text = relation.local_signal
+
+            mapped_from, from_nodes = _resolve_signal_name(relation.dep_signal)
+            mapped_to, to_nodes = _resolve_signal_name(relation.local_signal)
+
+            if not mapped_from or not mapped_to:
+                dep_checks.append({
+                    "relation_id": relation.relation_id,
+                    "task_id": relation.task_id,
+                    "dep_ref": dep_ref_text,
+                    "local_ref": local_ref_text,
+                    "expr_fragment": relation.expr_fragment,
+                    "status": "skipped",
+                    "mapped_from": mapped_from,
+                    "mapped_to": mapped_to,
+                    "reason": "failed to map dep/local signal to schematic node label",
+                })
+                continue
+
+            dep_result = checker.check_connectivity(
+                dot_content=proc_dot,
+                from_signal=mapped_from,
+                to_signal=mapped_to,
+                module_name=module_name.lstrip("\\"),
+                directed=directed,
+                cell_locations=cell_locations,
+                max_paths=getattr(args, 'max_paths', 0),
+                max_depth=getattr(args, 'max_depth', 0),
+            )
+
+            status = "passed" if dep_result.exists else "failed"
+            if status == "failed":
+                dep_failed_count += 1
+
+            dep_checks.append({
+                "relation_id": relation.relation_id,
+                "task_id": relation.task_id,
+                "dep_ref": dep_ref_text,
+                "local_ref": local_ref_text,
+                "expr_fragment": relation.expr_fragment,
+                "status": status,
+                "mapped_from": mapped_from,
+                "mapped_to": mapped_to,
+                "connectivity": dep_result.to_dict(),
+                "matched_from_nodes": from_nodes,
+                "matched_to_nodes": to_nodes,
+            })
+
+        final_payload["dep_checks"] = dep_checks
+        final_payload["dep_summary"] = {
+            "yaml_file": dep_yaml_path,
+            "task_filters": dep_task_filters,
+            "total_relations": len(dep_relations),
+            "checked": len([item for item in dep_checks if item.get("status") in ("passed", "failed")]),
+            "passed": len([item for item in dep_checks if item.get("status") == "passed"]),
+            "failed": dep_failed_count,
+            "skipped": len([item for item in dep_checks if item.get("status") == "skipped"]),
+        }
     final_output = output_path if output_path else _default_output_path()
     final_output.parent.mkdir(parents=True, exist_ok=True)
 
-    if path_overlay_mode == "raw":
+    if result is None:
+        effective_overlay_mode = "raw"
+
+    if effective_overlay_mode == "raw":
         path_dot_output = final_output.with_suffix(".paths.dot")
-        paths_dot_text = checker.render_paths_dot(proc_dot, result)
+        paths_dot_text = checker.render_paths_dot(proc_dot, result) if result else proc_dot
         path_dot_output.write_text(paths_dot_text, encoding="utf-8")
     else:
         simplified_dot, provenance = simplify_dot_content_with_provenance(
@@ -479,7 +607,7 @@ def cmd_connectivity(args):
         simplified_dot_output.write_text(simplified_dot, encoding="utf-8")
         provenance_output.write_text(json.dumps(provenance, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        if path_overlay_mode == "simplified":
+        if effective_overlay_mode == "simplified":
             path_dot_output = final_output.with_suffix(".simplified.paths.dot")
             paths_dot_text, simp_meta = checker.render_paths_on_simplified_dot(
                 raw_dot_content=proc_dot,
@@ -505,13 +633,15 @@ def cmd_connectivity(args):
         final_payload["provenance_file"] = str(provenance_output)
         final_payload.update(simp_meta)
 
-    final_payload["path_overlay_mode"] = path_overlay_mode
+    final_payload["path_overlay_mode"] = effective_overlay_mode
     final_payload["path_dot_file"] = str(path_dot_output)
     final_payload["output_file"] = str(final_output)
     final_output.write_text(json.dumps(final_payload, ensure_ascii=False), encoding="utf-8")
 
     print(json.dumps(final_payload, ensure_ascii=False))
-    return 0 if result.exists else 1
+    pair_ok = True if result is None else result.exists
+    dep_ok = dep_failed_count == 0
+    return 0 if (pair_ok and dep_ok) else 1
 
 
 def main():
@@ -596,10 +726,14 @@ def main():
                              help="Top module name (overrides config)")
     conn_parser.add_argument("-m", "--module", required=True,
                              help="Target module to check connectivity on")
-    conn_parser.add_argument("--from-signal", required=True,
+    conn_parser.add_argument("--from-signal",
                              help="Start signal name (exact label match)")
-    conn_parser.add_argument("--to-signal", required=True,
+    conn_parser.add_argument("--to-signal",
                              help="End signal name (exact label match)")
+    conn_parser.add_argument("--dep-yaml",
+                             help="APV-style YAML file for dep->local static connectivity checks")
+    conn_parser.add_argument("--dep-task",
+                             help="Comma-separated task IDs to filter dep checks")
     conn_parser.add_argument("--undirected", action="store_true",
                              help="Treat graph as undirected (default: directed)")
     conn_parser.add_argument("--max-paths", type=int, default=0,

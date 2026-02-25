@@ -535,6 +535,12 @@ class ConnectivityChecker:
 
         return matched_nodes
 
+    def find_signal_nodes_from_dot(self, dot_content: str, signal_name: str) -> List[str]:
+        """Find matched signal nodes directly from DOT content."""
+        parser = DotParser()
+        parser.parse(dot_content)
+        return self.find_signal_nodes(parser, signal_name)
+
     def _build_adjacency(self, parser: DotParser, directed: bool) -> Dict[str, Set[str]]:
         """Build adjacency list from parsed DOT edges."""
         adjacency: Dict[str, Set[str]] = defaultdict(set)
