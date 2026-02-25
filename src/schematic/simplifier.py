@@ -9,7 +9,7 @@ Ported from scripts/simplify_dot.py.
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set, Tuple, Optional, Any
 
 from models import SourceLocation
 
@@ -74,6 +74,7 @@ class SimplifiedGraph:
     comb_nodes: Dict[str, CombNodeInfo] = field(default_factory=dict)
     io_ports: Dict[str, str] = field(default_factory=dict)  # node_id -> port_label
     submodules: Dict[str, str] = field(default_factory=dict)  # node_id -> instance_name
+    seq_cells: Dict[str, str] = field(default_factory=dict)  # node_id -> cell_type
     edges: List[Tuple[str, str]] = field(default_factory=list)  # (src_id, dst_id)
 
 
@@ -98,6 +99,15 @@ class DotNode:
                 return match.group(1)
         return None
 
+    def extract_cell_type(self) -> str:
+        """Extract cell type token from record label (e.g. $dff/$mux)."""
+        if self.shape != "record" or not self.label:
+            return ""
+        match = re.search(r'\\n(\$[A-Za-z0-9_]+)\|', self.label)
+        if match:
+            return match.group(1)
+        return ""
+
     def is_submodule(self) -> bool:
         """Check if this record node is a submodule instance (not a built-in cell).
 
@@ -120,6 +130,11 @@ class DotNode:
         if self.shape == "box" and "PROC" in self.label:
             return "proc"
         if self.shape == "record":
+            cell_type = self.extract_cell_type().lower()
+            if cell_type in {
+                "$dff", "$adff", "$sdff", "$sdffe", "$dffe", "$dffsre", "$dlatch"
+            }:
+                return "seq_cell"
             if self.is_submodule():
                 return "submodule"
             return "comb_logic"
@@ -290,7 +305,7 @@ class CircuitGraph:
         """Get boundary nodes (PROC blocks, I/O ports, and submodule instances)."""
         boundary = set()
         for node_id, node in self.nodes.items():
-            if node.node_type in ('proc', 'io_port', 'submodule'):
+            if node.node_type in ('proc', 'io_port', 'submodule', 'seq_cell'):
                 boundary.add(node_id)
         return boundary
 
@@ -447,12 +462,15 @@ class DotSimplifier:
     def __init__(self, parser: DotParser, strategy: str = "proc_group",
                  cell_locations: Optional[Dict[str, SourceLocation]] = None,
                  remove_signals: Optional[List[str]] = None,
-                 verbose: bool = False):
+                 verbose: bool = False,
+                 graph_profile: str = "default"):
         self.parser = parser
         self.strategy = strategy
         self.cell_locations = cell_locations or {}
         self.remove_signals = remove_signals or []
         self.verbose = verbose
+        self.graph_profile = graph_profile
+        self._last_provenance: Dict[str, Any] = {}
 
         # Track which cell_ids from cell_locations are covered by the simplified output
         self._covered_cell_ids: Set[str] = set()
@@ -564,7 +582,7 @@ class DotSimplifier:
                         dst = edge.dst_node
                         if dst not in nodes_to_remove:
                             dst_node = self.parser.nodes.get(dst)
-                            if dst_node and dst_node.node_type in ('proc', 'io_port', 'submodule'):
+                            if dst_node and dst_node.node_type in ('proc', 'io_port', 'submodule', 'seq_cell'):
                                 has_live_boundary_output = True
                                 break
 
@@ -593,19 +611,34 @@ class DotSimplifier:
 
     def simplify(self) -> str:
         """Execute simplification and return new DOT content."""
+        strategy = self.strategy
+        if self.graph_profile == "after_proc" and strategy == "proc_group":
+            strategy = "connected_component"
+
         boundary_nodes = self.graph.get_boundary_nodes()
         nodes_to_merge = self.graph.get_nodes_to_merge()
 
         if not nodes_to_merge:
+            self._last_provenance = {
+                "schema_version": "1",
+                "graph_profile": self.graph_profile,
+                "strategy_used": strategy,
+                "comb_groups": [],
+                "raw_to_comb": {}
+            }
             return self._generate_original()
 
-        if self.strategy == "proc_group":
+        if strategy == "proc_group":
             return self._simplify_by_proc_group(boundary_nodes, nodes_to_merge)
         else:
             return self._simplify_by_connected_component(boundary_nodes, nodes_to_merge)
 
     def simplify_to_graph(self) -> Optional[SimplifiedGraph]:
         """Execute simplification and return structured SimplifiedGraph."""
+        strategy = self.strategy
+        if self.graph_profile == "after_proc" and strategy == "proc_group":
+            strategy = "connected_component"
+
         boundary_nodes = self.graph.get_boundary_nodes()
         nodes_to_merge = self.graph.get_nodes_to_merge()
 
@@ -613,11 +646,96 @@ class DotSimplifier:
             # Return graph with only boundary nodes
             return self._build_graph_from_original(boundary_nodes)
 
-        if self.strategy == "proc_group":
+        if strategy == "proc_group":
             return self._build_proc_group_graph(boundary_nodes, nodes_to_merge)
         else:
             # For now, only proc_group strategy is fully supported
             return None
+
+    def get_last_provenance(self) -> Dict[str, Any]:
+        """Get provenance metadata for the latest simplify() execution."""
+        return self._last_provenance
+
+    def _build_comb_provenance(
+        self,
+        comb_nodes: Dict[str, str],
+        comb_info: Dict[str, Any],
+        strategy_used: str
+    ) -> Dict[str, Any]:
+        """Build provenance mapping from simplified COMB nodes to original graph."""
+        groups: Dict[str, Dict[str, Any]] = {}
+        for raw_node_id, comb_id in comb_nodes.items():
+            if comb_id not in groups:
+                comb_type = "COMB"
+                info = comb_info.get(comb_id)
+                if isinstance(info, tuple) and len(info) > 0:
+                    comb_type = str(info[0])
+                groups[comb_id] = {
+                    "comb_id": comb_id,
+                    "comb_type": comb_type,
+                    "member_nodes": [],
+                    "internal_edges": [],
+                    "boundary_in_edges": [],
+                    "boundary_out_edges": []
+                }
+            groups[comb_id]["member_nodes"].append(raw_node_id)
+
+        internal_seen: Dict[str, Set[Tuple[str, str, str, str]]] = defaultdict(set)
+        bin_seen: Dict[str, Set[Tuple[str, str, str, str, str]]] = defaultdict(set)
+        bout_seen: Dict[str, Set[Tuple[str, str, str, str, str]]] = defaultdict(set)
+
+        for edge in self.graph.edges:
+            src_comb = comb_nodes.get(edge.src_node)
+            dst_comb = comb_nodes.get(edge.dst_node)
+
+            if src_comb and dst_comb and src_comb == dst_comb:
+                key = (edge.src_node, edge.src_port, edge.dst_node, edge.dst_port)
+                if key not in internal_seen[src_comb]:
+                    internal_seen[src_comb].add(key)
+                    groups[src_comb]["internal_edges"].append({
+                        "src": edge.src_node,
+                        "src_port": edge.src_port,
+                        "dst": edge.dst_node,
+                        "dst_port": edge.dst_port,
+                    })
+                continue
+
+            if src_comb:
+                outside_mapped = dst_comb or edge.dst_node
+                key = (edge.src_node, edge.src_port, edge.dst_node, edge.dst_port, outside_mapped)
+                if key not in bout_seen[src_comb]:
+                    bout_seen[src_comb].add(key)
+                    groups[src_comb]["boundary_out_edges"].append({
+                        "src": edge.src_node,
+                        "src_port": edge.src_port,
+                        "dst": edge.dst_node,
+                        "dst_port": edge.dst_port,
+                        "outside_mapped": outside_mapped,
+                    })
+
+            if dst_comb:
+                outside_mapped = src_comb or edge.src_node
+                key = (edge.src_node, edge.src_port, edge.dst_node, edge.dst_port, outside_mapped)
+                if key not in bin_seen[dst_comb]:
+                    bin_seen[dst_comb].add(key)
+                    groups[dst_comb]["boundary_in_edges"].append({
+                        "src": edge.src_node,
+                        "src_port": edge.src_port,
+                        "dst": edge.dst_node,
+                        "dst_port": edge.dst_port,
+                        "outside_mapped": outside_mapped,
+                    })
+
+        for group in groups.values():
+            group["member_nodes"].sort()
+
+        return {
+            "schema_version": "1",
+            "graph_profile": self.graph_profile,
+            "strategy_used": strategy_used,
+            "comb_groups": [groups[k] for k in sorted(groups.keys())],
+            "raw_to_comb": {k: v for k, v in sorted(comb_nodes.items())}
+        }
 
     def _parse_proc_source_location(self, label: str) -> Optional[SourceLocation]:
         """Parse PROC label to extract source location.
@@ -773,6 +891,8 @@ class DotSimplifier:
                     match = re.search(r'\|([^|{}<>]+?)\\n', node.label)
                     instance_name = match.group(1).strip() if match else node_id
                     graph.submodules[node_id] = instance_name
+                elif node.node_type == 'seq_cell':
+                    graph.seq_cells[node_id] = node.extract_cell_type()
 
         # Build edges
         for edge in new_edges:
@@ -803,6 +923,8 @@ class DotSimplifier:
                     match = re.search(r'\|([^|{}<>]+?)\\n', node.label)
                     instance_name = match.group(1).strip() if match else node_id
                     graph.submodules[node_id] = instance_name
+                elif node.node_type == 'seq_cell':
+                    graph.seq_cells[node_id] = node.extract_cell_type()
 
         for edge in self.parser.edges:
             if edge.src_node in boundary_nodes and edge.dst_node in boundary_nodes:
@@ -935,6 +1057,12 @@ class DotSimplifier:
         # Completeness verification: check cell_locations against covered + removed
         self._verify_completeness()
 
+        self._last_provenance = self._build_comb_provenance(
+            comb_nodes=comb_nodes,
+            comb_info=comb_info,
+            strategy_used="proc_group"
+        )
+
         return self._generate_simplified_proc_group(boundary_nodes, comb_info, new_edges, comb_locations)
 
     def _verify_completeness(self) -> None:
@@ -997,6 +1125,12 @@ class DotSimplifier:
                 comb_nodes[node_id] = comb_id
 
         new_edges = self._generate_new_edges(nodes_to_merge, comb_nodes)
+
+        self._last_provenance = self._build_comb_provenance(
+            comb_nodes=comb_nodes,
+            comb_info=comb_info,
+            strategy_used="connected_component"
+        )
 
         return self._generate_simplified(boundary_nodes, comb_info, new_edges)
 
@@ -1201,6 +1335,8 @@ class DotSimplifier:
                     lines.append(f'{node_id} [shape=octagon, label="{node.label}"];')
                 elif node.node_type == 'submodule':
                     lines.append(f'{node_id} [{node.raw_attrs}];')
+                elif node.node_type == 'seq_cell':
+                    lines.append(f'{node_id} [{node.raw_attrs}];')
 
         for comb_id, count in sorted(comb_info.items()):
             lines.append(
@@ -1244,6 +1380,8 @@ class DotSimplifier:
                     lines.append(f'{node_id} [shape=octagon, label="{node.label}"];')
                 elif node.node_type == 'submodule':
                     lines.append(f'{node_id} [{node.raw_attrs}];')
+                elif node.node_type == 'seq_cell':
+                    lines.append(f'{node_id} [{node.raw_attrs}];')
 
         for comb_id, (label, count) in sorted(comb_info.items()):
             if count == 0:
@@ -1284,7 +1422,8 @@ def simplify_dot_content(
     strategy: str = "proc_group",
     cell_locations: Optional[Dict[str, SourceLocation]] = None,
     remove_signals: Optional[List[str]] = None,
-    verbose: bool = False
+    verbose: bool = False,
+    graph_profile: str = "default"
 ) -> str:
     """Simplify DOT content string.
 
@@ -1295,6 +1434,7 @@ def simplify_dot_content(
         remove_signals: Optional list of signal name patterns to remove
             (fnmatch-style, e.g. ["*rst*", "cpurst_b", "*scan_en*"])
         verbose: Enable completeness verification warnings
+        graph_profile: Graph profile hint, e.g. "default" or "after_proc"
 
     Returns:
         Simplified DOT content string
@@ -1306,9 +1446,33 @@ def simplify_dot_content(
         parser, strategy=strategy,
         cell_locations=cell_locations,
         remove_signals=remove_signals,
-        verbose=verbose
+        verbose=verbose,
+        graph_profile=graph_profile
     )
     return simplifier.simplify()
+
+
+def simplify_dot_content_with_provenance(
+    content: str,
+    strategy: str = "proc_group",
+    cell_locations: Optional[Dict[str, SourceLocation]] = None,
+    remove_signals: Optional[List[str]] = None,
+    verbose: bool = False,
+    graph_profile: str = "default"
+) -> Tuple[str, Dict[str, Any]]:
+    """Simplify DOT and return (simplified_dot, provenance)."""
+    parser = DotParser()
+    parser.parse(content)
+
+    simplifier = DotSimplifier(
+        parser, strategy=strategy,
+        cell_locations=cell_locations,
+        remove_signals=remove_signals,
+        verbose=verbose,
+        graph_profile=graph_profile
+    )
+    simplified = simplifier.simplify()
+    return simplified, simplifier.get_last_provenance()
 
 
 def simplify_dot_to_graph(
@@ -1316,7 +1480,8 @@ def simplify_dot_to_graph(
     strategy: str = "proc_group",
     cell_locations: Optional[Dict[str, SourceLocation]] = None,
     remove_signals: Optional[List[str]] = None,
-    verbose: bool = False
+    verbose: bool = False,
+    graph_profile: str = "default"
 ) -> Optional[SimplifiedGraph]:
     """Simplify DOT content and return structured SimplifiedGraph.
 
@@ -1327,6 +1492,7 @@ def simplify_dot_to_graph(
         remove_signals: Optional list of signal name patterns to remove
             (fnmatch-style, e.g. ["*rst*", "cpurst_b", "*scan_en*"])
         verbose: Enable completeness verification warnings
+        graph_profile: Graph profile hint, e.g. "default" or "after_proc"
 
     Returns:
         SimplifiedGraph object or None if simplification failed
@@ -1338,6 +1504,7 @@ def simplify_dot_to_graph(
         parser, strategy=strategy,
         cell_locations=cell_locations,
         remove_signals=remove_signals,
-        verbose=verbose
+        verbose=verbose,
+        graph_profile=graph_profile
     )
     return simplifier.simplify_to_graph()

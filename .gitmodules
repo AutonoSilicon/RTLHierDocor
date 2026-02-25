@@ -1,0 +1,3 @@
+[submodule "AgenticPipeViewer"]
+	path = AgenticPipeViewer
+	url = https://github.com/LingZichao/AgenticPipeViewer.git

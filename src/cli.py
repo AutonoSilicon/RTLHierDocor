@@ -339,6 +339,7 @@ def cmd_connectivity(args):
     from core import YosysBackend, ConnectivityChecker
     from core.source_extractor import extract_module_locations
     from schematic import SchematicGenerator
+    from schematic.simplifier import simplify_dot_content_with_provenance
 
     cfg = _load_config(args)
     directed = not getattr(args, 'undirected', False)
@@ -358,6 +359,9 @@ def cmd_connectivity(args):
 
     requested_output = getattr(args, 'output', None)
     output_path = Path(requested_output) if requested_output else None
+    path_overlay_mode = getattr(args, 'path_overlay_mode', 'raw')
+    expand_max_combs = max(0, int(getattr(args, 'expand_max_combs', 8) or 0))
+    expand_max_nodes = max(0, int(getattr(args, 'expand_max_nodes', 200) or 0))
 
     def _emit_json_and_return(exit_code: int, error: str = "", result_dict=None):
         payload = {
@@ -454,12 +458,56 @@ def cmd_connectivity(args):
 
     final_payload = result.to_dict()
     final_output = output_path if output_path else _default_output_path()
-    path_dot_output = final_output.with_suffix(".paths.dot")
-    paths_dot_text = checker.render_paths_dot(proc_dot, result)
-    path_dot_output.write_text(paths_dot_text, encoding="utf-8")
+    final_output.parent.mkdir(parents=True, exist_ok=True)
+
+    if path_overlay_mode == "raw":
+        path_dot_output = final_output.with_suffix(".paths.dot")
+        paths_dot_text = checker.render_paths_dot(proc_dot, result)
+        path_dot_output.write_text(paths_dot_text, encoding="utf-8")
+    else:
+        simplified_dot, provenance = simplify_dot_content_with_provenance(
+            proc_dot,
+            strategy="connected_component",
+            cell_locations=cell_locations,
+            remove_signals=None,
+            verbose=False,
+            graph_profile="after_proc"
+        )
+
+        simplified_dot_output = final_output.with_suffix(".afterproc.simplified.dot")
+        provenance_output = final_output.with_suffix(".afterproc.simplified.prov.json")
+        simplified_dot_output.write_text(simplified_dot, encoding="utf-8")
+        provenance_output.write_text(json.dumps(provenance, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if path_overlay_mode == "simplified":
+            path_dot_output = final_output.with_suffix(".simplified.paths.dot")
+            paths_dot_text, simp_meta = checker.render_paths_on_simplified_dot(
+                raw_dot_content=proc_dot,
+                simplified_dot_content=simplified_dot,
+                result=result,
+                provenance=provenance,
+                expand_comb=False,
+            )
+        else:
+            path_dot_output = final_output.with_suffix(".expanded.paths.dot")
+            paths_dot_text, simp_meta = checker.render_paths_on_simplified_dot(
+                raw_dot_content=proc_dot,
+                simplified_dot_content=simplified_dot,
+                result=result,
+                provenance=provenance,
+                expand_comb=True,
+                max_expand_combs=expand_max_combs,
+                max_expand_nodes=expand_max_nodes,
+            )
+
+        path_dot_output.write_text(paths_dot_text, encoding="utf-8")
+        final_payload["simplified_dot_file"] = str(simplified_dot_output)
+        final_payload["provenance_file"] = str(provenance_output)
+        final_payload.update(simp_meta)
+
+    final_payload["path_overlay_mode"] = path_overlay_mode
     final_payload["path_dot_file"] = str(path_dot_output)
     final_payload["output_file"] = str(final_output)
-    final_output.parent.mkdir(parents=True, exist_ok=True)
     final_output.write_text(json.dumps(final_payload, ensure_ascii=False), encoding="utf-8")
 
     print(json.dumps(final_payload, ensure_ascii=False))
@@ -558,6 +606,14 @@ def main():
                              help="Maximum number of simple paths to return, 0 means unlimited")
     conn_parser.add_argument("--max-depth", type=int, default=0,
                              help="Maximum number of nodes in each path, 0 means unlimited")
+    conn_parser.add_argument("--path-overlay-mode",
+                             choices=["raw", "simplified", "simplified-expand"],
+                             default="raw",
+                             help="Path visualization mode: raw (default), simplified, or simplified-expand")
+    conn_parser.add_argument("--expand-max-combs", type=int, default=8,
+                             help="When using simplified-expand, max number of hit COMB nodes to expand")
+    conn_parser.add_argument("--expand-max-nodes", type=int, default=200,
+                             help="When using simplified-expand, max total expanded detail nodes")
     conn_parser.add_argument("-o", "--output",
                              help="Output JSON file path (default: <output_dir>/pathcheck/<auto_name>.json)")
 

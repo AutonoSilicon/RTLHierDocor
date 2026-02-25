@@ -7,7 +7,7 @@ Phase-1 goal:
 
 from dataclasses import dataclass, field
 from collections import deque, defaultdict
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Any
 import re
 import sys
 
@@ -250,6 +250,278 @@ class ConnectivityChecker:
             )
 
         return self._inject_dot_overrides(dot_content, overlay_lines)
+
+    def render_paths_on_simplified_dot(
+        self,
+        raw_dot_content: str,
+        simplified_dot_content: str,
+        result: ConnectivityResult,
+        provenance: Optional[Dict[str, Any]] = None,
+        expand_comb: bool = False,
+        max_expand_combs: int = 8,
+        max_expand_nodes: int = 200,
+    ) -> Tuple[str, Dict[str, object]]:
+        """Render connectivity paths on simplified DOT with optional COMB detail expansion."""
+        raw_parser = DotParser()
+        raw_parser.parse(raw_dot_content)
+        simp_parser = DotParser()
+        simp_parser.parse(simplified_dot_content)
+
+        provenance = provenance or {}
+        raw_to_comb = provenance.get("raw_to_comb", {})
+        if not isinstance(raw_to_comb, dict):
+            raw_to_comb = {}
+
+        def _map_node(raw_node_id: str) -> str:
+            mapped = raw_to_comb.get(raw_node_id)
+            if isinstance(mapped, str) and mapped:
+                return mapped
+            return raw_node_id
+
+        projected_paths: List[List[str]] = []
+        path_nodes_set: Set[str] = set()
+        path_edges_set: Set[Tuple[str, str]] = set()
+        raw_path_nodes_set: Set[str] = set()
+
+        for raw_path in result.all_path_nodes:
+            mapped_path: List[str] = []
+            for raw_node in raw_path:
+                raw_path_nodes_set.add(raw_node)
+                simp_node = _map_node(raw_node)
+                if not mapped_path or mapped_path[-1] != simp_node:
+                    mapped_path.append(simp_node)
+
+            if not mapped_path:
+                continue
+
+            projected_paths.append(mapped_path)
+            for node_id in mapped_path:
+                path_nodes_set.add(node_id)
+            for index in range(len(mapped_path) - 1):
+                path_edges_set.add((mapped_path[index], mapped_path[index + 1]))
+
+        from_nodes = {_map_node(node_id) for node_id in result.matched_from_nodes}
+        to_nodes = {_map_node(node_id) for node_id in result.matched_to_nodes}
+
+        if not path_nodes_set:
+            path_nodes_set.update(from_nodes)
+            path_nodes_set.update(to_nodes)
+
+        highlighted_edges: Set[Tuple[str, str]] = set()
+        for edge in simp_parser.edges:
+            if (edge.src_node, edge.dst_node) in path_edges_set:
+                src_endpoint = self._format_dot_endpoint(edge.src_node, edge.src_port)
+                dst_endpoint = self._format_dot_endpoint(edge.dst_node, edge.dst_port)
+                highlighted_edges.add((src_endpoint, dst_endpoint))
+
+        overlay_lines: List[str] = []
+        overlay_lines.append("  // pathcheck highlight overlay (simplified)")
+        overlay_lines.append(
+            f'  "_pathcheck_meta" [shape=note, color="gray40", fontcolor="gray20", '
+            f'label="{self._escape_dot_label(self._build_path_meta_label(result))} | simplified"];'
+        )
+
+        for node_id in sorted(path_nodes_set):
+            attrs: List[str] = ["penwidth=3.0"]
+
+            if node_id in from_nodes and node_id in to_nodes:
+                attrs.extend([
+                    'color="red4"',
+                    'fontcolor="red4"',
+                    'style="filled"',
+                    'fillcolor="salmon"',
+                ])
+            elif node_id in from_nodes:
+                attrs.extend([
+                    'color="red4"',
+                    'fontcolor="red4"',
+                    'style="filled"',
+                    'fillcolor="mistyrose"',
+                ])
+            elif node_id in to_nodes:
+                attrs.extend([
+                    'color="red4"',
+                    'fontcolor="red4"',
+                    'style="filled"',
+                    'fillcolor="lightcoral"',
+                ])
+            else:
+                attrs.extend([
+                    'color="red3"',
+                    'fontcolor="red3"',
+                    'style="filled"',
+                    'fillcolor="snow"',
+                ])
+
+            overlay_lines.append(f'  "{node_id}" [{", ".join(attrs)}];')
+
+        for src_endpoint, dst_endpoint in sorted(highlighted_edges):
+            overlay_lines.append(
+                f"  {src_endpoint} -> {dst_endpoint} "
+                '[color="red3", penwidth=3.4];'
+            )
+
+        metadata: Dict[str, object] = {
+            "hit_comb_nodes": [],
+            "expanded_comb_nodes": [],
+            "degraded_reason": "",
+            "projected_path_count": len(projected_paths),
+        }
+
+        if expand_comb:
+            comb_groups = provenance.get("comb_groups", [])
+            group_map: Dict[str, Dict[str, Any]] = {}
+            if isinstance(comb_groups, list):
+                for item in comb_groups:
+                    if isinstance(item, dict):
+                        comb_id = item.get("comb_id")
+                        if isinstance(comb_id, str) and comb_id:
+                            group_map[comb_id] = item
+
+            hit_comb_nodes = sorted(
+                node_id for node_id in path_nodes_set
+                if node_id in group_map
+            )
+            metadata["hit_comb_nodes"] = hit_comb_nodes
+
+            if len(hit_comb_nodes) > max_expand_combs:
+                metadata["degraded_reason"] = (
+                    f"hit_comb_nodes({len(hit_comb_nodes)}) exceeds max_expand_combs({max_expand_combs})"
+                )
+            else:
+                def _safe_expand_id(comb_id: str, raw_node_id: str) -> str:
+                    base = f"__exp__{comb_id}__{raw_node_id}"
+                    return re.sub(r"[^A-Za-z0-9_]", "_", base)
+
+                expanded_total_nodes = 0
+                expanded_comb_nodes: List[str] = []
+
+                for comb_id in hit_comb_nodes:
+                    group = group_map.get(comb_id, {})
+                    members = group.get("member_nodes", [])
+                    if not isinstance(members, list):
+                        continue
+
+                    members = [node for node in members if isinstance(node, str)]
+                    member_set = set(members)
+                    if not member_set:
+                        continue
+
+                    hit_members = [node for node in members if node in raw_path_nodes_set]
+                    if not hit_members:
+                        hit_members = members[:1]
+
+                    internal_edges = group.get("internal_edges", [])
+                    if not isinstance(internal_edges, list):
+                        internal_edges = []
+
+                    detail_nodes = set(hit_members)
+                    for edge in internal_edges:
+                        if not isinstance(edge, dict):
+                            continue
+                        src = edge.get("src")
+                        dst = edge.get("dst")
+                        if src in hit_members and isinstance(dst, str):
+                            detail_nodes.add(dst)
+                        if dst in hit_members and isinstance(src, str):
+                            detail_nodes.add(src)
+
+                    detail_nodes = {n for n in detail_nodes if n in member_set}
+
+                    if expanded_total_nodes + len(detail_nodes) > max_expand_nodes:
+                        metadata["degraded_reason"] = (
+                            f"expanded_nodes would exceed max_expand_nodes({max_expand_nodes})"
+                        )
+                        break
+
+                    expanded_total_nodes += len(detail_nodes)
+                    expanded_comb_nodes.append(comb_id)
+
+                    overlay_lines.append(
+                        f'  "{comb_id}" [color="orangered3", penwidth=3.4, style="filled", fillcolor="moccasin"];'
+                    )
+
+                    cluster_name = re.sub(r"[^A-Za-z0-9_]", "_", f"cluster_exp_{comb_id}")
+                    overlay_lines.append(f"  subgraph {cluster_name} {{")
+                    overlay_lines.append('    style="dashed"; color="gray50";')
+                    overlay_lines.append(
+                        f'    label="expand {self._escape_dot_label(comb_id)}"; fontcolor="gray30";'
+                    )
+
+                    expanded_id_map: Dict[str, str] = {}
+                    for raw_node_id in sorted(detail_nodes):
+                        expanded_id = _safe_expand_id(comb_id, raw_node_id)
+                        expanded_id_map[raw_node_id] = expanded_id
+                        raw_node = raw_parser.nodes.get(raw_node_id)
+                        if raw_node and raw_node.raw_attrs:
+                            overlay_lines.append(f'    "{expanded_id}" [ {raw_node.raw_attrs} ];')
+                        else:
+                            overlay_lines.append(
+                                f'    "{expanded_id}" [shape=box, label="{self._escape_dot_label(raw_node_id)}"];'
+                            )
+
+                    overlay_lines.append("  }")
+
+                    anchor_node = next(iter(expanded_id_map.values()), "")
+                    if anchor_node:
+                        overlay_lines.append(
+                            f'  "{comb_id}" -> "{anchor_node}" [style="dotted", color="gray50", arrowhead="none"];'
+                        )
+
+                    for edge in internal_edges:
+                        if not isinstance(edge, dict):
+                            continue
+                        src = edge.get("src")
+                        dst = edge.get("dst")
+                        if src not in expanded_id_map or dst not in expanded_id_map:
+                            continue
+                        overlay_lines.append(
+                            f'  "{expanded_id_map[src]}" -> "{expanded_id_map[dst]}" '
+                            '[color="orangered3", penwidth=2.6];'
+                        )
+
+                    boundary_in_edges = group.get("boundary_in_edges", [])
+                    boundary_out_edges = group.get("boundary_out_edges", [])
+                    if not isinstance(boundary_in_edges, list):
+                        boundary_in_edges = []
+                    if not isinstance(boundary_out_edges, list):
+                        boundary_out_edges = []
+
+                    for edge in boundary_in_edges:
+                        if not isinstance(edge, dict):
+                            continue
+                        dst_raw = edge.get("dst")
+                        outside = edge.get("outside_mapped")
+                        if dst_raw not in expanded_id_map or not isinstance(outside, str):
+                            continue
+                        if outside == comb_id:
+                            continue
+                        if outside not in simp_parser.nodes and outside not in group_map:
+                            continue
+                        overlay_lines.append(
+                            f'  "{outside}" -> "{expanded_id_map[dst_raw]}" '
+                            '[color="orangered3", style="dashed", penwidth=2.0];'
+                        )
+
+                    for edge in boundary_out_edges:
+                        if not isinstance(edge, dict):
+                            continue
+                        src_raw = edge.get("src")
+                        outside = edge.get("outside_mapped")
+                        if src_raw not in expanded_id_map or not isinstance(outside, str):
+                            continue
+                        if outside == comb_id:
+                            continue
+                        if outside not in simp_parser.nodes and outside not in group_map:
+                            continue
+                        overlay_lines.append(
+                            f'  "{expanded_id_map[src_raw]}" -> "{outside}" '
+                            '[color="orangered3", style="dashed", penwidth=2.0];'
+                        )
+
+                metadata["expanded_comb_nodes"] = expanded_comb_nodes
+
+        return self._inject_dot_overrides(simplified_dot_content, overlay_lines), metadata
 
     def find_signal_nodes(self, parser: DotParser, signal_name: str) -> List[str]:
         """Find DOT node IDs whose label exactly matches given signal name."""

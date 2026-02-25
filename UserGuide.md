@@ -91,19 +91,72 @@ python3 -m cli connectivity \
 - `--undirected`：按无向图检查（默认按有向边）
 - `--max-paths`：最多返回多少条 simple path（默认 0，不限）
 - `--max-depth`：每条路径最多包含多少个节点（默认 0，不限）
+- `--path-overlay-mode`：路径可视化模式
+    - `raw`（默认）：在 after-proc 原图上高亮，输出 `*.paths.dot`
+    - `simplified`：在 after-proc 简化图上高亮，输出 `*.simplified.paths.dot`
+    - `simplified-expand`：在 after-proc 简化图上高亮，并对命中路径的 COMB 节点做局部展开，输出 `*.expanded.paths.dot`
+- `--expand-max-combs`：`simplified-expand` 模式下最多展开多少个命中 COMB（默认 8）
+- `--expand-max-nodes`：`simplified-expand` 模式下最多展开多少个细节节点（默认 200）
 - `-o/--output`：自定义输出 JSON 文件路径
+
+示例（简化图高亮）：
+
+```bash
+python3 -m cli connectivity \
+        -f "$CODE_BASE_PATH/gen_rtl/filelists/C910_asic_rtl.fl" \
+        -t openC910 \
+        -m ct_ifu_pcgen \
+        --from-signal had_ifu_pc \
+        --to-signal pcgen_ifctrl_pc \
+        --path-overlay-mode simplified
+```
+
+示例（简化图高亮 + 命中 COMB 局部展开）：
+
+```bash
+python3 -m cli connectivity \
+        -f "$CODE_BASE_PATH/gen_rtl/filelists/C910_asic_rtl.fl" \
+        -t openC910 \
+        -m ct_ifu_pcgen \
+        --from-signal had_ifu_pc \
+        --to-signal pcgen_ifctrl_pc \
+        --path-overlay-mode simplified-expand \
+        --expand-max-combs 8 \
+        --expand-max-nodes 200
+```
 
 输出：
 - 始终输出一个完整 JSON（单行），包含 `exists`、`path_nodes`、`all_path_nodes`、`path_count`、`truncated`、`matched_from_nodes`、`matched_to_nodes` 等字段
 - `path_nodes` 保留为兼容字段（第一条见证路径）；`all_path_nodes` 为点对点之间提取到的全部路径列表
 - `path_conditions` 按路径返回条件点（每条路径一个条件集合）；`conditions` 为去重后的全量条件点集合
-- 同目录额外生成路径可视化 DOT：`*.paths.dot`，JSON 中通过 `path_dot_file` 返回其路径
+- 路径可视化 DOT 由 `--path-overlay-mode` 决定：
+    - `raw`：`*.paths.dot`
+    - `simplified`：`*.simplified.paths.dot`
+    - `simplified-expand`：`*.expanded.paths.dot`
+- `simplified` 与 `simplified-expand` 模式会额外生成：
+    - `*.afterproc.simplified.dot`（after-proc 简化图）
+    - `*.afterproc.simplified.prov.json`（简化节点到原图节点的 provenance 映射）
+- JSON 中新增/扩展字段：
+    - `path_overlay_mode`：实际使用的可视化模式
+    - `simplified_dot_file`、`provenance_file`（仅简化模式）
+    - `hit_comb_nodes`、`expanded_comb_nodes`、`degraded_reason`（仅 `simplified-expand`）
 - 默认同时写入：`<output_dir>/pathcheck/<module>__<from>__to__<to>.json`
 - 连通性按“数据路径”检查：会过滤控制边（如 `$mux/$procmux` 的 `S/SEL` 输入、时序单元的 `CLK/reset/EN` 等控制端口输入），避免把控制信号误判为数据可达
 - 条件传播点在 `conditions` 字段中返回：
     - `$mux/$pmux/$procmux`：记录选择端口（`S/SEL/S*`）
     - 时序单元（如 `$adff/$dff`）：仅在存在数据使能端口（`EN/CE/LOAD/GATE`）时记录；`CLK/reset` 不计入 condition 点
 - 若可解析到 cell 源信息，`conditions[*].source_locations` 会给出对应 RTL 文件与行号（优先来自 cell 的 `src` 属性；必要时回退到 `proc` 日志映射）
+
+说明：
+- 现有简化视图对 after-proc 图采用“时序单元边界保留”策略：`$dff/$adff/$sdff/$dffe/$dlatch` 等不会并入 COMB 聚合。
+- 连接性求解仍基于 after-proc 原图，简化图仅用于可视化投影与局部展开，因此 `exists/path_count/conditions` 的语义与 `raw` 模式保持一致。
+
+## 更新记录
+
+- 2026-02-25
+    - 新增 connectivity 路径叠加模式：`raw` / `simplified` / `simplified-expand`
+    - 新增 after-proc 简化图与 provenance sidecar 输出
+    - 新增命中 COMB 的按需局部展开（含阈值保护）
 
 返回码：
 - `0`：存在路径
