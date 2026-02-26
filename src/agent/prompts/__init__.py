@@ -45,10 +45,8 @@ __all__ = [
     "PASS1_SYSTEM",
     "PASS1_PROMPT",
     # Pass 2
-    "PASS2_LEAF_SYSTEM",
-    "PASS2_LEAF_PROMPT",
-    "PASS2_NONLEAF_SYSTEM",
-    "PASS2_NONLEAF_PROMPT",
+    "PASS2_SYSTEM",
+    "PASS2_PROMPT",
     # Pass 2.1
     "PASS2_1_SYSTEM",
     "PASS2_1_PROMPT",

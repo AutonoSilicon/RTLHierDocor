@@ -4,7 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-RTLHierDocor is a Python tool that generates hierarchical documentation for RTL (Register Transfer Level) designs using Yosys. It produces module hierarchy trees, simplified schematics with source code annotations, and JSON indexes. Built for the OpenC910 CPU design project.
+RTLHierDocor is a Python tool that generates hierarchical documentation for RTL (Register Transfer Level) designs using Yosys. It produces module hierarchy trees, simplified schematics with source code annotations, and AI-powered module documentation. Originally built for the OpenC910 CPU design project.
+
+**Key Features:**
+- Hierarchical module tree extraction from RTL designs
+- DOT schematic generation with optional simplification (combines combinational logic)
+- Signal tracing through module hierarchy for intelligent filtering
+- Source code location annotations for PROC blocks and logic
+- AI-powered documentation generation using LLM backends (Anthropic/OpenAI)
 
 ## Environment Setup
 
@@ -12,7 +19,13 @@ RTLHierDocor is a Python tool that generates hierarchical documentation for RTL 
 ```bash
 source env.sh
 ```
-This loads the oss-cad-suite toolchain (Yosys/pyosys), activates the Python venv, sets `PYTHONPATH` to `src/`, and exports `CODE_BASE_PATH` pointing to the C910 RTL source.
+
+This script:
+- Activates the Python 3.10 virtual environment (`.venv`)
+- Adds oss-cad-suite binaries to PATH
+- Sets `LD_LIBRARY_PATH` for Yosys libraries
+- Sets `PYTHONPATH` to include `src/`
+- Exports `CODE_BASE_PATH` pointing to target RTL source
 
 ## Configuration
 
@@ -33,14 +46,25 @@ simplify:
     - "cpurst_b"
     - "*rst_b"
     - "*scan_en*"
+agent:
+  backend: "openai"          # anthropic | openai | agent_sdk
+  model: "glm-5"
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  thinking: true
+  skip_modules:
+    - "ct_had*"
+  max_source_lines: 10000
+  resume: true
 verbose: true
 ```
 
-- Environment variables (e.g. `$CODE_BASE_PATH`) are expanded automatically
+- Environment variables (e.g., `$CODE_BASE_PATH`) are expanded automatically
 - `remove_signals` patterns are matched against I/O port names; the `SignalTracer` resolves them through the module hierarchy via port-to-wire connections, so renamed signals in child modules are also removed
 - Config is parsed by a built-in minimal YAML parser (no pyyaml dependency)
 
 ## Commands
+
+### Core Commands
 
 ```bash
 # Full documentation generation (hierarchy tree + schematics + index)
@@ -61,30 +85,67 @@ python3 -m cli schematic -r <cached.il> -m <module_name> -o output.dot
 # Connectivity/path condition check (after-proc graph)
 python3 -m cli connectivity -m <module_name> --from-signal <src_sig> --to-signal <dst_sig> [-o out.json]
 
-# Disable simplification
-python3 -m cli generate --no-simplify
+# AI-powered documentation generation
+python3 -m cli docor -f <filelist.f> -t <top_module> -o <output_dir>
+```
 
-# Convert DOT schematics to images (requires Graphviz)
-dot -Tsvg schematics/module.dot -o module.svg
+### Utility Scripts
+
+```bash
+# Convert DOT files to PNG/SVG (batch or single file)
+./dot2png.sh <directory>     # batch convert all .dot files
+./dot2png.sh input.dot [output.png]  # single file
+```
+
+### Connectivity Check Options
+
+```bash
+# Path visualization modes
+python3 -m cli connectivity -m <module> --from-signal <src> --to-signal <dst> \
+    --path-overlay-mode simplified        # simplified view
+
+python3 -m cli connectivity -m <module> --from-signal <src> --to-signal <dst> \
+    --path-overlay-mode simplified-expand # with COMB node expansion
 ```
 
 ## Architecture
 
 The CLI entry point is `src/cli.py`. The codebase follows a layered structure:
 
-- **`src/models/`** — Data models: `SourceLocation`/`AggregatedLocation` (source_loc.py), `ModuleInfo`/`PortInfo`/`CellInfo` (module.py), `HierarchyNode` tree (hierarchy.py)
-- **`src/core/`** — Processing:
-  - `YosysBackend` — wraps pyosys for RTL loading, filelist parsing, and MD5-based RTLIL caching (yosys_backend.py)
-  - `HierarchyBuilder` — constructs the module tree (hierarchy_builder.py)
-  - `SourceExtractor` — extracts source file locations from RTLIL cells (source_extractor.py)
-  - `ProjectConfig` — dataclass loaded from config.yaml, overridable by CLI args (config.py)
-  - `SignalTracer` — recursively traces signal patterns through the module hierarchy via port-to-wire connections (signal_tracer.py)
-- **`src/schematic/`** — DOT schematic generation and simplification:
-  - `SchematicGenerator` — invokes Yosys `show` command to produce DOT schematics (generator.py)
-  - `DotSimplifier` — parses DOT, removes signals, merges combinational logic into COMB nodes (simplifier.py)
-- **`src/output/`** — `DocumentGenerator` orchestrates the full generation workflow: hierarchy tree → JSON/ASCII output → signal tracing → schematic generation → index (generator.py)
+### Core Modules (`src/core/`)
 
-### Schematic Simplification Pipeline
+- **`YosysBackend`** — wraps pyosys for RTL loading, filelist parsing, and MD5-based RTLIL caching (yosys_backend.py)
+- **`HierarchyBuilder`** — constructs the module tree (hierarchy_builder.py)
+- **`SourceExtractor`** — extracts source file locations from RTLIL cells (source_extractor.py)
+- **`ProjectConfig`** — dataclass loaded from config.yaml, overridable by CLI args (config.py)
+- **`SignalTracer`** — recursively traces signal patterns through the module hierarchy via port-to-wire connections (signal_tracer.py)
+
+### Data Models (`src/models/`)
+
+- **`SourceLocation`** / **`AggregatedLocation`** — source code position tracking (source_loc.py)
+- **`ModuleInfo`** / **`PortInfo`** / **`CellInfo`** — RTL module metadata (module.py)
+- **`HierarchyNode`** — tree structure representing module hierarchy (hierarchy.py)
+
+### Schematic Generation (`src/schematic/`)
+
+- **`SchematicGenerator`** — invokes Yosys `show` command to produce DOT schematics (generator.py)
+- **`DotSimplifier`** — parses DOT, removes signals, merges combinational logic into COMB nodes (simplifier.py)
+
+### AI Documentation (`src/agent/`)
+
+- **`AgentDocGenerator`** — orchestrates multi-pass LLM-based documentation (doc_generator.py, doc_generator_v2.py)
+- **`LLMBackend`** — abstraction for Anthropic/OpenAI APIs (llm_backend.py)
+- **`SourceResolver`** — resolves source files for LLM context (source_resolver.py)
+- **`ProgressTracker`** — resume-capable progress tracking (progress_tracker.py, progress_tracker_v2.py)
+- **`BlockDocGenerator`** — generates block-level documentation for large modules (block_doc_generator.py)
+- **`PassRunner`** — manages parallel execution of documentation passes (pass_runner.py)
+- **`prompts/`** — LLM prompt templates organized by pass (pass1_preview.py, pass2_*.py, block_level.py)
+
+### Output Generation (`src/output/`)
+
+- **`DocumentGenerator`** — orchestrates the full generation workflow: hierarchy tree → JSON/ASCII output → signal tracing → schematic generation → index (generator.py)
+
+## Schematic Simplification Pipeline
 
 1. Parse DOT output from Yosys (regex-based node/edge extraction in `DotParser`)
 2. **Signal removal** (optional): match I/O ports against `remove_signals` patterns (including hierarchy-traced port names), cascade-remove auto-generated intermediate comb nodes (those without source code annotations), preserve user-written comb nodes
@@ -93,7 +154,7 @@ The CLI entry point is `src/cli.py`. The codebase follows a layered structure:
 5. Aggregate each group into a single `IN_COMB`/`OUT_COMB`/`COMB` node with source location ranges
 6. Reconnect edges to preserve PROC and I/O boundary connections
 
-### Signal Tracing
+## Signal Tracing
 
 `SignalTracer` resolves `remove_signals` patterns across the module hierarchy:
 1. Starting from the top module, match port/wire names against fnmatch patterns
@@ -103,7 +164,24 @@ The CLI entry point is `src/cli.py`. The codebase follows a layered structure:
 
 This ensures that a signal like `cpurst_b` at the top level is still removed in child modules even if the port is renamed (e.g., `rst_in`).
 
-### Connectivity / Pathcheck
+## AI Documentation Workflow (docor command)
+
+Multi-pass process in `AgentDocGenerator`:
+- **Pass 0**: Precompute simplified graphs for all modules
+- **Pass 1**: Top-down preview generation (context from parent modules)
+- **Pass 1.5**: Block-level documentation for large blocks
+- **Pass 2.1**: Design highlights extraction
+- **Pass 2.2**: Behavior flowchart generation (Mermaid)
+- **Pass 2.3**: Interface specification generation
+- **Pass 2.4**: Functional detailed description
+- **Pass 2.5**: Register description
+- **Pass 2.6**: Timing constraints and CDC documentation
+- **Pass 2.7**: Architecture design documentation
+- **Pass 2**: Bottom-up synthesis documentation (combines all sub-pass outputs)
+
+Pass 2.1 through Pass 2.6 run in parallel. The workflow is resume-capable via `ProgressTracker`.
+
+## Connectivity / Pathcheck
 
 - Uses after-proc DOT netlist graph and checks directed data-path reachability.
 - Connectivity BFS filters control-only edges:
@@ -115,30 +193,56 @@ This ensures that a signal like `cpurst_b` at the top level is still removed in 
   - `CLK/reset` are intentionally excluded from condition points
 - Source locations on condition points come from decoded Yosys `src` attributes (binary-encoded strings are decoded), with proc-log fallback.
 
-### Output Structure
+## Output Structure
 
 ```
 output_dir/
-  hierarchy_tree.txt       # ASCII module hierarchy
-  hierarchy_tree.json      # JSON module hierarchy
-  schematics/              # Raw DOT schematics (complete, unmodified)
-  simplified/              # Simplified DOT schematics (signals removed, COMB merged)
-  index.json               # Module index with cell/port info
+├── hierarchy_tree.txt       # ASCII module hierarchy
+├── hierarchy_tree.json      # JSON module hierarchy
+├── schematics/              # Raw DOT schematics (complete, unmodified)
+├── simplified/              # Simplified DOT schematics (signals removed, COMB merged)
+├── index.json               # Module index with cell/port info
+└── modules/                 # AI-generated docs (docor command)
+    └── {module_name}/
+        ├── description.md
+        ├── preview.md
+        ├── block_docs.md
+        ├── design_highlights.md
+        ├── flowchart.mmd
+        ├── interface_spec.md
+        ├── functional_desc.md
+        ├── register_desc.md
+        ├── timing_cdc.md
+        ├── architecture.md
+        └── metadata.json
 ```
 
-### Caching
+## Caching
 
 RTLIL parse results are cached under `.rtl_cache/` using MD5 hashes of filelist contents. Use `-r` flag to load from cache directly.
+
+## Testing
+
+No dedicated test suite in the project. Testing is done via:
+1. Manual CLI command execution
+2. Running against actual RTL designs (OpenC910)
+3. Verifying output files (DOT, JSON, ASCII tree)
+
+To install dev dependencies:
+```bash
+pip install -e ".[dev]"  # installs pytest, pytest-cov
+```
 
 ## Dependencies
 
 - Python 3.8+
 - Yosys via oss-cad-suite (provides pyosys)
 - Graphviz (optional, for rendering DOT to PNG/SVG)
-- Dev: pytest, pytest-cov (`pip install -e ".[dev]"`)
+- anthropic>=0.3.0 (optional, for agent docor command with Anthropic backend)
+- openai (optional, for agent docor command with OpenAI-compatible backends)
 
 ## Known Limitations
 
-- Large modules (e.g., ct_ifu_lbuf) may fail due to recursion depth limits
+- Large modules (e.g., `ct_ifu_lbuf`) may fail due to recursion depth limits
 - Parameterized modules (`$paramod`) may cause slow DOT generation
 - Empty modules (no logic cells) do not generate schematics
