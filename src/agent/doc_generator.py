@@ -29,6 +29,8 @@ from .prompts import (
     PASS2_5_REGISTER_PROMPT,
     PASS2_6_TIMING_CDC_SYSTEM,
     PASS2_6_TIMING_CDC_PROMPT,
+    PASS2_7_ARCHITECTURE_SYSTEM,
+    PASS2_7_ARCHITECTURE_PROMPT,
 )
 
 class AgentDocGenerator:
@@ -67,6 +69,7 @@ class AgentDocGenerator:
         self._processed_pass2_4: set = set()  # Track Pass 2.4 completion
         self._processed_pass2_5: set = set()  # Track Pass 2.5 completion
         self._processed_pass2_6: set = set()  # Track Pass 2.6 completion
+        self._processed_pass2_7: set = set()  # Track Pass 2.7 completion
         self._mermaid_summaries: Dict[str, str] = {}  # module_name -> 精简版 mermaid
         self._token_stats: Dict[str, List[Dict[str, int]]] = {}  # module_name -> list of token stats per pass
 
@@ -100,8 +103,8 @@ class AgentDocGenerator:
         print("[INFO] Running Pass 1.5: Block-level Documentation...")
         await self._run_pass1_5(self.hierarchy)
 
-        # Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5 + Pass 2.6: Run in parallel (all depend only on Pass 1 + Pass 1.5)
-        print("[INFO] Running Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5 + Pass 2.6 in parallel...")
+        # Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5 + Pass 2.6 + Pass 2.7: Run in parallel (all depend only on Pass 1 + Pass 1.5)
+        print("[INFO] Running Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5 + Pass 2.6 + Pass 2.7 in parallel...")
         import asyncio
         await asyncio.gather(
             self._run_pass2_1(self.hierarchy),
@@ -109,7 +112,8 @@ class AgentDocGenerator:
             self._run_pass2_3(self.hierarchy),
             self._run_pass2_4(self.hierarchy),
             self._run_pass2_5(self.hierarchy),
-            self._run_pass2_6(self.hierarchy)
+            self._run_pass2_6(self.hierarchy),
+            self._run_pass2_7(self.hierarchy)
         )
 
         # Pass 2: Bottom-up Synthesis Documentation (depends on Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5)
@@ -667,6 +671,11 @@ class AgentDocGenerator:
             self._processed_pass2.add(module_name)
             return ""
 
+        if not self.tracker.is_pass2_7_done(module_name):
+            print(f"  [Pass 2] Skipping {module_name} (Pass 2.7 not completed)")
+            self._processed_pass2.add(module_name)
+            return ""
+
         # 4. Generate synthesis doc
         is_leaf = len(node.children) == 0
         description = await self._generate_module_description(node, children_descriptions, is_leaf)
@@ -674,35 +683,69 @@ class AgentDocGenerator:
         self._processed_pass2.add(module_name)
         return description
 
+    def _extract_summary(self, content: str, max_lines: int = 30, max_chars: int = 2000) -> str:
+        """Extract a summary from longer content.
+        
+        Args:
+            content: Original content
+            max_lines: Maximum number of lines to extract
+            max_chars: Maximum characters to extract
+            
+        Returns:
+            Truncated content with indicator if truncated
+        """
+        if not content or content.strip() in ["无设计亮点分析", "无流程图", "无接口规范", 
+                                                "无功能详细描述", "无寄存器描述", 
+                                                "无时序约束与CDC描述", "无架构设计描述"]:
+            return content
+        
+        # Extract by lines first
+        lines = content.split('\n')
+        if len(lines) <= max_lines:
+            result = content
+        else:
+            result = '\n'.join(lines[:max_lines]) + f"\n\n[... 共{len(lines)}行，此处省略后续内容 ...]"
+        
+        # Then check char limit
+        if len(result) > max_chars:
+            result = result[:max_chars] + f"\n\n[... 内容过长，共{len(content)}字符，此处截断 ...]"
+        
+        return result
+
     async def _generate_module_description(self, node: Any, children_descs: Dict[str, str], is_leaf: bool) -> str:
-        """Generate synthesis documentation by combining all prior analysis results."""
+        """Generate executive summary documentation (Pass 2 - Synthesis).
+        
+        This is an overview document that synthesizes all sub-pass analyses (2.1-2.7)
+        into a high-level module description. Source code is excluded to save context.
+        """
         module_name = node.module_name
-        print(f"  [Pass 2] Generating synthesis description for {module_name}...")
+        print(f"  [Pass 2] Generating executive summary for {module_name}...")
 
         state = self.tracker.get_state(module_name)
         preview = state.pass1_overview or ""
         port_summary = self.resolver.get_port_summary(module_name)
 
-        # Get structured graph description with full source code (complete information)
+        # Get graph description WITHOUT source code (topology only, to save context)
         graph_description = ""
         if module_name in self._graphs:
             graph = self._graphs[module_name]
-            graph_description = self._format_graph_description(graph, include_source=True)
+            graph_description = self._format_graph_description(graph, include_source=False)
             num_blocks = len(graph.proc_nodes) + len(graph.comb_nodes)
-            print(f"    [Context] Topology: {len(graph.proc_nodes)} PROC + {len(graph.comb_nodes)} COMB blocks (with full source)")
+            print(f"    [Context] Topology: {len(graph.proc_nodes)} PROC + {len(graph.comb_nodes)} COMB blocks (no source)")
         else:
-            # Fallback: use source code
-            source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
-            graph_description = f"```verilog\n{source_code}\n```"
-            print(f"    [Context] No topology available, using source fallback")
+            # Fallback: minimal info
+            graph_description = "无拓扑结构信息（模块未解析）"
+            print(f"    [Context] No topology available")
 
-        # Get Pass 2.1, Pass 2.2, Pass 2.3, Pass 2.4, Pass 2.5 and Pass 2.6 results from tracker
-        design_highlights = state.pass2_1_highlights or "无设计亮点分析"
-        flowchart = state.pass2_2_mermaid or "无流程图"
-        interface_spec = state.pass2_3_interface or "无接口规范"
-        functional_desc = state.pass2_4_functional or "无功能详细描述"
-        register_desc = state.pass2_5_register or "无寄存器描述"
-        timing_cdc_desc = state.pass2_6_timing_cdc or "无时序约束与CDC描述"
+        # Get Pass 2.1-2.7 results and extract summaries (not full content)
+        # This saves context while keeping the essential information
+        design_highlights = self._extract_summary(state.pass2_1_highlights or "无设计亮点分析", max_lines=20)
+        flowchart = self._extract_summary(state.pass2_2_mermaid or "无流程图", max_lines=15)  # Mermaid usually shorter
+        interface_spec = self._extract_summary(state.pass2_3_interface or "无接口规范", max_lines=25)
+        functional_desc = self._extract_summary(state.pass2_4_functional or "无功能详细描述", max_lines=25)
+        register_desc = self._extract_summary(state.pass2_5_register or "无寄存器描述", max_lines=20)
+        timing_cdc_desc = self._extract_summary(state.pass2_6_timing_cdc or "无时序约束与CDC描述", max_lines=20)
+        architecture_desc = self._extract_summary(state.pass2_7_architecture or "无架构设计描述", max_lines=25)
 
         if is_leaf:
             prompt = PASS2_LEAF_PROMPT.format(
@@ -715,12 +758,18 @@ class AgentDocGenerator:
                 interface_spec=interface_spec,
                 functional_desc=functional_desc,
                 register_desc=register_desc,
-                timing_cdc_desc=timing_cdc_desc
+                timing_cdc_desc=timing_cdc_desc,
+                architecture_desc=architecture_desc
             )
             system = PASS2_LEAF_SYSTEM
         else:
-            # Format children descriptions
-            children_summary = "\n\n".join([f"## 子模块 {name}:\n{desc}" for name, desc in children_descs.items()])
+            # Format children descriptions - extract summaries only
+            children_summary_parts = []
+            for name, desc in children_descs.items():
+                child_summary = self._extract_summary(desc, max_lines=15, max_chars=1000)
+                children_summary_parts.append(f"## 子模块 {name}:\n{child_summary}")
+            children_summary = "\n\n".join(children_summary_parts) if children_summary_parts else "无子模块"
+            
             prompt = PASS2_NONLEAF_PROMPT.format(
                 module_name=module_name,
                 preview=preview,
@@ -731,7 +780,8 @@ class AgentDocGenerator:
                 interface_spec=interface_spec,
                 functional_desc=functional_desc,
                 register_desc=register_desc,
-                timing_cdc_desc=timing_cdc_desc
+                timing_cdc_desc=timing_cdc_desc,
+                architecture_desc=architecture_desc
             )
             system = PASS2_NONLEAF_SYSTEM
 
@@ -1671,3 +1721,147 @@ class AgentDocGenerator:
         })
 
         return timing_cdc_doc
+
+
+    # ==================== Pass 2.7: Architecture Design Generation ====================
+
+    async def _run_pass2_7(self, node: Any) -> str:
+        """Pass 2.7: Bottom-up architecture design documentation generation.
+
+        Returns the architecture design documentation for this module.
+        """
+        module_name = node.module_name
+
+        # Skip/limit checks (same as Pass 2)
+        if self._should_skip(module_name):
+            print(f"[INFO] [Pass 2.7] Skipping module {module_name} (matches skip pattern)")
+            return ""
+
+        if self.max_modules > 0 and module_name not in self._processed_pass1:
+            return ""
+
+        # 1. Recurse children first (ALWAYS, even if this module is already done)
+        children_architecture = {}
+        for child in node.children.values():
+            child_desc = await self._run_pass2_7(child)
+            if child_desc:
+                children_architecture[child.module_name] = child_desc
+
+        # 2. Check if already processed in this session
+        if module_name in self._processed_pass2_7:
+            state = self.tracker.get_state(module_name)
+            return state.pass2_7_architecture or ""
+
+        # 3. Check if already done in persistent storage
+        if self.tracker.is_pass2_7_done(module_name):
+            self._processed_pass2_7.add(module_name)
+            state = self.tracker.get_state(module_name)
+            print(f"  [Pass 2.7] Module {module_name} already has architecture doc (skipping LLM)")
+            return state.pass2_7_architecture or ""
+
+        # 4. Check if we have necessary context (need Pass 1.5)
+        if not self.tracker.is_pass1_5_done(module_name):
+            print(f"  [Pass 2.7] Skipping {module_name} (Pass 1.5 not completed)")
+            self._processed_pass2_7.add(module_name)
+            return ""
+
+        # 5. Generate architecture design documentation
+        print(f"  [Pass 2.7] Generating architecture doc for {module_name}...")
+
+        try:
+            architecture_doc = await self._generate_architecture_doc(
+                node, children_architecture
+            )
+
+            if architecture_doc:
+                self._save_module_file(module_name, "architecture.md", architecture_doc)
+                self.tracker.update_pass2_7(module_name, architecture_doc)
+
+            self._processed_pass2_7.add(module_name)
+            self._save_metadata(node)
+            return architecture_doc
+
+        except Exception as e:
+            print(f"  [ERROR] [Pass 2.7] Failed to generate architecture doc for {module_name}: {e}")
+            self._processed_pass2_7.add(module_name)
+            return ""
+
+    async def _generate_architecture_doc(
+        self, node: Any, children_architecture: Dict[str, str]
+    ) -> str:
+        """Generate architecture design documentation for a module.
+
+        Args:
+            node: HierarchyNode for the module
+            children_architecture: Dict mapping child module names to their architecture docs
+
+        Returns:
+            Markdown document with architecture design documentation
+        """
+        module_name = node.module_name
+
+        # Get Pass 1 preview
+        state = self.tracker.get_state(module_name)
+        preview = state.pass1_overview or "无功能预览"
+
+        # Port summary
+        port_summary = self.resolver.get_port_summary(module_name)
+
+        # Get structured graph description with full source code
+        graph_description = ""
+        if module_name in self._graphs:
+            graph = self._graphs[module_name]
+            graph_description = self._format_graph_description(graph, include_source=True)
+        else:
+            # Fallback: use source code
+            source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
+            graph_description = f"```verilog\n{source_code}\n```"
+
+        # Get block descriptions from Pass 1.5
+        block_descriptions = self._format_block_summaries(module_name)
+
+        # Format children architecture descriptions
+        children_architecture_str = ""
+        if children_architecture:
+            parts = []
+            for child_name, arch_doc in sorted(children_architecture.items()):
+                # Extract first 20 lines as summary
+                lines = arch_doc.split('\n')
+                summary_lines = lines[:20] if len(lines) > 20 else lines
+                summary = '\n'.join(summary_lines)
+                if len(lines) > 20:
+                    summary += "\n\n[... 更多内容见子模块架构设计文档]"
+                parts.append(f"## 子模块 {child_name}:\n{summary}\n")
+            children_architecture_str = "\n".join(parts)
+        else:
+            children_architecture_str = "无子模块架构设计描述"
+
+        # Format prompt
+        prompt = PASS2_7_ARCHITECTURE_PROMPT.format(
+            module_name=module_name,
+            preview=preview,
+            port_summary=port_summary,
+            graph_description=graph_description,
+            block_descriptions=block_descriptions,
+            children_architecture=children_architecture_str
+        )
+
+        # Call LLM
+        log_path = self._module_log_path(module_name, "pass2_7_architecture")
+
+        architecture_doc, token_stats = await self.llm.generate(
+            PASS2_7_ARCHITECTURE_SYSTEM,
+            prompt,
+            log_path=log_path,
+            tools_enabled=False
+        )
+
+        # Record token stats
+        if module_name not in self._token_stats:
+            self._token_stats[module_name] = []
+        self._token_stats[module_name].append({
+            "pass": "pass2_7",
+            **token_stats
+        })
+
+        return architecture_doc

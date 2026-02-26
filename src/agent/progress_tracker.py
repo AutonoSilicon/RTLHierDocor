@@ -16,6 +16,7 @@ class ModuleDocState:
     pass2_4_functional: Optional[str] = None  # Functional detailed description
     pass2_5_register: Optional[str] = None  # Register description
     pass2_6_timing_cdc: Optional[str] = None  # Timing constraints and CDC
+    pass2_7_architecture: Optional[str] = None  # Architecture design
     pass2_description: Optional[str] = None  # Now comes LAST (synthesis)
     error: Optional[str] = None
     timestamp: Optional[str] = None
@@ -163,6 +164,18 @@ class ProgressTracker:
         state = self.states.get(module_name)
         # Check field presence (parallel execution, not linear status)
         return state and state.pass2_6_timing_cdc is not None
+
+    def update_pass2_7(self, module_name: str, architecture_doc: str):
+        state = self.get_state(module_name)
+        state.pass2_7_architecture = architecture_doc
+        state.status = "pass2_7_done"
+        state.timestamp = datetime.now().isoformat()
+        self.save()
+
+    def is_pass2_7_done(self, module_name: str) -> bool:
+        state = self.states.get(module_name)
+        # Check field presence (parallel execution, not linear status)
+        return state and state.pass2_7_architecture is not None
 
     def is_pass2_done(self, module_name: str) -> bool:
         state = self.states.get(module_name)
