@@ -55,6 +55,7 @@ class AgentDocGenerator:
         self.tracker = tracker
         self.output_dir = Path(output_dir)
         self.modules_dir = self.output_dir / "modules"
+        self.debug_dir = self.output_dir / "debug"  # Debug output subdirectory
         self.max_source_lines = max_source_lines
         self.max_modules = max_modules
         self.skip_modules = skip_modules or []
@@ -120,7 +121,9 @@ class AgentDocGenerator:
         print("[INFO] Running Pass 2: Synthesis Documentation...")
         await self._run_pass2(self.hierarchy)
 
-        print(f"[INFO] Documentation generation complete. Results in {self.modules_dir}")
+        print(f"[INFO] Documentation generation complete.")
+        print(f"[INFO]   Modules: {self.modules_dir}")
+        print(f"[INFO]   Debug logs: {self.debug_dir}")
 
     def _precompute_graphs(self, node: Any):
         """Recursively precompute SimplifiedGraphs for all modules.
@@ -774,6 +777,7 @@ class AgentDocGenerator:
                 module_name=module_name,
                 preview=preview,
                 children_descriptions=children_summary,
+                port_summary=port_summary,
                 graph_description=graph_description,
                 design_highlights=design_highlights,
                 flowchart=flowchart,
@@ -816,9 +820,10 @@ class AgentDocGenerator:
         Returns:
             Absolute path to the log file
         """
-        module_dir = self.modules_dir / module_name
-        module_dir.mkdir(parents=True, exist_ok=True)
-        return str(module_dir / f"debug_{pass_name}.md")
+        # Save debug files to debug subdirectory: debug/<module_name>/debug_<pass_name>.md
+        module_debug_dir = self.debug_dir / module_name
+        module_debug_dir.mkdir(parents=True, exist_ok=True)
+        return str(module_debug_dir / f"debug_{pass_name}.md")
 
     def _save_module_file(self, module_name: str, filename: str, content: str):
         module_dir = self.modules_dir / module_name
@@ -1135,7 +1140,10 @@ class AgentDocGenerator:
         # Append other content (text, thinking) to debug log
         if other_content:
             try:
-                debug_file_path = str(self.modules_dir / module_name / "debug_pass2_2_module.md")
+                # Use debug subdirectory for debug files
+                module_debug_dir = self.debug_dir / module_name
+                module_debug_dir.mkdir(parents=True, exist_ok=True)
+                debug_file_path = str(module_debug_dir / "debug_pass2_2_module.md")
                 with open(debug_file_path, 'a', encoding='utf-8') as f:
                     f.write("\n\n" + "="*80 + "\n")
                     f.write("## Pass 2.2 Additional Content (文本说明与思考过程)\n")

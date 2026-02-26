@@ -121,6 +121,7 @@ class AgentDocGenerator:
         self.tracker = tracker
         self.output_dir = Path(output_dir)
         self.modules_dir = self.output_dir / "modules"
+        self.debug_dir = self.output_dir / "debug"  # Debug output subdirectory
         self.max_source_lines = max_source_lines
         self.max_modules = max_modules
         self.skip_modules = skip_modules or []
@@ -759,9 +760,10 @@ class AgentDocGenerator:
 
     def _log_path(self, module_name: str, pass_name: str) -> str:
         """Get debug log path for a module/pass."""
-        module_dir = self.modules_dir / module_name
-        module_dir.mkdir(parents=True, exist_ok=True)
-        return str(module_dir / f"debug_{pass_name}.md")
+        # Save debug files to debug subdirectory: debug/<module_name>/debug_<pass_name>.md
+        module_debug_dir = self.debug_dir / module_name
+        module_debug_dir.mkdir(parents=True, exist_ok=True)
+        return str(module_debug_dir / f"debug_{pass_name}.md")
 
     def _save_module_file(self, module_name: str, filename: str, content: str):
         """Save content to module directory."""
@@ -778,8 +780,10 @@ class AgentDocGenerator:
 
     def _append_to_log(self, module_name: str, pass_name: str, content: str):
         """Append content to debug log file."""
-        log_file = self.modules_dir / module_name / f"debug_{pass_name}.md"
+        # Use debug subdirectory for debug files
+        log_file = self.debug_dir / module_name / f"debug_{pass_name}.md"
         try:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
             with open(log_file, 'a', encoding='utf-8') as f:
                 f.write(content)
         except Exception as e:
