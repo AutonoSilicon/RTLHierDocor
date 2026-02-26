@@ -12,10 +12,8 @@ from .pass1_preview import PASS1_SYSTEM, PASS1_PROMPT
 
 # Pass 2: Documentation generation
 from .pass2_docs import (
-    PASS2_LEAF_SYSTEM,
-    PASS2_LEAF_PROMPT,
-    PASS2_NONLEAF_SYSTEM,
-    PASS2_NONLEAF_PROMPT,
+    PASS2_SYSTEM,
+    PASS2_PROMPT,
 )
 
 # Pass 2.1: Design highlights identification

@@ -16,10 +16,8 @@ from schematic.simplifier import SimplifiedGraph
 from .prompts import (
     PASS1_SYSTEM,
     PASS1_PROMPT,
-    PASS2_LEAF_SYSTEM,
-    PASS2_LEAF_PROMPT,
-    PASS2_NONLEAF_SYSTEM,
-    PASS2_NONLEAF_PROMPT,
+    PASS2_SYSTEM,
+    PASS2_PROMPT,
     PASS2_1_SYSTEM,
     PASS2_1_PROMPT,
     PASS2_2_MODULE_SYSTEM,
@@ -377,14 +375,13 @@ class AgentDocGenerator:
                 self._processed["pass2"].add(module_name)
                 return ""
 
-        is_leaf = len(node.children) == 0
-        description = await self._generate_synthesis_doc(node, children_descs, is_leaf)
-        
+        description = await self._generate_synthesis_doc(node, children_descs)
+
         self._processed["pass2"].add(module_name)
         return description
 
     async def _generate_synthesis_doc(
-        self, node: Any, children_descs: Dict[str, str], is_leaf: bool
+        self, node: Any, children_descs: Dict[str, str]
     ) -> str:
         """Generate Pass 2 synthesis documentation."""
         module_name = node.module_name
@@ -405,30 +402,25 @@ class AgentDocGenerator:
             "timing_cdc_desc": state.pass2_6_timing_cdc or "无时序约束",
         }
 
-        if is_leaf:
-            prompt = PASS2_LEAF_PROMPT.format(
-                module_name=module_name,
-                preview=preview,
-                port_summary=port_summary,
-                graph_description=graph_description,
-                **data
-            )
-            system = PASS2_LEAF_SYSTEM
-        else:
+        # Handle children_descriptions: use default for leaf modules
+        if children_descs:
             children_summary = "\n\n".join(
                 f"## 子模块 {name}:\n{desc}" for name, desc in children_descs.items()
             )
-            prompt = PASS2_NONLEAF_PROMPT.format(
-                module_name=module_name,
-                preview=preview,
-                children_descriptions=children_summary,
-                graph_description=graph_description,
-                **data
-            )
-            system = PASS2_NONLEAF_SYSTEM
+        else:
+            children_summary = "当前为叶模块，无子模块"
+
+        prompt = PASS2_PROMPT.format(
+            module_name=module_name,
+            preview=preview,
+            children_descriptions=children_summary,
+            port_summary=port_summary,
+            graph_description=graph_description,
+            **data
+        )
 
         description, token_stats = await self.llm.generate(
-            system, prompt,
+            PASS2_SYSTEM, prompt,
             log_path=self._log_path(module_name, "pass2_description"),
             tools_enabled=False
         )

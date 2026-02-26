@@ -13,10 +13,8 @@ from schematic.simplifier import SimplifiedGraph
 from .prompts import (
     PASS1_SYSTEM,
     PASS1_PROMPT,
-    PASS2_LEAF_SYSTEM,
-    PASS2_LEAF_PROMPT,
-    PASS2_NONLEAF_SYSTEM,
-    PASS2_NONLEAF_PROMPT,
+    PASS2_SYSTEM,
+    PASS2_PROMPT,
     PASS2_1_SYSTEM,
     PASS2_1_PROMPT,
     PASS2_2_MODULE_SYSTEM,
@@ -680,8 +678,7 @@ class AgentDocGenerator:
             return ""
 
         # 4. Generate synthesis doc
-        is_leaf = len(node.children) == 0
-        description = await self._generate_module_description(node, children_descriptions, is_leaf)
+        description = await self._generate_module_description(node, children_descriptions)
 
         self._processed_pass2.add(module_name)
         return description
@@ -715,7 +712,7 @@ class AgentDocGenerator:
         
         return result
 
-    async def _generate_module_description(self, node: Any, children_descs: Dict[str, str], is_leaf: bool) -> str:
+    async def _generate_module_description(self, node: Any, children_descs: Dict[str, str]) -> str:
         """Generate executive summary documentation (Pass 2 - Synthesis).
         
         This is an overview document that synthesizes all sub-pass analyses (2.1-2.7)
@@ -750,49 +747,35 @@ class AgentDocGenerator:
         timing_cdc_desc = self._extract_summary(state.pass2_6_timing_cdc or "无时序约束与CDC描述", max_lines=20)
         architecture_desc = self._extract_summary(state.pass2_7_architecture or "无架构设计描述", max_lines=25)
 
-        if is_leaf:
-            prompt = PASS2_LEAF_PROMPT.format(
-                module_name=module_name,
-                preview=preview,
-                port_summary=port_summary,
-                graph_description=graph_description,
-                design_highlights=design_highlights,
-                flowchart=flowchart,
-                interface_spec=interface_spec,
-                functional_desc=functional_desc,
-                register_desc=register_desc,
-                timing_cdc_desc=timing_cdc_desc,
-                architecture_desc=architecture_desc
-            )
-            system = PASS2_LEAF_SYSTEM
-        else:
-            # Format children descriptions - extract summaries only
+        # Handle children_descriptions: use default for leaf modules
+        if children_descs:
             children_summary_parts = []
             for name, desc in children_descs.items():
                 child_summary = self._extract_summary(desc, max_lines=15, max_chars=1000)
                 children_summary_parts.append(f"## 子模块 {name}:\n{child_summary}")
-            children_summary = "\n\n".join(children_summary_parts) if children_summary_parts else "无子模块"
-            
-            prompt = PASS2_NONLEAF_PROMPT.format(
-                module_name=module_name,
-                preview=preview,
-                children_descriptions=children_summary,
-                port_summary=port_summary,
-                graph_description=graph_description,
-                design_highlights=design_highlights,
-                flowchart=flowchart,
-                interface_spec=interface_spec,
-                functional_desc=functional_desc,
-                register_desc=register_desc,
-                timing_cdc_desc=timing_cdc_desc,
-                architecture_desc=architecture_desc
-            )
-            system = PASS2_NONLEAF_SYSTEM
+            children_summary = "\n\n".join(children_summary_parts)
+        else:
+            children_summary = "当前为叶模块，无子模块"
+
+        prompt = PASS2_PROMPT.format(
+            module_name=module_name,
+            preview=preview,
+            children_descriptions=children_summary,
+            port_summary=port_summary,
+            graph_description=graph_description,
+            design_highlights=design_highlights,
+            flowchart=flowchart,
+            interface_spec=interface_spec,
+            functional_desc=functional_desc,
+            register_desc=register_desc,
+            timing_cdc_desc=timing_cdc_desc,
+            architecture_desc=architecture_desc
+        )
 
         log_path = self._module_log_path(module_name, "pass2_description")
         description, token_stats = await self.llm.generate(
-            system, 
-            prompt, 
+            PASS2_SYSTEM,
+            prompt,
             log_path=log_path,
             tools_enabled=False
         )
