@@ -33,6 +33,9 @@ from .pass2_4_functional import PASS2_4_FUNCTIONAL_SYSTEM, PASS2_4_FUNCTIONAL_PR
 # Pass 2.5: Register description
 from .pass2_5_register import PASS2_5_REGISTER_SYSTEM, PASS2_5_REGISTER_PROMPT
 
+# Pass 2.6: Timing constraints and CDC
+from .pass2_6_timing import PASS2_6_TIMING_CDC_SYSTEM, PASS2_6_TIMING_CDC_PROMPT
+
 __all__ = [
     # Block-level
     "BLOCK_SYSTEM",
@@ -60,4 +63,7 @@ __all__ = [
     # Pass 2.5
     "PASS2_5_REGISTER_SYSTEM",
     "PASS2_5_REGISTER_PROMPT",
+    # Pass 2.6
+    "PASS2_6_TIMING_CDC_SYSTEM",
+    "PASS2_6_TIMING_CDC_PROMPT",
 ]
