@@ -7,12 +7,13 @@ from datetime import datetime
 @dataclass
 class ModuleDocState:
     module_name: str
-    status: str  # "pending" | "pass1_done" | "pass1_5_done" | "pass2_1_done" | "pass2_2_done" | "pass2_3_done" | "pass2_done" | "failed"
+    status: str  # "pending" | "pass1_done" | "pass1_5_done" | "pass2_1_done" | "pass2_2_done" | "pass2_3_done" | "pass2_4_done" | "pass2_done" | "failed"
     pass1_overview: Optional[str] = None
     pass1_5_block_docs: Optional[str] = None  # Block docs completion marker
     pass2_1_highlights: Optional[str] = None  # Design highlights/tricks
     pass2_2_mermaid: Optional[str] = None
     pass2_3_interface: Optional[str] = None  # Interface specification
+    pass2_4_functional: Optional[str] = None  # Functional detailed description
     pass2_description: Optional[str] = None  # Now comes LAST (synthesis)
     error: Optional[str] = None
     timestamp: Optional[str] = None
@@ -97,11 +98,11 @@ class ProgressTracker:
 
     def is_pass1_done(self, module_name: str) -> bool:
         state = self.states.get(module_name)
-        return state and state.status in ["pass1_done", "pass1_5_done", "pass2_1_done", "pass2_2_done", "pass2_3_done", "pass2_done"]
+        return state and state.status in ["pass1_done", "pass1_5_done", "pass2_1_done", "pass2_2_done", "pass2_3_done", "pass2_4_done", "pass2_done"]
 
     def is_pass1_5_done(self, module_name: str) -> bool:
         state = self.states.get(module_name)
-        return state and state.status in ["pass1_5_done", "pass2_1_done", "pass2_2_done", "pass2_3_done", "pass2_done"]
+        return state and state.status in ["pass1_5_done", "pass2_1_done", "pass2_2_done", "pass2_3_done", "pass2_4_done", "pass2_done"]
 
     def is_pass2_1_done(self, module_name: str) -> bool:
         state = self.states.get(module_name)
@@ -124,6 +125,18 @@ class ProgressTracker:
         state = self.states.get(module_name)
         # Check field presence (parallel execution, not linear status)
         return state and state.pass2_3_interface is not None
+
+    def update_pass2_4(self, module_name: str, functional_doc: str):
+        state = self.get_state(module_name)
+        state.pass2_4_functional = functional_doc
+        state.status = "pass2_4_done"
+        state.timestamp = datetime.now().isoformat()
+        self.save()
+
+    def is_pass2_4_done(self, module_name: str) -> bool:
+        state = self.states.get(module_name)
+        # Check field presence (parallel execution, not linear status)
+        return state and state.pass2_4_functional is not None
 
     def is_pass2_done(self, module_name: str) -> bool:
         state = self.states.get(module_name)

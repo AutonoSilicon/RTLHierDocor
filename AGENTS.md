@@ -166,7 +166,9 @@ Multi-pass process in `AgentDocGenerator`:
 - **Pass 0**: Precompute simplified graphs for all modules
 - **Pass 1**: Top-down preview generation (context from parent modules)
 - **Pass 1.5**: Block-level documentation for large blocks
-- **Pass 2.1 + 2.5**: Parallel execution (highlights + flowchart generation)
+- **Pass 2.1**: Design highlights extraction
+- **Pass 2.2**: Behavior flowchart generation
+- **Pass 2.3**: Interface specification generation
 - **Pass 2**: Bottom-up synthesis documentation
 
 ### Connectivity / Pathcheck Notes

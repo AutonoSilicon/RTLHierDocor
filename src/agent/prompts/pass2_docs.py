@@ -10,6 +10,7 @@ PASS2_LEAF_SYSTEM = """你是一个资深的 RTL 设计分析专家。
 4. 设计亮点分析（Design Highlights，由 Pass 2.1 生成）
 5. 行为流程图（Mermaid Flowchart，由 Pass 2.2 生成）
 6. 接口规范（Interface Specification，由 Pass 2.3 生成）
+7. 功能详细描述（Functional Description，由 Pass 2.4 生成）
 
 电路拓扑结构说明：
 - 按数据流拓扑序排列，从输入到输出
@@ -50,6 +51,9 @@ PASS2_LEAF_PROMPT = """
 # 接口规范:
 {interface_spec}
 
+# 功能详细描述:
+{functional_desc}
+
 请综合以上所有素材，撰写该模块的功能描述文档。
 
 **输入数据说明**：
@@ -57,6 +61,7 @@ PASS2_LEAF_PROMPT = """
 2. 设计亮点分析提供了关键设计决策和工程权衡
 3. 行为流程图展示了微架构级别的数据流和控制流
 4. 接口规范提供了详细的端口定义、时序要求和协议说明
+5. 功能详细描述提供了子模块实现细节、状态机设计和特殊处理逻辑
 
 **撰写要求**：
 1. 以数据流分析为主线，串联各逻辑块的功能
@@ -74,6 +79,8 @@ PASS2_NONLEAF_SYSTEM = """你是一个资深的 RTL 设计分析专家。
 3. 电路拓扑结构（本模块内部 PROC/COMB 逻辑块连接图，按拓扑序，含完整源代码）
 4. 设计点分析（Design Highlights，由 Pass 2.1 生成）
 5. 行为流程图（Mermaid Flowchart，由 Pass 2.2 生成）
+6. 接口规范（Interface Specification，由 Pass 2.3 生成）
+7. 功能详细描述（Functional Description，由 Pass 2.4 生成）
 
 电路拓扑结构说明：
 - 按数据流拓扑序排列，从输入到输出
@@ -115,6 +122,9 @@ PASS2_NONLEAF_PROMPT = """
 # 接口规范:
 {interface_spec}
 
+# 功能详细描述:
+{functional_desc}
+
 请结合子模块功能描述和本模块的所有分析素材，生成本模块的综合文档。
 
 **输入数据说明**：
@@ -123,6 +133,7 @@ PASS2_NONLEAF_PROMPT = """
 3. 设计点分析揭示了本模块的关键设计决策和工程权衡
 4. 行为流程图展示了微架构级别的数据流和控制流
 5. 接口规范提供了详细的端口定义、时序要求和协议说明
+6. 功能详细描述提供了子模块实现细节、状态机设计、特殊处理逻辑和算法描述
 
 **撰写要求**：
 1. 说明本模块的整体架构和子模块协同关系

@@ -23,6 +23,8 @@ from .prompts import (
     PASS2_2_MODULE_PROMPT,
     PASS2_3_INTERFACE_SYSTEM,
     PASS2_3_INTERFACE_PROMPT,
+    PASS2_4_FUNCTIONAL_SYSTEM,
+    PASS2_4_FUNCTIONAL_PROMPT,
 )
 
 class AgentDocGenerator:
@@ -58,6 +60,7 @@ class AgentDocGenerator:
         self._processed_pass2_1: set = set()  # Track Pass 2.1 completion
         self._processed_pass2_2: set = set()
         self._processed_pass2_3: set = set()  # Track Pass 2.3 completion
+        self._processed_pass2_4: set = set()  # Track Pass 2.4 completion
         self._mermaid_summaries: Dict[str, str] = {}  # module_name -> 精简版 mermaid
         self._token_stats: Dict[str, List[Dict[str, int]]] = {}  # module_name -> list of token stats per pass
 
@@ -91,16 +94,17 @@ class AgentDocGenerator:
         print("[INFO] Running Pass 1.5: Block-level Documentation...")
         await self._run_pass1_5(self.hierarchy)
 
-        # Pass 2.1 + Pass 2.2 + Pass 2.3: Run in parallel (all depend only on Pass 1 + Pass 1.5)
-        print("[INFO] Running Pass 2.1 + Pass 2.2 + Pass 2.3 in parallel...")
+        # Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4: Run in parallel (all depend only on Pass 1 + Pass 1.5)
+        print("[INFO] Running Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 in parallel...")
         import asyncio
         await asyncio.gather(
             self._run_pass2_1(self.hierarchy),
             self._run_pass2_2(self.hierarchy),
-            self._run_pass2_3(self.hierarchy)
+            self._run_pass2_3(self.hierarchy),
+            self._run_pass2_4(self.hierarchy)
         )
 
-        # Pass 2: Bottom-up Synthesis Documentation (depends on Pass 2.1 + Pass 2.2 + Pass 2.3)
+        # Pass 2: Bottom-up Synthesis Documentation (depends on Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4)
         print("[INFO] Running Pass 2: Synthesis Documentation...")
         await self._run_pass2(self.hierarchy)
 
@@ -640,6 +644,11 @@ class AgentDocGenerator:
             self._processed_pass2.add(module_name)
             return ""
 
+        if not self.tracker.is_pass2_4_done(module_name):
+            print(f"  [Pass 2] Skipping {module_name} (Pass 2.4 not completed)")
+            self._processed_pass2.add(module_name)
+            return ""
+
         # 4. Generate synthesis doc
         is_leaf = len(node.children) == 0
         description = await self._generate_module_description(node, children_descriptions, is_leaf)
@@ -669,10 +678,11 @@ class AgentDocGenerator:
             graph_description = f"```verilog\n{source_code}\n```"
             print(f"    [Context] No topology available, using source fallback")
 
-        # Get Pass 2.1, Pass 2.2 and Pass 2.3 results from tracker
+        # Get Pass 2.1, Pass 2.2, Pass 2.3 and Pass 2.4 results from tracker
         design_highlights = state.pass2_1_highlights or "无设计亮点分析"
         flowchart = state.pass2_2_mermaid or "无流程图"
         interface_spec = state.pass2_3_interface or "无接口规范"
+        functional_desc = state.pass2_4_functional or "无功能详细描述"
 
         if is_leaf:
             prompt = PASS2_LEAF_PROMPT.format(
@@ -682,7 +692,8 @@ class AgentDocGenerator:
                 graph_description=graph_description,
                 design_highlights=design_highlights,
                 flowchart=flowchart,
-                interface_spec=interface_spec
+                interface_spec=interface_spec,
+                functional_desc=functional_desc
             )
             system = PASS2_LEAF_SYSTEM
         else:
@@ -695,7 +706,8 @@ class AgentDocGenerator:
                 graph_description=graph_description,
                 design_highlights=design_highlights,
                 flowchart=flowchart,
-                interface_spec=interface_spec
+                interface_spec=interface_spec,
+                functional_desc=functional_desc
             )
             system = PASS2_NONLEAF_SYSTEM
 
@@ -1211,3 +1223,147 @@ class AgentDocGenerator:
         })
 
         return interface_doc
+
+
+    # ==================== Pass 2.4: Functional Detailed Description ====================
+
+    async def _run_pass2_4(self, node: Any) -> str:
+        """Pass 2.4: Bottom-up functional detailed description generation.
+
+        Returns the functional description for this module.
+        """
+        module_name = node.module_name
+
+        # Skip/limit checks (same as Pass 2)
+        if self._should_skip(module_name):
+            print(f"[INFO] [Pass 2.4] Skipping module {module_name} (matches skip pattern)")
+            return ""
+
+        if self.max_modules > 0 and module_name not in self._processed_pass1:
+            return ""
+
+        # 1. Recurse children first (ALWAYS, even if this module is already done)
+        children_functional = {}
+        for child in node.children.values():
+            child_desc = await self._run_pass2_4(child)
+            if child_desc:
+                children_functional[child.module_name] = child_desc
+
+        # 2. Check if already processed in this session
+        if module_name in self._processed_pass2_4:
+            state = self.tracker.get_state(module_name)
+            return state.pass2_4_functional or ""
+
+        # 3. Check if already done in persistent storage
+        if self.tracker.is_pass2_4_done(module_name):
+            self._processed_pass2_4.add(module_name)
+            state = self.tracker.get_state(module_name)
+            print(f"  [Pass 2.4] Module {module_name} already has functional description (skipping LLM)")
+            return state.pass2_4_functional or ""
+
+        # 4. Check if we have necessary context (need Pass 1.5)
+        if not self.tracker.is_pass1_5_done(module_name):
+            print(f"  [Pass 2.4] Skipping {module_name} (Pass 1.5 not completed)")
+            self._processed_pass2_4.add(module_name)
+            return ""
+
+        # 5. Generate functional description
+        print(f"  [Pass 2.4] Generating functional description for {module_name}...")
+
+        try:
+            functional_doc = await self._generate_functional_description(
+                node, children_functional
+            )
+
+            if functional_doc:
+                self._save_module_file(module_name, "functional_desc.md", functional_doc)
+                self.tracker.update_pass2_4(module_name, functional_doc)
+
+            self._processed_pass2_4.add(module_name)
+            self._save_metadata(node)
+            return functional_doc
+
+        except Exception as e:
+            print(f"  [ERROR] [Pass 2.4] Failed to generate functional description for {module_name}: {e}")
+            self._processed_pass2_4.add(module_name)
+            return ""
+
+    async def _generate_functional_description(
+        self, node: Any, children_functional: Dict[str, str]
+    ) -> str:
+        """Generate functional detailed description for a module.
+
+        Args:
+            node: HierarchyNode for the module
+            children_functional: Dict mapping child module names to their functional descriptions
+
+        Returns:
+            Markdown document with functional detailed description
+        """
+        module_name = node.module_name
+
+        # Get Pass 1 preview
+        state = self.tracker.get_state(module_name)
+        preview = state.pass1_overview or "无功能预览"
+
+        # Port summary
+        port_summary = self.resolver.get_port_summary(module_name)
+
+        # Get structured graph description with full source code
+        graph_description = ""
+        if module_name in self._graphs:
+            graph = self._graphs[module_name]
+            graph_description = self._format_graph_description(graph, include_source=True)
+        else:
+            # Fallback: use source code
+            source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
+            graph_description = f"```verilog\n{source_code}\n```"
+
+        # Get block descriptions from Pass 1.5
+        block_descriptions = self._format_block_summaries(module_name)
+
+        # Format children functional descriptions
+        children_functional_str = ""
+        if children_functional:
+            parts = []
+            for child_name, func_desc in sorted(children_functional.items()):
+                # Extract first 20 lines as summary
+                lines = func_desc.split('\n')
+                summary_lines = lines[:20] if len(lines) > 20 else lines
+                summary = '\n'.join(summary_lines)
+                if len(lines) > 20:
+                    summary += "\n\n[... 更多内容见子模块功能详细描述文档]"
+                parts.append(f"## 子模块 {child_name}:\n{summary}\n")
+            children_functional_str = "\n".join(parts)
+        else:
+            children_functional_str = "无子模块功能详细描述"
+
+        # Format prompt
+        prompt = PASS2_4_FUNCTIONAL_PROMPT.format(
+            module_name=module_name,
+            preview=preview,
+            port_summary=port_summary,
+            graph_description=graph_description,
+            block_descriptions=block_descriptions,
+            children_functional=children_functional_str
+        )
+
+        # Call LLM
+        log_path = self._module_log_path(module_name, "pass2_4_functional")
+
+        functional_doc, token_stats = await self.llm.generate(
+            PASS2_4_FUNCTIONAL_SYSTEM,
+            prompt,
+            log_path=log_path,
+            tools_enabled=False
+        )
+
+        # Record token stats
+        if module_name not in self._token_stats:
+            self._token_stats[module_name] = []
+        self._token_stats[module_name].append({
+            "pass": "pass2_4",
+            **token_stats
+        })
+
+        return functional_doc

@@ -40,18 +40,12 @@ PASS2_2_MODULE_SYSTEM = """你是硬件微架构文档专家。你的任务是�
    位宽范围 `[127:0]`、重复的编号结构（`channel_0`~`channel_3` 表示4通道）、
    以及 for/generate 循环的边界值。
    当这些参数存在时，节点文字必须包含具体数值，例如写"4路仲裁选择"而不是"仲裁选择"。
-6. **FSM 提取**：如果源代码中存在显式的有限状态机（FSM），必须额外生成 `stateDiagram-v2` 图。
-   - **识别标志**：PROC 块中出现 `case(state_reg)` / `case(cur_state)` 等对状态寄存器的多分支选择，
-     或存在明确的 `STATE_IDLE`、`STATE_XXX` 等 localparam/parameter 枚举定义。
-   - **提取要求**：
-     - 列出所有状态（使用代码中的状态名，如 `IDLE`、`REQ`、`WAIT_RESP`、`DONE`）
-     - 标注每条状态转移的触发条件（从 `if`/`else if` 条件中提取）
-     - 标注转移时的关键动作（如"发送请求"、"清零计数器"）
-     - 标注复位状态（`[*] --> IDLE`）
-   - **与 flowchart 的关系**：flowchart 中用一个节点概括 FSM 的功能角色（如"总线请求状态机: 4状态"），
-     不要在 flowchart 中展开状态转移细节——细节由 stateDiagram 表达。
-   - **无 FSM 时**：如果模块中没有显式状态机，则不生成 stateDiagram 部分。
-
+6. **FSM 的抽象表示**：如果源代码中存在显式的有限状态机（FSM，如 `case(state_reg)`），
+   在 flowchart 中**不要展开状态转移细节**，而是用一个概括性节点表示：
+   - 节点标注 FSM 的功能角色和状态数量，如 `"总线控制状态机<br/>[PROC_3] (4状态: IDLE/REQ/WAIT/DONE)"`
+   - 输入边标注触发状态变化的激励信号
+   - 输出边标注 FSM 产生的控制信号或完成的标志
+   - 状态机的详细设计（状态转移图、条件表等）由其他流程处理，不在此处生成
 ## 输出结构要求
 
 ### Part 1: 行为流程图（必须）
@@ -104,26 +98,6 @@ flowchart TD
 - I/O 端口节点（inputs/outputs）不需要 BLOCK ID
 - 子模块内部流程可以不标注 BLOCK ID（因为属于子模块的实现细节）
 
-### Part 2: 状态机图（仅当存在 FSM 时）
-
-```mermaid
----
-title: FSM名称（如：总线请求状态机）
----
-stateDiagram-v2
-    [*] --> IDLE
-    IDLE --> REQ : 请求有效 / 锁存地址
-    REQ --> WAIT_RESP : 发送总线请求
-    WAIT_RESP --> DONE : 收到应答 / 存储数据
-    WAIT_RESP --> WAIT_RESP : 未应答 / 保持等待
-    DONE --> IDLE : 完成信号 / 清零计数器
-
-    note right of IDLE : 复位默认状态
-    note right of WAIT_RESP : 超时计数器递增
-```
-
-如果模块中存在多个独立的 FSM，为每个 FSM 分别生成一个 `stateDiagram-v2` 代码块。
-
 ## 具体规则
 
 - **BLOCK ID 映射（强制要求）**：
@@ -137,7 +111,7 @@ stateDiagram-v2
 - subgraph 按功能阶段组织（如"取指阶段"、"异常处理路径"），而非按 PROC/COMB 块编号组织
 - 使用 style 指令对不同功能阶段着色
 - 节点 ID 使用有意义的缩写（如 `fetch_check`、`alloc_rob`），不使用 `p0`、`c1` 等编号
-- 输出完整的 ```mermaid ... ``` 代码块；如果有 FSM，flowchart 和每个 stateDiagram-v2 各自独立的代码块
+- 输出完整的 ```mermaid ... ``` 代码块
 - 完整信息：电路拓扑结构中已包含所有 RTL 源代码，无需额外工具即可分析。
 """
 
@@ -163,8 +137,7 @@ PASS2_2_MODULE_PROMPT = """
 
 **生成要求**：
 1. 不要直接翻译代码结构，而是提炼出数据处理的功能行为和控制判断逻辑
-2. 如果源代码中存在显式 FSM（case 状态机），请在 flowchart 之后额外输出 stateDiagram-v2
-3. **【强制要求】每个功能节点必须标注对应的 BLOCK ID**：
+2. **【强制要求】每个功能节点必须标注对应的 BLOCK ID**：
    - 格式：`node_id["功能描述<br/>[BLOCK_ID] (信号名)"]`
    - 示例：`arbitrate["4路仲裁选择<br/>[PROC_0] (arb_grant*, arb_req*)"]`
    - BLOCK ID 从"电路拓扑结构"章节获取

@@ -27,6 +27,9 @@ from .pass2_2_flowchart import PASS2_2_MODULE_SYSTEM, PASS2_2_MODULE_PROMPT
 # Pass 2.3: Interface specification
 from .pass2_3_interface import PASS2_3_INTERFACE_SYSTEM, PASS2_3_INTERFACE_PROMPT
 
+# Pass 2.4: Functional detailed description
+from .pass2_4_functional import PASS2_4_FUNCTIONAL_SYSTEM, PASS2_4_FUNCTIONAL_PROMPT
+
 __all__ = [
     # Block-level
     "BLOCK_SYSTEM",
@@ -48,4 +51,7 @@ __all__ = [
     # Pass 2.3
     "PASS2_3_INTERFACE_SYSTEM",
     "PASS2_3_INTERFACE_PROMPT",
+    # Pass 2.4
+    "PASS2_4_FUNCTIONAL_SYSTEM",
+    "PASS2_4_FUNCTIONAL_PROMPT",
 ]
