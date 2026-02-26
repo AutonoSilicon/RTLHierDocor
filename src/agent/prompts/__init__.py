@@ -30,6 +30,9 @@ from .pass2_3_interface import PASS2_3_INTERFACE_SYSTEM, PASS2_3_INTERFACE_PROMP
 # Pass 2.4: Functional detailed description
 from .pass2_4_functional import PASS2_4_FUNCTIONAL_SYSTEM, PASS2_4_FUNCTIONAL_PROMPT
 
+# Pass 2.5: Register description
+from .pass2_5_register import PASS2_5_REGISTER_SYSTEM, PASS2_5_REGISTER_PROMPT
+
 __all__ = [
     # Block-level
     "BLOCK_SYSTEM",
@@ -54,4 +57,7 @@ __all__ = [
     # Pass 2.4
     "PASS2_4_FUNCTIONAL_SYSTEM",
     "PASS2_4_FUNCTIONAL_PROMPT",
+    # Pass 2.5
+    "PASS2_5_REGISTER_SYSTEM",
+    "PASS2_5_REGISTER_PROMPT",
 ]

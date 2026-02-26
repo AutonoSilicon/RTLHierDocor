@@ -11,6 +11,7 @@ PASS2_LEAF_SYSTEM = """你是一个资深的 RTL 设计分析专家。
 5. 行为流程图（Mermaid Flowchart，由 Pass 2.2 生成）
 6. 接口规范（Interface Specification，由 Pass 2.3 生成）
 7. 功能详细描述（Functional Description，由 Pass 2.4 生成）
+8. 寄存器描述（Register Description，由 Pass 2.5 生成）
 
 电路拓扑结构说明：
 - 按数据流拓扑序排列，从输入到输出
@@ -54,6 +55,9 @@ PASS2_LEAF_PROMPT = """
 # 功能详细描述:
 {functional_desc}
 
+# 寄存器描述:
+{register_desc}
+
 请综合以上所有素材，撰写该模块的功能描述文档。
 
 **输入数据说明**：
@@ -62,6 +66,7 @@ PASS2_LEAF_PROMPT = """
 3. 行为流程图展示了微架构级别的数据流和控制流
 4. 接口规范提供了详细的端口定义、时序要求和协议说明
 5. 功能详细描述提供了子模块实现细节、状态机设计和特殊处理逻辑
+6. 寄存器描述提供了所有控制/状态/配置寄存器的详细信息，包括位域定义和访问特性
 
 **撰写要求**：
 1. 以数据流分析为主线，串联各逻辑块的功能
@@ -81,6 +86,7 @@ PASS2_NONLEAF_SYSTEM = """你是一个资深的 RTL 设计分析专家。
 5. 行为流程图（Mermaid Flowchart，由 Pass 2.2 生成）
 6. 接口规范（Interface Specification，由 Pass 2.3 生成）
 7. 功能详细描述（Functional Description，由 Pass 2.4 生成）
+8. 寄存器描述（Register Description，由 Pass 2.5 生成）
 
 电路拓扑结构说明：
 - 按数据流拓扑序排列，从输入到输出
@@ -125,6 +131,9 @@ PASS2_NONLEAF_PROMPT = """
 # 功能详细描述:
 {functional_desc}
 
+# 寄存器描述:
+{register_desc}
+
 请结合子模块功能描述和本模块的所有分析素材，生成本模块的综合文档。
 
 **输入数据说明**：
@@ -134,6 +143,7 @@ PASS2_NONLEAF_PROMPT = """
 4. 行为流程图展示了微架构级别的数据流和控制流
 5. 接口规范提供了详细的端口定义、时序要求和协议说明
 6. 功能详细描述提供了子模块实现细节、状态机设计、特殊处理逻辑和算法描述
+7. 寄存器描述提供了所有控制/状态/配置寄存器的详细信息，包括位域定义和访问特性
 
 **撰写要求**：
 1. 说明本模块的整体架构和子模块协同关系
