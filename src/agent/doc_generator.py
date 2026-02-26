@@ -19,8 +19,10 @@ from .prompts import (
     PASS2_NONLEAF_PROMPT,
     PASS2_1_SYSTEM,
     PASS2_1_PROMPT,
-    PASS2_5_MODULE_SYSTEM,
-    PASS2_5_MODULE_PROMPT,
+    PASS2_2_MODULE_SYSTEM,
+    PASS2_2_MODULE_PROMPT,
+    PASS2_3_INTERFACE_SYSTEM,
+    PASS2_3_INTERFACE_PROMPT,
 )
 
 class AgentDocGenerator:
@@ -54,7 +56,8 @@ class AgentDocGenerator:
         self._processed_pass1: set = set()
         self._processed_pass2: set = set()
         self._processed_pass2_1: set = set()  # Track Pass 2.1 completion
-        self._processed_pass2_5: set = set()
+        self._processed_pass2_2: set = set()
+        self._processed_pass2_3: set = set()  # Track Pass 2.3 completion
         self._mermaid_summaries: Dict[str, str] = {}  # module_name -> 精简版 mermaid
         self._token_stats: Dict[str, List[Dict[str, int]]] = {}  # module_name -> list of token stats per pass
 
@@ -88,15 +91,16 @@ class AgentDocGenerator:
         print("[INFO] Running Pass 1.5: Block-level Documentation...")
         await self._run_pass1_5(self.hierarchy)
 
-        # Pass 2.1 + Pass 2.5: Run in parallel (both depend only on Pass 1 + Pass 1.5)
-        print("[INFO] Running Pass 2.1 + Pass 2.5 in parallel...")
+        # Pass 2.1 + Pass 2.2 + Pass 2.3: Run in parallel (all depend only on Pass 1 + Pass 1.5)
+        print("[INFO] Running Pass 2.1 + Pass 2.2 + Pass 2.3 in parallel...")
         import asyncio
         await asyncio.gather(
             self._run_pass2_1(self.hierarchy),
-            self._run_pass2_5(self.hierarchy)
+            self._run_pass2_2(self.hierarchy),
+            self._run_pass2_3(self.hierarchy)
         )
 
-        # Pass 2: Bottom-up Synthesis Documentation (depends on Pass 2.1 + Pass 2.5)
+        # Pass 2: Bottom-up Synthesis Documentation (depends on Pass 2.1 + Pass 2.2 + Pass 2.3)
         print("[INFO] Running Pass 2: Synthesis Documentation...")
         await self._run_pass2(self.hierarchy)
 
@@ -594,7 +598,7 @@ class AgentDocGenerator:
         self._save_metadata(node)
 
     async def _run_pass2(self, node: Any) -> str:
-        """Pass 2: Bottom-up synthesis documentation (runs after Pass 2.1 and Pass 2.5)."""
+        """Pass 2: Bottom-up synthesis documentation (runs after Pass 2.1, Pass 2.2 and Pass 2.3)."""
         module_name = node.module_name
 
         # Skip logic
@@ -620,14 +624,19 @@ class AgentDocGenerator:
             self._processed_pass2.add(module_name)
             return self.tracker.get_state(module_name).pass2_description or ""
 
-        # 3. Check prerequisites: Pass 2.1 and Pass 2.5 must be done
+        # 3. Check prerequisites: Pass 2.1, Pass 2.2 and Pass 2.3 must be done
         if not self.tracker.is_pass2_1_done(module_name):
             print(f"  [Pass 2] Skipping {module_name} (Pass 2.1 not completed)")
             self._processed_pass2.add(module_name)
             return ""
 
-        if not self.tracker.is_pass2_5_done(module_name):
-            print(f"  [Pass 2] Skipping {module_name} (Pass 2.5 not completed)")
+        if not self.tracker.is_pass2_2_done(module_name):
+            print(f"  [Pass 2] Skipping {module_name} (Pass 2.2 not completed)")
+            self._processed_pass2.add(module_name)
+            return ""
+
+        if not self.tracker.is_pass2_3_done(module_name):
+            print(f"  [Pass 2] Skipping {module_name} (Pass 2.3 not completed)")
             self._processed_pass2.add(module_name)
             return ""
 
@@ -660,9 +669,10 @@ class AgentDocGenerator:
             graph_description = f"```verilog\n{source_code}\n```"
             print(f"    [Context] No topology available, using source fallback")
 
-        # Get Pass 2.1 and Pass 2.5 results from tracker
+        # Get Pass 2.1, Pass 2.2 and Pass 2.3 results from tracker
         design_highlights = state.pass2_1_highlights or "无设计亮点分析"
-        flowchart = state.pass2_5_mermaid or "无流程图"
+        flowchart = state.pass2_2_mermaid or "无流程图"
+        interface_spec = state.pass2_3_interface or "无接口规范"
 
         if is_leaf:
             prompt = PASS2_LEAF_PROMPT.format(
@@ -671,7 +681,8 @@ class AgentDocGenerator:
                 port_summary=port_summary,
                 graph_description=graph_description,
                 design_highlights=design_highlights,
-                flowchart=flowchart
+                flowchart=flowchart,
+                interface_spec=interface_spec
             )
             system = PASS2_LEAF_SYSTEM
         else:
@@ -683,7 +694,8 @@ class AgentDocGenerator:
                 children_descriptions=children_summary,
                 graph_description=graph_description,
                 design_highlights=design_highlights,
-                flowchart=flowchart
+                flowchart=flowchart,
+                interface_spec=interface_spec
             )
             system = PASS2_NONLEAF_SYSTEM
 
@@ -763,11 +775,15 @@ class AgentDocGenerator:
             return ""
 
         # 1. Recurse children first (ALWAYS, even if this module is already done)
-        children_highlights = {}
         for child in node.children.values():
-            highlights = await self._run_pass2_1(child)
-            if highlights:
-                children_highlights[child.module_name] = highlights
+            await self._run_pass2_1(child)
+        
+        # 2. Collect children previews (Pass 1 results) for context
+        children_previews = {}
+        for child in node.children.values():
+            child_state = self.tracker.get_state(child.module_name)
+            if child_state.pass1_overview:
+                children_previews[child.module_name] = child_state.pass1_overview
 
         # 2. Check if already processed in this session
         if module_name in self._processed_pass2_1:
@@ -792,7 +808,7 @@ class AgentDocGenerator:
         
         try:
             highlights = await self._generate_design_highlights(
-                node, children_highlights
+                node, children_previews
             )
             
             if highlights:
@@ -809,13 +825,13 @@ class AgentDocGenerator:
             return ""
 
     async def _generate_design_highlights(
-        self, node: Any, children_highlights: Dict[str, str]
+        self, node: Any, children_previews: Dict[str, str]
     ) -> str:
         """Generate design highlights/tricks documentation for a module.
 
         Args:
             node: HierarchyNode for the module
-            children_highlights: Dict mapping child module names to their highlights
+            children_previews: Dict mapping child module names to their Pass 1 previews
 
         Returns:
             Markdown document with design highlights analysis
@@ -853,22 +869,22 @@ class AgentDocGenerator:
             source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
             graph_description = f"```verilog\n{source_code}\n```"
         
-        # Format children highlights
-        children_highlights_str = ""
-        if children_highlights:
+        # Format children previews (Pass 1 results)
+        children_previews_str = ""
+        if children_previews:
             parts = []
-            for child_name, highlights in sorted(children_highlights.items()):
-                # Extract just the key points from child, not full doc
-                lines = highlights.split('\n')
-                # Take first 20 lines as summary
-                summary_lines = lines[:20] if len(lines) > 20 else lines
+            for child_name, preview in sorted(children_previews.items()):
+                # Extract just the first few lines from preview
+                lines = preview.split('\n')
+                # Take first 10 lines as summary
+                summary_lines = lines[:10] if len(lines) > 10 else lines
                 summary = '\n'.join(summary_lines)
-                if len(lines) > 20:
-                    summary += "\n\n[... 更多内容见子模块文档]"
+                if len(lines) > 10:
+                    summary += "\n\n[... 更多内容见子模块预览文档]"
                 parts.append(f"## 子模块 {child_name}:\n{summary}\n")
-            children_highlights_str = "\n".join(parts)
+            children_previews_str = "\n".join(parts)
         else:
-            children_highlights_str = "无子模块设计点参考"
+            children_previews_str = "无子模块预览信息"
         
         # Format prompt (aligned with Pass 1 structure)
         prompt = PASS2_1_PROMPT.format(
@@ -877,7 +893,7 @@ class AgentDocGenerator:
             port_summary=port_summary,
             graph_description=graph_description if graph_description else "无拓扑结构信息",
             block_descriptions=block_descriptions if block_descriptions else "无逻辑块文档",
-            children_highlights=children_highlights_str
+            children_previews=children_previews_str
         )
         
         # Call LLM (disable tools if no logical blocks exist)
@@ -901,10 +917,10 @@ class AgentDocGenerator:
         
         return highlights
 
-    # ==================== Pass 2.5: Mermaid Flowchart Generation ====================
+    # ==================== Pass 2.2: Mermaid Flowchart Generation ====================
 
-    async def _run_pass2_5(self, node: Any) -> str:
-        """Pass 2.5: Bottom-up Mermaid flowchart generation.
+    async def _run_pass2_2(self, node: Any) -> str:
+        """Pass 2.2: Bottom-up Mermaid flowchart generation.
 
         Returns the summary mermaid for this module (for parent to use).
         """
@@ -912,7 +928,7 @@ class AgentDocGenerator:
 
         # Skip/limit checks (same as Pass 2)
         if self._should_skip(module_name):
-            print(f"[INFO] [Pass 2.5] Skipping module {module_name} (matches skip pattern)")
+            print(f"[INFO] [Pass 2.2] Skipping module {module_name} (matches skip pattern)")
             return ""
 
         if self.max_modules > 0 and module_name not in self._processed_pass1:
@@ -921,30 +937,30 @@ class AgentDocGenerator:
         # 1. Recurse children first (ALWAYS, even if this module is already done)
         children_summaries = {}
         for child in node.children.values():
-            summary = await self._run_pass2_5(child)
+            summary = await self._run_pass2_2(child)
             if summary:
                 children_summaries[child.module_name] = summary
 
         # 2. Check if already processed in this session
-        if module_name in self._processed_pass2_5:
+        if module_name in self._processed_pass2_2:
             return self._mermaid_summaries.get(module_name, "")
 
         # 3. Check if already done in persistent storage
-        if self.tracker.is_pass2_5_done(module_name):
-            self._processed_pass2_5.add(module_name)
+        if self.tracker.is_pass2_2_done(module_name):
+            self._processed_pass2_2.add(module_name)
             state = self.tracker.get_state(module_name)
-            if state.pass2_5_mermaid:
-                self._mermaid_summaries[module_name] = state.pass2_5_mermaid
-                print(f"  [Pass 2.5] Module {module_name} already has flowchart (skipping LLM)")
-            return state.pass2_5_mermaid or ""
+            if state.pass2_2_mermaid:
+                self._mermaid_summaries[module_name] = state.pass2_2_mermaid
+                print(f"  [Pass 2.2] Module {module_name} already has flowchart (skipping LLM)")
+            return state.pass2_2_mermaid or ""
 
         # 4. Generate (only if not already done)
         if module_name not in self._graphs:
-            print(f"  [Pass 2.5] Skipping {module_name} (no SimplifiedGraph)")
-            self._processed_pass2_5.add(module_name)
+            print(f"  [Pass 2.2] Skipping {module_name} (no SimplifiedGraph)")
+            self._processed_pass2_2.add(module_name)
             return ""
 
-        print(f"  [Pass 2.5] Generating flowchart for {module_name}...")
+        print(f"  [Pass 2.2] Generating flowchart for {module_name}...")
         graph = self._graphs[module_name]
 
         try:
@@ -958,15 +974,15 @@ class AgentDocGenerator:
             self._mermaid_summaries[module_name] = mermaid_code
 
             # Update tracker with mermaid code
-            self.tracker.update_pass2_5(module_name, mermaid_code)
+            self.tracker.update_pass2_2(module_name, mermaid_code)
 
-            self._processed_pass2_5.add(module_name)
+            self._processed_pass2_2.add(module_name)
             self._save_metadata(node)
             return mermaid_code
 
         except Exception as e:
-            print(f"  [ERROR] [Pass 2.5] Failed to generate flowchart for {module_name}: {e}")
-            self._processed_pass2_5.add(module_name)
+            print(f"  [ERROR] [Pass 2.2] Failed to generate flowchart for {module_name}: {e}")
+            self._processed_pass2_2.add(module_name)
             return ""
 
     async def _generate_module_flowchart(
@@ -1004,7 +1020,7 @@ class AgentDocGenerator:
         children_str = "\n".join(child_lines) if child_lines else "无子模块"
 
         # Format prompt (aligned with Pass 1 structure - no block_sources)
-        prompt = PASS2_5_MODULE_PROMPT.format(
+        prompt = PASS2_2_MODULE_PROMPT.format(
             module_name=module_name,
             preview=preview,
             port_summary=port_summary,
@@ -1014,9 +1030,9 @@ class AgentDocGenerator:
         )
 
         # Call LLM (complete info in prompt, disable tools)
-        log_path = self._module_log_path(module_name, "pass2_5_module")
+        log_path = self._module_log_path(module_name, "pass2_2_module")
         full_output, token_stats = await self.llm.generate(
-            PASS2_5_MODULE_SYSTEM, 
+            PASS2_2_MODULE_SYSTEM, 
             prompt, 
             log_path=log_path,
             tools_enabled=False
@@ -1033,10 +1049,10 @@ class AgentDocGenerator:
         # Append other content (text, thinking) to debug log
         if other_content:
             try:
-                debug_file_path = str(self.modules_dir / module_name / "debug_pass2_5_module.md")
+                debug_file_path = str(self.modules_dir / module_name / "debug_pass2_2_module.md")
                 with open(debug_file_path, 'a', encoding='utf-8') as f:
                     f.write("\n\n" + "="*80 + "\n")
-                    f.write("## Pass 2.5 Additional Content (文本说明与思考过程)\n")
+                    f.write("## Pass 2.2 Additional Content (文本说明与思考过程)\n")
                     f.write("="*80 + "\n\n")
                     f.write(other_content)
                     f.write("\n\n")
@@ -1047,9 +1063,151 @@ class AgentDocGenerator:
         if module_name not in self._token_stats:
             self._token_stats[module_name] = []
         self._token_stats[module_name].append({
-            "pass": "pass2_5",
+            "pass": "pass2_2",
             **token_stats
         })
 
         return mermaid_code
 
+
+    # ==================== Pass 2.3: Interface Specification Generation ====================
+
+    async def _run_pass2_3(self, node: Any) -> str:
+        """Pass 2.3: Bottom-up interface specification generation.
+
+        Returns the interface specification for this module.
+        """
+        module_name = node.module_name
+
+        # Skip/limit checks (same as Pass 2)
+        if self._should_skip(module_name):
+            print(f"[INFO] [Pass 2.3] Skipping module {module_name} (matches skip pattern)")
+            return ""
+
+        if self.max_modules > 0 and module_name not in self._processed_pass1:
+            return ""
+
+        # 1. Recurse children first (ALWAYS, even if this module is already done)
+        for child in node.children.values():
+            await self._run_pass2_3(child)
+        
+        # 2. Collect children interface specs for context
+        children_interfaces = {}
+        for child in node.children.values():
+            child_state = self.tracker.get_state(child.module_name)
+            if child_state.pass2_3_interface:
+                children_interfaces[child.module_name] = child_state.pass2_3_interface
+
+        # 3. Check if already processed in this session
+        if module_name in self._processed_pass2_3:
+            state = self.tracker.get_state(module_name)
+            return state.pass2_3_interface or ""
+
+        # 4. Check if already done in persistent storage
+        if self.tracker.is_pass2_3_done(module_name):
+            self._processed_pass2_3.add(module_name)
+            state = self.tracker.get_state(module_name)
+            print(f"  [Pass 2.3] Module {module_name} already has interface spec (skipping LLM)")
+            return state.pass2_3_interface or ""
+
+        # 5. Check if we have necessary context (need Pass 1)
+        if not self.tracker.is_pass1_done(module_name):
+            print(f"  [Pass 2.3] Skipping {module_name} (Pass 1 not completed)")
+            self._processed_pass2_3.add(module_name)
+            return ""
+
+        # 6. Generate interface specification
+        print(f"  [Pass 2.3] Generating interface spec for {module_name}...")
+
+        try:
+            interface_doc = await self._generate_interface_spec(
+                node, children_interfaces
+            )
+
+            if interface_doc:
+                self._save_module_file(module_name, "interface_spec.md", interface_doc)
+                self.tracker.update_pass2_3(module_name, interface_doc)
+
+            self._processed_pass2_3.add(module_name)
+            self._save_metadata(node)
+            return interface_doc
+
+        except Exception as e:
+            print(f"  [ERROR] [Pass 2.3] Failed to generate interface spec for {module_name}: {e}")
+            self._processed_pass2_3.add(module_name)
+            return ""
+
+    async def _generate_interface_spec(
+        self, node: Any, children_interfaces: Dict[str, str]
+    ) -> str:
+        """Generate interface specification documentation for a module.
+
+        Args:
+            node: HierarchyNode for the module
+            children_interfaces: Dict mapping child module names to their interface specs
+
+        Returns:
+            Markdown document with interface specification
+        """
+        module_name = node.module_name
+
+        # Get Pass 1 preview
+        state = self.tracker.get_state(module_name)
+        preview = state.pass1_overview or "无功能预览"
+
+        # Port summary (detailed)
+        port_summary = self.resolver.get_port_summary(module_name)
+
+        # Get structured graph description
+        graph_description = ""
+        if module_name in self._graphs:
+            graph = self._graphs[module_name]
+            graph_description = self._format_graph_description(graph, include_source=False)
+        else:
+            graph_description = "无拓扑结构信息"
+
+        # Format children interface summaries
+        children_interfaces_str = ""
+        if children_interfaces:
+            parts = []
+            for child_name, interface_doc in sorted(children_interfaces.items()):
+                # Extract just the interface summary section
+                lines = interface_doc.split('\n')
+                # Take first 15 lines as summary
+                summary_lines = lines[:15] if len(lines) > 15 else lines
+                summary = '\n'.join(summary_lines)
+                if len(lines) > 15:
+                    summary += "\n\n[... 更多内容见子模块接口规范文档]"
+                parts.append(f"## 子模块 {child_name}:\n{summary}\n")
+            children_interfaces_str = "\n".join(parts)
+        else:
+            children_interfaces_str = "无子模块接口信息"
+
+        # Format prompt
+        prompt = PASS2_3_INTERFACE_PROMPT.format(
+            module_name=module_name,
+            preview=preview,
+            port_summary=port_summary,
+            graph_description=graph_description,
+            children_interfaces=children_interfaces_str
+        )
+
+        # Call LLM
+        log_path = self._module_log_path(module_name, "pass2_3_interface")
+
+        interface_doc, token_stats = await self.llm.generate(
+            PASS2_3_INTERFACE_SYSTEM,
+            prompt,
+            log_path=log_path,
+            tools_enabled=False
+        )
+
+        # Record token stats
+        if module_name not in self._token_stats:
+            self._token_stats[module_name] = []
+        self._token_stats[module_name].append({
+            "pass": "pass2_3",
+            **token_stats
+        })
+
+        return interface_doc

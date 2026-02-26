@@ -1,6 +1,6 @@
-"""Pass 2.5: Mermaid behavioral flowchart generation prompts."""
+"""Pass 2.2: Mermaid behavioral flowchart generation prompts."""
 
-PASS2_5_MODULE_SYSTEM = """你是硬件微架构文档专家。你的任务是根据模块的电路拓扑结构和源代码，
+PASS2_2_MODULE_SYSTEM = """你是硬件微架构文档专家。你的任务是根据模块的电路拓扑结构和源代码，
 生成一张**以数据流和控制流为中心的微架构级别行为流程图**（Mermaid flowchart TD）。
 
 ## 核心原则
@@ -141,7 +141,7 @@ stateDiagram-v2
 - 完整信息：电路拓扑结构中已包含所有 RTL 源代码，无需额外工具即可分析。
 """
 
-PASS2_5_MODULE_PROMPT = """
+PASS2_2_MODULE_PROMPT = """
 # 模块名称: {module_name}
 
 # 模块功能预览:

@@ -21,8 +21,11 @@ from .pass2_docs import (
 # Pass 2.1: Design highlights identification
 from .pass2_1_highlights import PASS2_1_SYSTEM, PASS2_1_PROMPT
 
-# Pass 2.5: Flowchart generation
-from .pass2_5_flowchart import PASS2_5_MODULE_SYSTEM, PASS2_5_MODULE_PROMPT
+# Pass 2.2: Flowchart generation
+from .pass2_2_flowchart import PASS2_2_MODULE_SYSTEM, PASS2_2_MODULE_PROMPT
+
+# Pass 2.3: Interface specification
+from .pass2_3_interface import PASS2_3_INTERFACE_SYSTEM, PASS2_3_INTERFACE_PROMPT
 
 __all__ = [
     # Block-level
@@ -39,7 +42,10 @@ __all__ = [
     # Pass 2.1
     "PASS2_1_SYSTEM",
     "PASS2_1_PROMPT",
-    # Pass 2.5
-    "PASS2_5_MODULE_SYSTEM",
-    "PASS2_5_MODULE_PROMPT",
+    # Pass 2.2
+    "PASS2_2_MODULE_SYSTEM",
+    "PASS2_2_MODULE_PROMPT",
+    # Pass 2.3
+    "PASS2_3_INTERFACE_SYSTEM",
+    "PASS2_3_INTERFACE_PROMPT",
 ]
