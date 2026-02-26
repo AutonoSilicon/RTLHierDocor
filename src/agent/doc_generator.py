@@ -173,9 +173,9 @@ class AgentDocGenerator:
                 print(f"  [Pass 1] Module {module_name} already has preview (skipping LLM)")
             self._processed_pass1.add(module_name)
 
-        # Get current preview to pass down (stored as pass1_overview internally)
+        # Get current preview to pass down (load from file)
         state = self.tracker.get_state(module_name)
-        current_preview = state.pass1_overview or ""
+        current_preview = self.tracker.get_pass1_content(module_name) or ""
         
         # Always recurse to children (to ensure they are processed with current context)
         for child in node.children.values():
@@ -635,11 +635,11 @@ class AgentDocGenerator:
 
         # 2. Process current module if not already done
         if module_name in self._processed_pass2:
-            return self.tracker.get_state(module_name).pass2_description or ""
+            return self.tracker.get_pass2_content(module_name) or ""
 
         if self.tracker.is_pass2_done(module_name):
             self._processed_pass2.add(module_name)
-            return self.tracker.get_state(module_name).pass2_description or ""
+            return self.tracker.get_pass2_content(module_name) or ""
 
         # 3. Check prerequisites: Pass 2.1, Pass 2.2 and Pass 2.3 must be done
         if not self.tracker.is_pass2_1_done(module_name):
@@ -722,7 +722,7 @@ class AgentDocGenerator:
         print(f"  [Pass 2] Generating executive summary for {module_name}...")
 
         state = self.tracker.get_state(module_name)
-        preview = state.pass1_overview or ""
+        preview = self.tracker.get_pass1_content(module_name) or ""
         port_summary = self.resolver.get_port_summary(module_name)
 
         # Get graph description WITHOUT source code (topology only, to save context)
@@ -739,13 +739,13 @@ class AgentDocGenerator:
 
         # Get Pass 2.1-2.7 results and extract summaries (not full content)
         # This saves context while keeping the essential information
-        design_highlights = self._extract_summary(state.pass2_1_highlights or "无设计亮点分析", max_lines=20)
-        flowchart = self._extract_summary(state.pass2_2_mermaid or "无流程图", max_lines=15)  # Mermaid usually shorter
-        interface_spec = self._extract_summary(state.pass2_3_interface or "无接口规范", max_lines=25)
-        functional_desc = self._extract_summary(state.pass2_4_functional or "无功能详细描述", max_lines=25)
-        register_desc = self._extract_summary(state.pass2_5_register or "无寄存器描述", max_lines=20)
-        timing_cdc_desc = self._extract_summary(state.pass2_6_timing_cdc or "无时序约束与CDC描述", max_lines=20)
-        architecture_desc = self._extract_summary(state.pass2_7_architecture or "无架构设计描述", max_lines=25)
+        design_highlights = self._extract_summary(self.tracker.get_pass2_1_content(module_name) or "无设计亮点分析", max_lines=20)
+        flowchart = self._extract_summary(self.tracker.get_pass2_2_content(module_name) or "无流程图", max_lines=15)  # Mermaid usually shorter
+        interface_spec = self._extract_summary(self.tracker.get_pass2_3_content(module_name) or "无接口规范", max_lines=25)
+        functional_desc = self._extract_summary(self.tracker.get_pass2_4_content(module_name) or "无功能详细描述", max_lines=25)
+        register_desc = self._extract_summary(self.tracker.get_pass2_5_content(module_name) or "无寄存器描述", max_lines=20)
+        timing_cdc_desc = self._extract_summary(self.tracker.get_pass2_6_content(module_name) or "无时序约束与CDC描述", max_lines=20)
+        architecture_desc = self._extract_summary(self.tracker.get_pass2_7_content(module_name) or "无架构设计描述", max_lines=25)
 
         # Handle children_descriptions: use default for leaf modules
         if children_descs:
@@ -855,21 +855,19 @@ class AgentDocGenerator:
         # 2. Collect children previews (Pass 1 results) for context
         children_previews = {}
         for child in node.children.values():
-            child_state = self.tracker.get_state(child.module_name)
-            if child_state.pass1_overview:
-                children_previews[child.module_name] = child_state.pass1_overview
+            child_preview = self.tracker.get_pass1_content(child.module_name)
+            if child_preview:
+                children_previews[child.module_name] = child_preview
 
         # 2. Check if already processed in this session
         if module_name in self._processed_pass2_1:
-            state = self.tracker.get_state(module_name)
-            return state.pass2_1_highlights or ""
+            return self.tracker.get_pass2_1_content(module_name) or ""
 
         # 3. Check if already done in persistent storage
         if self.tracker.is_pass2_1_done(module_name):
             self._processed_pass2_1.add(module_name)
-            state = self.tracker.get_state(module_name)
             print(f"  [Pass 2.1] Module {module_name} already has design highlights (skipping LLM)")
-            return state.pass2_1_highlights or ""
+            return self.tracker.get_pass2_1_content(module_name) or ""
 
         # 4. Check if we have necessary context (need Pass 1.5 block docs)
         if not self.tracker.is_pass1_5_done(module_name):
@@ -913,8 +911,7 @@ class AgentDocGenerator:
         module_name = node.module_name
 
         # Get Pass 1 preview (replacing old Pass 2 description dependency)
-        state = self.tracker.get_state(module_name)
-        preview = state.pass1_overview or "无功能预览"
+        preview = self.tracker.get_pass1_content(module_name) or "无功能预览"
 
         # Port summary
         port_summary = self.resolver.get_port_summary(module_name)
@@ -1022,11 +1019,11 @@ class AgentDocGenerator:
         # 3. Check if already done in persistent storage
         if self.tracker.is_pass2_2_done(module_name):
             self._processed_pass2_2.add(module_name)
-            state = self.tracker.get_state(module_name)
-            if state.pass2_2_mermaid:
-                self._mermaid_summaries[module_name] = state.pass2_2_mermaid
+            mermaid_content = self.tracker.get_pass2_2_content(module_name)
+            if mermaid_content:
+                self._mermaid_summaries[module_name] = mermaid_content
                 print(f"  [Pass 2.2] Module {module_name} already has flowchart (skipping LLM)")
-            return state.pass2_2_mermaid or ""
+            return mermaid_content or ""
 
         # 4. Generate (only if not already done)
         if module_name not in self._graphs:
@@ -1069,8 +1066,7 @@ class AgentDocGenerator:
         to produce a data/control-centric behavioral Mermaid flowchart.
         """
         # Get module preview from PASS 1
-        state = self.tracker.get_state(module_name)
-        preview = state.pass1_overview or "无预览"
+        preview = self.tracker.get_pass1_content(module_name) or "无预览"
 
         # Port summary
         port_summary = self.resolver.get_port_summary(module_name)
@@ -1171,21 +1167,19 @@ class AgentDocGenerator:
         # 2. Collect children interface specs for context
         children_interfaces = {}
         for child in node.children.values():
-            child_state = self.tracker.get_state(child.module_name)
-            if child_state.pass2_3_interface:
-                children_interfaces[child.module_name] = child_state.pass2_3_interface
+            child_interface = self.tracker.get_pass2_3_content(child.module_name)
+            if child_interface:
+                children_interfaces[child.module_name] = child_interface
 
         # 3. Check if already processed in this session
         if module_name in self._processed_pass2_3:
-            state = self.tracker.get_state(module_name)
-            return state.pass2_3_interface or ""
+            return self.tracker.get_pass2_3_content(module_name) or ""
 
         # 4. Check if already done in persistent storage
         if self.tracker.is_pass2_3_done(module_name):
             self._processed_pass2_3.add(module_name)
-            state = self.tracker.get_state(module_name)
             print(f"  [Pass 2.3] Module {module_name} already has interface spec (skipping LLM)")
-            return state.pass2_3_interface or ""
+            return self.tracker.get_pass2_3_content(module_name) or ""
 
         # 5. Check if we have necessary context (need Pass 1)
         if not self.tracker.is_pass1_done(module_name):
@@ -1229,8 +1223,7 @@ class AgentDocGenerator:
         module_name = node.module_name
 
         # Get Pass 1 preview
-        state = self.tracker.get_state(module_name)
-        preview = state.pass1_overview or "无功能预览"
+        preview = self.tracker.get_pass1_content(module_name) or "无功能预览"
 
         # Port summary (detailed)
         port_summary = self.resolver.get_port_summary(module_name)
@@ -1316,15 +1309,13 @@ class AgentDocGenerator:
 
         # 2. Check if already processed in this session
         if module_name in self._processed_pass2_4:
-            state = self.tracker.get_state(module_name)
-            return state.pass2_4_functional or ""
+            return self.tracker.get_pass2_4_content(module_name) or ""
 
         # 3. Check if already done in persistent storage
         if self.tracker.is_pass2_4_done(module_name):
             self._processed_pass2_4.add(module_name)
-            state = self.tracker.get_state(module_name)
             print(f"  [Pass 2.4] Module {module_name} already has functional description (skipping LLM)")
-            return state.pass2_4_functional or ""
+            return self.tracker.get_pass2_4_content(module_name) or ""
 
         # 4. Check if we have necessary context (need Pass 1.5)
         if not self.tracker.is_pass1_5_done(module_name):
@@ -1368,8 +1359,7 @@ class AgentDocGenerator:
         module_name = node.module_name
 
         # Get Pass 1 preview
-        state = self.tracker.get_state(module_name)
-        preview = state.pass1_overview or "无功能预览"
+        preview = self.tracker.get_pass1_content(module_name) or "无功能预览"
 
         # Port summary
         port_summary = self.resolver.get_port_summary(module_name)
@@ -1460,15 +1450,13 @@ class AgentDocGenerator:
 
         # 2. Check if already processed in this session
         if module_name in self._processed_pass2_5:
-            state = self.tracker.get_state(module_name)
-            return state.pass2_5_register or ""
+            return self.tracker.get_pass2_5_content(module_name) or ""
 
         # 3. Check if already done in persistent storage
         if self.tracker.is_pass2_5_done(module_name):
             self._processed_pass2_5.add(module_name)
-            state = self.tracker.get_state(module_name)
             print(f"  [Pass 2.5] Module {module_name} already has register description (skipping LLM)")
-            return state.pass2_5_register or ""
+            return self.tracker.get_pass2_5_content(module_name) or ""
 
         # 4. Check if we have necessary context (need Pass 1.5)
         if not self.tracker.is_pass1_5_done(module_name):
@@ -1512,8 +1500,7 @@ class AgentDocGenerator:
         module_name = node.module_name
 
         # Get Pass 1 preview
-        state = self.tracker.get_state(module_name)
-        preview = state.pass1_overview or "无功能预览"
+        preview = self.tracker.get_pass1_content(module_name) or "无功能预览"
 
         # Port summary
         port_summary = self.resolver.get_port_summary(module_name)
@@ -1600,15 +1587,13 @@ class AgentDocGenerator:
 
         # 2. Check if already processed in this session
         if module_name in self._processed_pass2_6:
-            state = self.tracker.get_state(module_name)
-            return state.pass2_6_timing_cdc or ""
+            return self.tracker.get_pass2_6_content(module_name) or ""
 
         # 3. Check if already done in persistent storage
         if self.tracker.is_pass2_6_done(module_name):
             self._processed_pass2_6.add(module_name)
-            state = self.tracker.get_state(module_name)
             print(f"  [Pass 2.6] Module {module_name} already has timing/CDC doc (skipping LLM)")
-            return state.pass2_6_timing_cdc or ""
+            return self.tracker.get_pass2_6_content(module_name) or ""
 
         # 4. Check if we have necessary context (need Pass 1.5)
         if not self.tracker.is_pass1_5_done(module_name):
@@ -1652,8 +1637,7 @@ class AgentDocGenerator:
         module_name = node.module_name
 
         # Get Pass 1 preview
-        state = self.tracker.get_state(module_name)
-        preview = state.pass1_overview or "无功能预览"
+        preview = self.tracker.get_pass1_content(module_name) or "无功能预览"
 
         # Port summary
         port_summary = self.resolver.get_port_summary(module_name)
@@ -1740,15 +1724,13 @@ class AgentDocGenerator:
 
         # 2. Check if already processed in this session
         if module_name in self._processed_pass2_7:
-            state = self.tracker.get_state(module_name)
-            return state.pass2_7_architecture or ""
+            return self.tracker.get_pass2_7_content(module_name) or ""
 
         # 3. Check if already done in persistent storage
         if self.tracker.is_pass2_7_done(module_name):
             self._processed_pass2_7.add(module_name)
-            state = self.tracker.get_state(module_name)
             print(f"  [Pass 2.7] Module {module_name} already has architecture doc (skipping LLM)")
-            return state.pass2_7_architecture or ""
+            return self.tracker.get_pass2_7_content(module_name) or ""
 
         # 4. Check if we have necessary context (need Pass 1.5)
         if not self.tracker.is_pass1_5_done(module_name):
@@ -1792,8 +1774,7 @@ class AgentDocGenerator:
         module_name = node.module_name
 
         # Get Pass 1 preview
-        state = self.tracker.get_state(module_name)
-        preview = state.pass1_overview or "无功能预览"
+        preview = self.tracker.get_pass1_content(module_name) or "无功能预览"
 
         # Port summary
         port_summary = self.resolver.get_port_summary(module_name)
