@@ -64,21 +64,21 @@ PASS2_7_ARCHITECTURE_SYSTEM = """你是一位资深的RTL架构设计文档工�
 
 PASS2_7_ARCHITECTURE_PROMPT = """请为模块 `{module_name}` 生成架构设计文档（第3节）。
 
-## 输入信息
+## Input Information
 
-### 模块功能预览（Pass 1 输出）
+### Module Preview (Pass 1 Output)
 {preview}
 
-### 端口汇总
+### Port Summary
 {port_summary}
 
-### 电路结构描述（拓扑信息）
+### Circuit Topology Description
 {graph_description}
 
-### 逻辑块功能摘要（Pass 1.5 输出）
+### Logic Block Descriptions (Pass 1.5 Output)
 {block_descriptions}
 
-### 子模块架构设计（供参考）
+### Child Module Architecture Design (Reference)
 {children_architecture}
 
 ---

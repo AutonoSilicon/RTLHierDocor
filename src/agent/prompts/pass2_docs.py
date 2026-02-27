@@ -96,37 +96,37 @@ PASS2_SYSTEM = """你是资深的 RTL 架构师和技术文档专家。你的任
 
 PASS2_PROMPT = """请为非叶模块 `{module_name}` 撰写高质量的模块综述与集成规范。
 
-## 模块功能预览
+## Module Preview
 {preview}
 
-## 子模块综述
+## Child Module Descriptions
 {children_descriptions}
 
-## 端口汇总
+## Port Summary
 {port_summary}
 
-## 电路拓扑概要（本模块内部，无源码，仅结构）
+## Circuit Topology Overview (Internal, No Source Code, Structure Only)
 {graph_description}
 
-## 设计亮点摘要
+## Design Highlights Summary
 {design_highlights}
 
-## 行为流程摘要
+## Behavior Flow Summary
 {flowchart}
 
-## 接口规范摘要
+## Interface Specification Summary
 {interface_spec}
 
-## 功能详述摘要
+## Functional Description Summary
 {functional_desc}
 
-## 寄存器概览
+## Register Overview
 {register_desc}
 
-## 时序约束摘要
+## Timing Constraints Summary
 {timing_cdc_desc}
 
-## 架构设计摘要
+## Architecture Design Summary
 {architecture_desc}
 
 ---

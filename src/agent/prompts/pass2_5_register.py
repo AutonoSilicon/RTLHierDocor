@@ -194,15 +194,15 @@ MODE[1:0] 编码:
 """
 
 PASS2_5_REGISTER_PROMPT = """
-# 模块名称: {module_name}
+# Module Name: {module_name}
 
-# 模块功能预览:
+# Module Preview:
 {preview}
 
-# I/O 端口:
+# I/O Ports:
 {port_summary}
 
-# 电路拓扑结构（PROC/COMB 逻辑块连接图，按拓扑序，含源代码）:
+# Circuit Topology (PROC/COMB Logic Block Connection Diagram, Topologically Sorted, with Source Code):
 {graph_description}
 
 ## 执行指令

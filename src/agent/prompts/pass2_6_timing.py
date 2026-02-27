@@ -82,18 +82,18 @@ RTL代码仅包含逻辑描述，**绝对不包含**任何与目标工艺（如T
 """
 
 PASS2_6_TIMING_CDC_PROMPT = """
-# 模块名称: {module_name}
+# Module Name: {module_name}
 
-# 模块功能预览:
+# Module Preview:
 {preview}
 
-# I/O 端口:
+# I/O Ports:
 {port_summary}
 
-# 电路拓扑结构（PROC/COMB 逻辑块连接图，按拓扑序，含源代码）:
+# Circuit Topology (PROC/COMB Logic Block Connection Diagram, Topologically Sorted, with Source Code):
 {graph_description}
 
-# 子模块时钟与CDC描述:
+# Child Module Clock and CDC Descriptions:
 {children_timing}
 
 ## 执行指令

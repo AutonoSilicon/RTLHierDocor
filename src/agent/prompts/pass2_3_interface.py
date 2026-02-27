@@ -110,18 +110,18 @@ gantt
 """
 
 PASS2_3_INTERFACE_PROMPT = """
-# 模块名称: {module_name}
+# Module Name: {module_name}
 
-# 模块功能预览:
+# Module Preview:
 {preview}
 
-# I/O 端口列表:
+# I/O Port List:
 {port_summary}
 
-# 电路拓扑结构（含子模块连接关系）:
+# Circuit Topology (Including Submodule Connections):
 {graph_description}
 
-# 子模块接口预览:
+# Child Module Interface Preview:
 {children_interfaces}
 
 ## 执行指令

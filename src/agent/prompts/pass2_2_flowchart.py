@@ -114,21 +114,21 @@ flowchart TD
 """
 
 PASS2_2_MODULE_PROMPT = """
-# 模块名称: {module_name}
+# Module Name: {module_name}
 
-# 模块功能预览:
+# Module Preview:
 {preview}
 
-# I/O 端口:
+# I/O Ports:
 {port_summary}
 
-# 电路拓扑结构（PROC/COMB/SUBMODULE 连接图，按拓扑序，含源代码）:
+# Circuit Topology (PROC/COMB/SUBMODULE Connection Diagram, Topologically Sorted, with Source Code):
 {graph_description}
 
-说明：所有逻辑块的源代码已嵌入在"电路拓扑结构"章节中。
-对于超过配置阈值（默认64行）的复杂块，额外提供了功能分析文档作为参考。
+Note: Source code for all logic blocks is embedded in the "Circuit Topology" section.
+For complex blocks exceeding the configuration threshold (default 64 lines), additional functional analysis documents are provided as reference.
 
-# 子模块完整流程图（由你概括后嵌入）:
+# Child Module Flowchart Summaries (Summarize and Embed):
 {children_summaries}
 
 请根据以上完整信息，生成该模块的微架构行为流程图。
