@@ -8,7 +8,7 @@ PASS1_SYSTEM = """你是RTL设计分析专家。
 """
 
 PASS1_PROMPT = """
-# Module Name: 
+# Module Name:
 {module_name}
 
 # Parent Module Preview:

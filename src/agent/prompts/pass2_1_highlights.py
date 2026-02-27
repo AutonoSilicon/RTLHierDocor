@@ -61,8 +61,6 @@ PASS2_1_PROMPT = """
 # Child Module Preview Information:
 {children_previews}
 
-## 执行指令
 基于上述完整信息，识别并分析该模块的关键设计技巧(Design Highlights)。
-
 请严格遵循 System Prompt 的格式要求输出。
 """

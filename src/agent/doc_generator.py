@@ -1,13 +1,16 @@
 import os
 import json
 import fnmatch
+import re
 from collections import defaultdict
 from typing import Dict, List, Optional, Any
 from pathlib import Path
+from urllib.parse import quote
 
 from .llm_backend import LLMBackend
 from .source_resolver import SourceResolver
 from .progress_tracker import ProgressTracker
+from .project_progress_tracker import ProjectProgressTracker
 from .block_doc_generator import BlockDocGenerator
 from schematic.simplifier import SimplifiedGraph
 from .prompts import (
@@ -29,6 +32,10 @@ from .prompts import (
     PASS2_6_TIMING_CDC_PROMPT,
     PASS2_7_ARCHITECTURE_SYSTEM,
     PASS2_7_ARCHITECTURE_PROMPT,
+    PASS3_SYSTEM,
+    PASS3_PROMPT,
+    PASS3_SUBSYSTEM_SYSTEM,
+    PASS3_SUBSYSTEM_PROMPT,
 )
 
 class AgentDocGenerator:
@@ -45,7 +52,12 @@ class AgentDocGenerator:
         max_modules: int = 0,
         skip_modules: Optional[List[str]] = None,
         schematic_gen: Optional[Any] = None,
-        block_doc_threshold: int = 64
+        block_doc_threshold: int = 64,
+        pass3_enabled: bool = True,
+        pass3_output_subdir: str = "chip",
+        pass3_key_modules_per_subsystem: int = 24,
+        pass3_max_card_lines: int = 12,
+        pass3_tree_max_depth_in_doc: int = 4,
     ):
         self.hierarchy = hierarchy
         self.llm = llm
@@ -59,6 +71,14 @@ class AgentDocGenerator:
         self.skip_modules = skip_modules or []
         self.schematic_gen = schematic_gen
         self.block_doc_threshold = block_doc_threshold
+        self.pass3_enabled = pass3_enabled
+        self.pass3_output_subdir = pass3_output_subdir
+        self.pass3_key_modules_per_subsystem = pass3_key_modules_per_subsystem
+        self.pass3_max_card_lines = pass3_max_card_lines
+        self.pass3_tree_max_depth_in_doc = pass3_tree_max_depth_in_doc
+        self.chip_dir = self.output_dir / self.pass3_output_subdir
+        self.chip_subsystems_dir = self.chip_dir / "subsystems"
+        self.project_tracker = ProjectProgressTracker(str(self.chip_dir))
         self._graphs: Dict[str, SimplifiedGraph] = {}  # module_name -> SimplifiedGraph
         self._processed_pass1: set = set()
         self._processed_pass2: set = set()
@@ -69,6 +89,7 @@ class AgentDocGenerator:
         self._processed_pass2_5: set = set()  # Track Pass 2.5 completion
         self._processed_pass2_6: set = set()  # Track Pass 2.6 completion
         self._processed_pass2_7: set = set()  # Track Pass 2.7 completion
+        self._processed_pass3_subsystems: set = set()
         self._mermaid_summaries: Dict[str, str] = {}  # module_name -> 精简版 mermaid
         self._token_stats: Dict[str, List[Dict[str, int]]] = {}  # module_name -> list of token stats per pass
 
@@ -119,9 +140,16 @@ class AgentDocGenerator:
         print("[INFO] Running Pass 2: Synthesis Documentation...")
         await self._run_pass2(self.hierarchy)
 
+        # Pass 3: Chip-level top-down overview and subsystem index pages
+        if self.pass3_enabled:
+            print("[INFO] Running Pass 3: Chip-level Overview & Subsystem Overview...")
+            await self._run_pass3(self.hierarchy)
+
         print(f"[INFO] Documentation generation complete.")
         print(f"[INFO]   Modules: {self.modules_dir}")
         print(f"[INFO]   Debug logs: {self.debug_dir}")
+        if self.pass3_enabled:
+            print(f"[INFO]   CHIP docs: {self.chip_dir}")
 
     def _precompute_graphs(self, node: Any):
         """Recursively precompute SimplifiedGraphs for all modules.
@@ -1837,3 +1865,299 @@ class AgentDocGenerator:
         })
 
         return architecture_doc
+
+    # ==================== Pass 3: Chip-level Overview ====================
+
+    def clear_pass3_progress(self):
+        """Clear pass3 project-level progress state."""
+        self.project_tracker.clear()
+
+    def _project_log_path(self, name: str) -> str:
+        """Get debug log path for project-level pass3 generation."""
+        project_debug_dir = self.debug_dir / "chip"
+        project_debug_dir.mkdir(parents=True, exist_ok=True)
+        return str(project_debug_dir / f"debug_{name}.md")
+
+    def _safe_slug(self, text: str) -> str:
+        """Create filesystem-safe slug for subsystem filenames."""
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", text or "")
+        safe = safe.strip("_")
+        return safe or "unknown"
+
+    def _encode_rel_path(self, rel_path: str) -> str:
+        """URL-encode path segments for robust markdown links."""
+        segments = rel_path.replace("\\", "/").split("/")
+        encoded = []
+        for segment in segments:
+            if segment in ("", ".", ".."):
+                encoded.append(segment)
+            else:
+                encoded.append(quote(segment))
+        return "/".join(encoded)
+
+    def _resolve_module_doc_rel_path(self, module_name: str, from_dir: Path) -> str:
+        """Resolve best-effort module doc path with fallback priority.
+
+        Priority: architecture.md -> description.md -> preview.md
+        """
+        module_dir = self.modules_dir / module_name
+        candidates = ["architecture.md", "description.md", "preview.md"]
+
+        target = module_dir / "preview.md"
+        for name in candidates:
+            candidate = module_dir / name
+            if candidate.exists():
+                target = candidate
+                break
+
+        rel_path = os.path.relpath(str(target), str(from_dir))
+        return self._encode_rel_path(rel_path)
+
+    def _collect_subtree_nodes(self, node: Any) -> List[Any]:
+        """Collect all hierarchy nodes under a subtree (including root)."""
+        result: List[Any] = []
+        queue = [node]
+        while queue:
+            current = queue.pop(0)
+            result.append(current)
+            for child in current.children.values():
+                queue.append(child)
+        return result
+
+    def _select_key_nodes(self, subsystem_root: Any) -> List[Any]:
+        """Select key nodes for LLM context to control token usage."""
+        nodes = self._collect_subtree_nodes(subsystem_root)
+
+        def score(n: Any):
+            return (
+                n.depth,
+                -len(n.children),
+                n.module_name,
+                n.instance_name,
+            )
+
+        nodes = sorted(nodes, key=score)
+        limit = max(1, self.pass3_key_modules_per_subsystem)
+        return nodes[:limit]
+
+    def _render_hierarchy_tree_with_links(self, root: Any, from_dir: Path, max_depth: Optional[int] = None) -> str:
+        """Render markdown hierarchy tree with module doc links."""
+        lines: List[str] = []
+
+        def walk(node: Any, depth: int):
+            if max_depth is not None and depth > max_depth:
+                return
+            rel_doc = self._resolve_module_doc_rel_path(node.module_name, from_dir)
+            line = (
+                f"{'  ' * depth}- `{node.instance_name}` ({node.module_name}) "
+                f"→ [module doc]({rel_doc})"
+            )
+            lines.append(line)
+            for child in sorted(node.children.values(), key=lambda c: (c.module_name, c.instance_name)):
+                walk(child, depth + 1)
+
+        walk(root, 0)
+        return "\n".join(lines)
+
+    def _build_module_card(self, node: Any, from_dir: Path) -> str:
+        """Build compact module card used by pass3 prompts."""
+        module_name = node.module_name
+        preview = self.tracker.get_pass1_content(module_name) or "无预览"
+        architecture = self.tracker.get_pass2_7_content(module_name) or ""
+        description = self.tracker.get_pass2_content(module_name) or ""
+        summary_source = architecture or description or preview
+
+        preview_short = self._extract_summary(preview, max_lines=3, max_chars=450)
+        summary_short = self._extract_summary(
+            summary_source,
+            max_lines=max(4, self.pass3_max_card_lines),
+            max_chars=1200,
+        )
+        port_short = self._extract_summary(self.resolver.get_port_summary(module_name), max_lines=8, max_chars=800)
+        rel_doc = self._resolve_module_doc_rel_path(module_name, from_dir)
+
+        return (
+            f"### {node.instance_name} ({module_name})\n"
+            f"- 文档: [module doc]({rel_doc})\n"
+            f"- 子模块数量: {len(node.children)}\n"
+            f"- 预览摘要:\n{preview_short}\n\n"
+            f"- 关键说明:\n{summary_short}\n\n"
+            f"- 端口概览:\n{port_short}\n"
+        )
+
+    async def _run_pass3(self, root: Any):
+        """Run chip-level pass3 generation (overview + subsystem pages)."""
+        self.chip_dir.mkdir(parents=True, exist_ok=True)
+        self.chip_subsystems_dir.mkdir(parents=True, exist_ok=True)
+
+        subsystem_entries = []
+        for child in sorted(root.children.values(), key=lambda c: (c.module_name, c.instance_name)):
+            if self._should_skip(child.module_name):
+                continue
+            entry = await self._run_pass3_subsystem(root, child)
+            if entry:
+                subsystem_entries.append(entry)
+
+        await self._generate_chip_overview(root, subsystem_entries)
+
+    async def _run_pass3_subsystem(self, top_node: Any, subsystem_node: Any) -> Optional[Dict[str, str]]:
+        """Generate one subsystem overview page under chip/subsystems/."""
+        file_name = f"{self._safe_slug(subsystem_node.instance_name)}__{self._safe_slug(subsystem_node.module_name)}.md"
+        artifact = f"subsystems/{file_name}"
+        output_path = self.chip_subsystems_dir / file_name
+
+        if self.project_tracker.is_done(artifact, str(output_path)):
+            content = output_path.read_text(encoding="utf-8")
+            return {
+                "instance": subsystem_node.instance_name,
+                "module": subsystem_node.module_name,
+                "artifact": artifact,
+                "summary": self._extract_summary(content, max_lines=12, max_chars=1200),
+            }
+
+        all_nodes = self._collect_subtree_nodes(subsystem_node)
+        key_nodes = self._select_key_nodes(subsystem_node)
+
+        subsystem_tree = self._render_hierarchy_tree_with_links(
+            subsystem_node,
+            from_dir=self.chip_subsystems_dir,
+            max_depth=self.pass3_tree_max_depth_in_doc,
+        )
+
+        module_cards = []
+        for key_node in key_nodes:
+            module_cards.append(self._build_module_card(key_node, from_dir=self.chip_subsystems_dir))
+        module_cards_text = "\n\n".join(module_cards) if module_cards else "无重点模块卡片"
+
+        table_lines = [
+            "| Instance | Module | Children | Link |",
+            "|---|---|---:|---|",
+        ]
+        for n in all_nodes:
+            rel_doc = self._resolve_module_doc_rel_path(n.module_name, self.chip_subsystems_dir)
+            table_lines.append(
+                f"| {n.instance_name} | {n.module_name} | {len(n.children)} | [doc]({rel_doc}) |"
+            )
+        module_table = "\n".join(table_lines)
+
+        prompt = PASS3_SUBSYSTEM_PROMPT.format(
+            top_module=top_node.module_name,
+            subsystem_instance=subsystem_node.instance_name,
+            subsystem_module=subsystem_node.module_name,
+            total_modules=len(all_nodes),
+            key_modules=len(key_nodes),
+            subsystem_tree=subsystem_tree,
+            module_cards=module_cards_text,
+            module_table=module_table,
+        )
+
+        log_path = self._project_log_path(f"pass3_subsystem_{self._safe_slug(subsystem_node.instance_name)}")
+        subsystem_body, _token_stats = await self.llm.generate(
+            PASS3_SUBSYSTEM_SYSTEM,
+            prompt,
+            log_path=log_path,
+            tools_enabled=False,
+        )
+
+        index_block = [
+            f"# Subsystem Overview: {subsystem_node.instance_name} ({subsystem_node.module_name})",
+            "",
+            "## 内嵌索引",
+            "",
+            "### 子系统层次树",
+            subsystem_tree,
+            "",
+            "### 模块链接表",
+            module_table,
+            "",
+            "## 架构叙述",
+            "",
+            subsystem_body,
+            "",
+        ]
+        final_content = "\n".join(index_block)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(final_content, encoding="utf-8")
+        self.project_tracker.update(artifact, final_content)
+
+        return {
+            "instance": subsystem_node.instance_name,
+            "module": subsystem_node.module_name,
+            "artifact": artifact,
+            "summary": self._extract_summary(subsystem_body, max_lines=12, max_chars=1200),
+        }
+
+    async def _generate_chip_overview(self, top_node: Any, subsystem_entries: List[Dict[str, str]]):
+        """Generate chip/overview.md with embedded index and navigation."""
+        artifact = "overview.md"
+        output_path = self.chip_dir / "overview.md"
+
+        if self.project_tracker.is_done(artifact, str(output_path)):
+            return
+
+        top_preview = self.tracker.get_pass1_content(top_node.module_name) or "无预览"
+        top_architecture = self.tracker.get_pass2_7_content(top_node.module_name) or self.tracker.get_pass2_content(top_node.module_name) or "无架构摘要"
+
+        table_lines = [
+            "| Subsystem Instance | Subsystem Module | Subsystem Page | Module Doc |",
+            "|---|---|---|---|",
+        ]
+        summary_lines = []
+        for entry in subsystem_entries:
+            subsystem_page_rel = self._encode_rel_path(entry["artifact"])
+            module_doc_rel = self._resolve_module_doc_rel_path(entry["module"], self.chip_dir)
+            table_lines.append(
+                f"| {entry['instance']} | {entry['module']} | [overview]({subsystem_page_rel}) | [module doc]({module_doc_rel}) |"
+            )
+            summary_lines.append(
+                f"## {entry['instance']} ({entry['module']})\n{entry['summary']}"
+            )
+
+        subsystem_table = "\n".join(table_lines) if subsystem_entries else "无子系统"
+        subsystem_summaries = "\n\n".join(summary_lines) if summary_lines else "无子系统摘要"
+
+        hierarchy_index = self._render_hierarchy_tree_with_links(
+            top_node,
+            from_dir=self.chip_dir,
+            max_depth=self.pass3_tree_max_depth_in_doc,
+        )
+
+        prompt = PASS3_PROMPT.format(
+            top_module=top_node.module_name,
+            top_preview=self._extract_summary(top_preview, max_lines=6, max_chars=900),
+            top_architecture=self._extract_summary(top_architecture, max_lines=16, max_chars=1800),
+            subsystem_table=subsystem_table,
+            subsystem_summaries=subsystem_summaries,
+            hierarchy_index=hierarchy_index,
+        )
+
+        log_path = self._project_log_path("pass3_overview")
+        overview_body, _token_stats = await self.llm.generate(
+            PASS3_SYSTEM,
+            prompt,
+            log_path=log_path,
+            tools_enabled=False,
+        )
+
+        final_parts = [
+            "# CHIP 架构概览",
+            "",
+            "## 内嵌索引",
+            "",
+            "### 子系统总览",
+            subsystem_table,
+            "",
+            "### 层次结构索引",
+            hierarchy_index,
+            "",
+            "## 架构叙述",
+            "",
+            overview_body,
+            "",
+        ]
+        final_content = "\n".join(final_parts)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(final_content, encoding="utf-8")
+        self.project_tracker.update(artifact, final_content)

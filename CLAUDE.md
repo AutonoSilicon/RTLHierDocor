@@ -50,11 +50,15 @@ agent:
   backend: "openai"          # anthropic | openai | agent_sdk
   model: "glm-5"
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  api_key: "sk-..."          # optional, falls back to env var
   thinking: true
   skip_modules:
     - "ct_had*"
   max_source_lines: 10000
+  max_modules: 0             # 0 = unlimited, limit for testing
   resume: true
+  code_base_path: "$CODE_BASE_PATH"  # for source file resolution
+  block_doc_threshold: 64    # min lines for block-level LLM call
 verbose: true
 ```
 
@@ -133,10 +137,10 @@ The CLI entry point is `src/cli.py`. The codebase follows a layered structure:
 
 ### AI Documentation (`src/agent/`)
 
-- **`AgentDocGenerator`** — orchestrates multi-pass LLM-based documentation (doc_generator.py, doc_generator_v2.py)
+- **`AgentDocGenerator`** — orchestrates multi-pass LLM-based documentation (doc_generator.py)
 - **`LLMBackend`** — abstraction for Anthropic/OpenAI APIs (llm_backend.py)
 - **`SourceResolver`** — resolves source files for LLM context (source_resolver.py)
-- **`ProgressTracker`** — resume-capable progress tracking (progress_tracker.py, progress_tracker_v2.py)
+- **`ProgressTracker`** — resume-capable progress tracking with content hash-based change detection (progress_tracker.py)
 - **`BlockDocGenerator`** — generates block-level documentation for large modules (block_doc_generator.py)
 - **`PassRunner`** — manages parallel execution of documentation passes (pass_runner.py)
 - **`prompts/`** — LLM prompt templates organized by pass (pass1_preview.py, pass2_*.py, block_level.py)
@@ -167,19 +171,31 @@ This ensures that a signal like `cpurst_b` at the top level is still removed in 
 ## AI Documentation Workflow (docor command)
 
 Multi-pass process in `AgentDocGenerator`:
-- **Pass 0**: Precompute simplified graphs for all modules
+- **Pass 0**: Precompute simplified graphs for all modules (cached for LLM context)
 - **Pass 1**: Top-down preview generation (context from parent modules)
-- **Pass 1.5**: Block-level documentation for large blocks
+- **Pass 1.5**: Block-level documentation for large blocks (threshold: `block_doc_threshold` lines)
+  - For PROC/COMB blocks exceeding the line threshold, generates dedicated functional analysis
+  - Referenced by downstream passes for complex logic understanding
 - **Pass 2.1**: Design highlights extraction
 - **Pass 2.2**: Behavior flowchart generation (Mermaid)
 - **Pass 2.3**: Interface specification generation
-- **Pass 2.4**: Functional detailed description
+- **Pass 2.4**: Functional detailed description (with anti-hallucination constraints)
 - **Pass 2.5**: Register description
 - **Pass 2.6**: Timing constraints and CDC documentation
 - **Pass 2.7**: Architecture design documentation
 - **Pass 2**: Bottom-up synthesis documentation (combines all sub-pass outputs)
 
-Pass 2.1 through Pass 2.6 run in parallel. The workflow is resume-capable via `ProgressTracker`.
+Pass 2.1 through Pass 2.7 run in parallel (they only depend on Pass 1 and Pass 1.5).
+
+The workflow is resume-capable via `ProgressTracker` with content hash-based change detection. Each pass result is stored with an MD5 hash; if the input hasn't changed, the pass is skipped on resume.
+
+### Pass 2.4 Anti-Hallucination Constraints
+
+The functional description pass includes strict constraints to prevent LLM hallucination:
+- **Only write what exists**: Don't fabricate FIFO, timeout, exception, or power management logic if not present in source
+- **FSM only with explicit evidence**: Detailed FSM analysis only when explicit state registers and case statements are found
+- **Traceable values**: All bit widths, constants, and table sizes must be directly traceable to code
+- **Causal relationships from assignments**: Connections must be based on actual `assign`/`if`/`case` conditions, not signal name similarity
 
 ## Connectivity / Pathcheck
 
@@ -202,19 +218,20 @@ output_dir/
 ├── schematics/              # Raw DOT schematics (complete, unmodified)
 ├── simplified/              # Simplified DOT schematics (signals removed, COMB merged)
 ├── index.json               # Module index with cell/port info
-└── modules/                 # AI-generated docs (docor command)
-    └── {module_name}/
-        ├── description.md
-        ├── preview.md
-        ├── block_docs.md
-        ├── design_highlights.md
-        ├── flowchart.mmd
-        ├── interface_spec.md
-        ├── functional_desc.md
-        ├── register_desc.md
-        ├── timing_cdc.md
-        ├── architecture.md
-        └── metadata.json
+├── modules/                 # AI-generated docs (docor command)
+│   └── {module_name}/
+│       ├── description.md
+│       ├── preview.md
+│       ├── block_docs.md
+│       ├── design_highlights.md
+│       ├── flowchart.mmd
+│       ├── interface_spec.md
+│       ├── functional_desc.md
+│       ├── register_desc.md
+│       ├── timing_cdc.md      # Pass 2.6: Timing constraints and CDC
+│       ├── architecture.md    # Pass 2.7: Architecture design
+│       └── metadata.json
+└── debug/                   # Debug logs and token statistics
 ```
 
 ## Caching

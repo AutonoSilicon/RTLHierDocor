@@ -34,7 +34,8 @@ class BlockDocGenerator:
         """Generate documentation for all COMB and PROC blocks concurrently.
 
         Returns:
-            Dict mapping block_id to documentation text
+            Dict mapping block_id to documentation text (only includes blocks
+            that exceed the line threshold)
         """
         tasks = []
 
@@ -49,19 +50,23 @@ class BlockDocGenerator:
         # Run all tasks concurrently
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Filter out exceptions and build result dict
+        # Filter out exceptions and skipped blocks (None values), build result dict
         block_docs = {}
         for result in results:
-            if isinstance(result, tuple) and len(result) == 2:
+            if isinstance(result, Exception):
+                print(f"[WARN] Block doc generation failed: {result}")
+            elif result is not None:
                 block_id, doc_text = result
                 block_docs[block_id] = doc_text
-            elif isinstance(result, Exception):
-                print(f"[WARN] Block doc generation failed: {result}")
 
         return block_docs
 
-    async def _generate_proc_doc(self, proc_id: str, proc_info: ProcNodeInfo) -> Tuple[str, str]:
-        """Generate documentation for a PROC block."""
+    async def _generate_proc_doc(self, proc_id: str, proc_info: ProcNodeInfo) -> Optional[Tuple[str, str]]:
+        """Generate documentation for a PROC block.
+
+        Returns:
+            Tuple of (block_id, doc_text) if block exceeds threshold, None otherwise
+        """
         # Read source code snippet
         if proc_info.source_location:
             source_snippet = self.resolver.read_block_source([proc_info.source_location])
@@ -71,8 +76,8 @@ class BlockDocGenerator:
         # Check line count threshold
         line_count = source_snippet.count('\n') + 1
         if line_count < self.block_doc_threshold:
-            # Skip LLM call for small blocks
-            return (proc_id, f"(< {self.block_doc_threshold} lines, skipped)")
+            # Skip small blocks - return None to exclude from results
+            return None
 
         # Get connectivity info
         upstream, downstream = self._get_connectivity(proc_id)
@@ -92,8 +97,12 @@ class BlockDocGenerator:
 
         return (proc_id, doc)
 
-    async def _generate_comb_doc(self, comb_id: str, comb_info: CombNodeInfo) -> Tuple[str, str]:
-        """Generate documentation for a COMB block."""
+    async def _generate_comb_doc(self, comb_id: str, comb_info: CombNodeInfo) -> Optional[Tuple[str, str]]:
+        """Generate documentation for a COMB block.
+
+        Returns:
+            Tuple of (block_id, doc_text) if block exceeds threshold, None otherwise
+        """
         # Read source code snippets
         if comb_info.source_locations:
             source_snippet = self.resolver.read_block_source(comb_info.source_locations)
@@ -103,8 +112,8 @@ class BlockDocGenerator:
         # Check line count threshold
         line_count = source_snippet.count('\n') + 1
         if line_count < self.block_doc_threshold:
-            # Skip LLM call for small blocks
-            return (comb_id, f"(< {self.block_doc_threshold} lines, skipped)")
+            # Skip small blocks - return None to exclude from results
+            return None
 
         # Get connectivity info
         upstream, downstream = self._get_connectivity(comb_id)

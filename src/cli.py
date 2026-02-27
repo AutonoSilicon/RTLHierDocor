@@ -254,7 +254,7 @@ def cmd_docor(args):
     """Generate AI-powered module documentation."""
     import asyncio
     from core import YosysBackend, HierarchyBuilder, SignalTracer
-    from agent import AgentDocGenerator, SourceResolver, get_llm_backend, ProgressTracker
+    from agent import AgentDocGenerator, SourceResolver, get_llm_backend, ProgressTracker, ProjectProgressTracker
     from schematic import SchematicGenerator
 
     cfg = _load_config(args)
@@ -315,6 +315,8 @@ def cmd_docor(args):
 
     if not cfg.resume:
         tracker.clear()
+        project_tracker = ProjectProgressTracker(os.path.join(cfg.output_dir, "chip"))
+        project_tracker.clear()
 
     generator = AgentDocGenerator(
         hierarchy=hierarchy,
@@ -326,7 +328,7 @@ def cmd_docor(args):
         max_modules=cfg.max_modules,
         skip_modules=cfg.skip_modules,
         schematic_gen=schematic_gen,
-        block_doc_threshold=cfg.block_doc_threshold
+        block_doc_threshold=cfg.block_doc_threshold,
     )
 
     # Run async generator

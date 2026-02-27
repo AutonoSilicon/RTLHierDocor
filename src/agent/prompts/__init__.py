@@ -37,6 +37,10 @@ from .pass2_6_timing import PASS2_6_TIMING_CDC_SYSTEM, PASS2_6_TIMING_CDC_PROMPT
 # Pass 2.7: Architecture design
 from .pass2_7_architecture import PASS2_7_ARCHITECTURE_SYSTEM, PASS2_7_ARCHITECTURE_PROMPT
 
+# Pass 3: Chip / Subsystem overview
+from .pass3_chip_overview import PASS3_SYSTEM, PASS3_PROMPT
+from .pass3_subsystem_overview import PASS3_SUBSYSTEM_SYSTEM, PASS3_SUBSYSTEM_PROMPT
+
 __all__ = [
     # Block-level
     "BLOCK_SYSTEM",
@@ -68,4 +72,9 @@ __all__ = [
     # Pass 2.7
     "PASS2_7_ARCHITECTURE_SYSTEM",
     "PASS2_7_ARCHITECTURE_PROMPT",
+    # Pass 3
+    "PASS3_SYSTEM",
+    "PASS3_PROMPT",
+    "PASS3_SUBSYSTEM_SYSTEM",
+    "PASS3_SUBSYSTEM_PROMPT",
 ]

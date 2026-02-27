@@ -1,0 +1,48 @@
+# RTLHierDocor Configuration for ct_ifu_top testing
+#
+# Medium-scale test configuration targeting IFU (Instruction Fetch Unit) top module
+
+# ── Design source ──────────────────────────────────────────────
+design:
+  filelist: "$CODE_BASE_PATH/gen_rtl/filelists/C910_asic_rtl.fl"
+  top_module: "ct_ifu_top"
+  # rtlil: ""                  # Alternative: pre-compiled RTLIL path
+
+# ── Output settings ───────────────────────────────────────────
+output:
+  dir: "./rtl_docs"
+  cache_dir: ".rtl_cache"
+  max_schematics: 0            # 0 = generate all
+
+# ── Schematic simplification ──────────────────────────────────
+simplify:
+  enabled: true
+  strategy: "proc_group"       # proc_group | connected_component
+
+  # I/O port signals matching these patterns are removed from
+  # simplified schematics along with their connected paths.
+  # Uses fnmatch-style wildcards: * matches anything, ? matches one char.
+  # remove_signals:
+  #   - "cpurst_b"
+  #   - "*rst_b"
+  #   - "*_rst_b"
+  #   - "pad_yy_icg_scan_en"
+  #   - "*scan_en*"
+  #   - "forever_*"
+
+# ── General ───────────────────────────────────────────────────
+verbose: true
+
+# ── Agent Docor ────────────────────────────────────────────────
+agent:
+  backend: "openai"              # anthropic | openai | agent_sdk
+  model: "qwen3.5-plus"
+  base_url: "https://coding.dashscope.aliyuncs.com/v1"
+  api_key: "sk-sp-0b4bfeb434d946bda2d005ac9c85026e"
+  thinking: true                   # Enable thinking/reasoning mode
+  skip_modules:                     # Modules matching these patterns will be skipped
+    - "ct_had*"
+  max_source_lines: 10000            # Truncate source files after N lines
+  resume: true                      # Resume from last checkpoint
+  code_base_path: "$CODE_BASE_PATH" # Base path for source file resolution
+  max_modules: 0                    # 0 = all, N = limit for debugging
