@@ -15,6 +15,9 @@ from .pass2_docs import (
     PASS2_SYSTEM,
     PASS2_PROMPT,
 )
+from .pass2_a_root import PASS2_A_ROOT_SYSTEM, PASS2_A_ROOT_PROMPT
+from .pass2_b_expand import PASS2_B_EXPAND_SYSTEM, PASS2_B_EXPAND_PROMPT
+from .pass2_c_polish import PASS2_C_POLISH_SYSTEM, PASS2_C_POLISH_PROMPT
 
 # Pass 2.1: Design highlights identification
 from .pass2_1_highlights import PASS2_1_SYSTEM, PASS2_1_PROMPT
@@ -51,6 +54,12 @@ __all__ = [
     # Pass 2
     "PASS2_SYSTEM",
     "PASS2_PROMPT",
+    "PASS2_A_ROOT_SYSTEM",
+    "PASS2_A_ROOT_PROMPT",
+    "PASS2_B_EXPAND_SYSTEM",
+    "PASS2_B_EXPAND_PROMPT",
+    "PASS2_C_POLISH_SYSTEM",
+    "PASS2_C_POLISH_PROMPT",
     # Pass 2.1
     "PASS2_1_SYSTEM",
     "PASS2_1_PROMPT",

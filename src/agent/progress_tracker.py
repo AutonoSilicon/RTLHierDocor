@@ -25,6 +25,9 @@ class ModuleDocState:
     pass2_5_register_hash: Optional[str] = None
     pass2_6_timing_cdc_hash: Optional[str] = None
     pass2_7_architecture_hash: Optional[str] = None
+    pass2_a_root_hash: Optional[str] = None
+    pass2_b_expand_hash: Optional[str] = None
+    pass2_c_polish_hash: Optional[str] = None
     pass2_description_hash: Optional[str] = None
 
     error: Optional[str] = None
@@ -39,7 +42,10 @@ class ProgressTracker:
     
     # Define pass progression order
     LINEAR_PASSES = ["pass1", "pass1_5", "pass2"]
-    PARALLEL_PASSES = ["pass2_1", "pass2_2", "pass2_3", "pass2_4", "pass2_5", "pass2_6", "pass2_7"]
+    PARALLEL_PASSES = [
+        "pass2_1", "pass2_2", "pass2_3", "pass2_4", "pass2_5", "pass2_6", "pass2_7",
+        "pass2_a_root", "pass2_b_expand", "pass2_c_polish"
+    ]
 
     # Map pass names to status values and field names
     PASS_STATUS_MAP = {
@@ -65,6 +71,9 @@ class ProgressTracker:
         "pass2_5": "pass2_5_register_hash",
         "pass2_6": "pass2_6_timing_cdc_hash",
         "pass2_7": "pass2_7_architecture_hash",
+        "pass2_a_root": "pass2_a_root_hash",
+        "pass2_b_expand": "pass2_b_expand_hash",
+        "pass2_c_polish": "pass2_c_polish_hash",
         "pass2": "pass2_description_hash",
     }
 
@@ -79,8 +88,13 @@ class ProgressTracker:
         "pass2_5": "register_desc.md",
         "pass2_6": "timing_cdc.md",
         "pass2_7": "architecture.md",
+        "pass2_a_root": "description_root.md",
+        "pass2_b_expand": "description_working.md",
+        "pass2_c_polish": "description_polished.md",
         "pass2": "description.md",
     }
+
+    DEBUG_STAGE_PASSES = {"pass2_a_root", "pass2_b_expand", "pass2_c_polish"}
 
     def __init__(self, output_dir: str):
         self.output_dir = output_dir
@@ -158,7 +172,10 @@ class ProgressTracker:
         if not filename:
             return None
 
-        file_path = os.path.join(self.output_dir, "modules", module_name, filename)
+        if pass_name in self.DEBUG_STAGE_PASSES:
+            file_path = os.path.join(self.output_dir, "debug", module_name, filename)
+        else:
+            file_path = os.path.join(self.output_dir, "modules", module_name, filename)
         if not os.path.exists(file_path):
             return None
 
@@ -226,6 +243,15 @@ class ProgressTracker:
     def update_pass2(self, module_name: str, description: str):
         self.update(module_name, "pass2", description)
 
+    def update_pass2_a_root(self, module_name: str, root_doc: str):
+        self.update(module_name, "pass2_a_root", root_doc)
+
+    def update_pass2_b_expand(self, module_name: str, expanded_doc: str):
+        self.update(module_name, "pass2_b_expand", expanded_doc)
+
+    def update_pass2_c_polish(self, module_name: str, polished_doc: str):
+        self.update(module_name, "pass2_c_polish", polished_doc)
+
     def update_pass2_1(self, module_name: str, highlights: str):
         self.update(module_name, "pass2_1", highlights)
 
@@ -280,6 +306,18 @@ class ProgressTracker:
         """Get pass2_7 (architecture) content from file."""
         return self.get_content(module_name, "pass2_7")
 
+    def get_pass2_a_root_content(self, module_name: str) -> Optional[str]:
+        """Get pass2_a_root content from file."""
+        return self.get_content(module_name, "pass2_a_root")
+
+    def get_pass2_b_expand_content(self, module_name: str) -> Optional[str]:
+        """Get pass2_b_expand content from file."""
+        return self.get_content(module_name, "pass2_b_expand")
+
+    def get_pass2_c_polish_content(self, module_name: str) -> Optional[str]:
+        """Get pass2_c_polish content from file."""
+        return self.get_content(module_name, "pass2_c_polish")
+
     def get_pass2_content(self, module_name: str) -> Optional[str]:
         """Get pass2 (description) content from file."""
         return self.get_content(module_name, "pass2")
@@ -313,6 +351,15 @@ class ProgressTracker:
 
     def is_pass2_7_done(self, module_name: str) -> bool:
         return self.is_done(module_name, "pass2_7")
+
+    def is_pass2_a_root_done(self, module_name: str) -> bool:
+        return self.is_done(module_name, "pass2_a_root")
+
+    def is_pass2_b_expand_done(self, module_name: str) -> bool:
+        return self.is_done(module_name, "pass2_b_expand")
+
+    def is_pass2_c_polish_done(self, module_name: str) -> bool:
+        return self.is_done(module_name, "pass2_c_polish")
 
     def mark_failed(self, module_name: str, error: str):
         state = self.get_state(module_name)

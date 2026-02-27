@@ -37,9 +37,10 @@ verbose: true
 # ── Agent Docor ────────────────────────────────────────────────
 agent:
   backend: "openai"              # anthropic | openai | agent_sdk
-  model: "deepseek-v3.2"
   # base_url: "https://open.bigmodel.cn/api/paas/v4/"                      # Custom LLM API base URL if needed
+  model: "deepseek-v3.2"
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  api_key: "sk-22730e3d9366402489918930ed806b32"
   thinking: true                   # Enable thinking/reasoning mode
   skip_modules:                     # Modules matching these patterns will be skipped
     - "ct_had*"
@@ -47,5 +48,9 @@ agent:
   resume: true                      # Resume from last checkpoint
   code_base_path: "$CODE_BASE_PATH" # Base path for source file resolution
   max_modules: 0                    # 0 = all, N = limit for debugging
+  # composer 专用 endpoint（仅用于 Pass2 的 staged composer）
+  # composer_model: "deepseek-v3.2"
+  # composer_base_url: "https://your-composer-endpoint/v1"
+  # composer_api_key: "$COMPOSER_API_KEY"
+  # composer_thinking: false
   # api_key: "941daa47276a40998a357e4485b03581.cjwMaOjjocv3xJXa"    # Or use ANTHROPIC_API_KEY env var
-  api_key: "sk-22730e3d9366402489918930ed806b32"

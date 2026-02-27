@@ -174,6 +174,11 @@ class ProjectConfig:
     agent_api_key: Optional[str] = None
     agent_base_url: Optional[str] = None
     agent_thinking: bool = False
+    composer_backend: Optional[str] = None
+    composer_model: Optional[str] = None
+    composer_api_key: Optional[str] = None
+    composer_base_url: Optional[str] = None
+    composer_thinking: Optional[bool] = None
     skip_modules: List[str] = field(default_factory=lambda: ["ct_had*"])
     max_source_lines: int = 2000
     code_base_path: str = ""
@@ -249,6 +254,16 @@ class ProjectConfig:
                 config.agent_base_url = str(agent['base_url'])
             if 'thinking' in agent:
                 config.agent_thinking = bool(agent['thinking'])
+            if 'composer_backend' in agent:
+                config.composer_backend = str(agent['composer_backend'])
+            if 'composer_model' in agent:
+                config.composer_model = str(agent['composer_model'])
+            if 'composer_api_key' in agent:
+                config.composer_api_key = str(agent['composer_api_key'])
+            if 'composer_base_url' in agent:
+                config.composer_base_url = str(agent['composer_base_url'])
+            if 'composer_thinking' in agent:
+                config.composer_thinking = bool(agent['composer_thinking'])
             if 'skip_modules' in agent:
                 skips = agent['skip_modules']
                 if isinstance(skips, list):

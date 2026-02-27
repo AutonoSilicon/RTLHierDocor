@@ -1,8 +1,7 @@
 """LLM Backend for OpenAI-compatible APIs.
 
 This module provides a unified interface for LLM interactions,
-supporting OpenAI-compatible APIs (including DeepSeek, vLLM, etc.)
-with optional function calling support.
+supporting OpenAI-compatible APIs (including DeepSeek, vLLM, etc.).
 """
 
 import os
@@ -18,240 +17,82 @@ except ImportError:
 
 
 class LLMBackend:
-    """LLM Backend using OpenAI's Chat Completion API with function calling support."""
+    """LLM Backend using OpenAI's Chat Completion API."""
 
-    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None, base_url: Optional[str] = None, 
-                 thinking: bool = False, resolver: Optional[Any] = None, graphs: Optional[Dict[str, Any]] = None):
+    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None, base_url: Optional[str] = None,
+                 thinking: bool = False):
         """Initialize the LLM backend.
-        
+
         Args:
             model: Model name (e.g., "gpt-4", "deepseek-chat", etc.)
             api_key: API key (defaults to OPENAI_API_KEY env var)
             base_url: Base URL for API (for non-OpenAI providers)
             thinking: Enable thinking/reasoning mode
-            resolver: SourceResolver for reading source code (optional, for tool calling)
-            graphs: Dict mapping module_name -> SimplifiedGraph (optional, for tool calling)
         """
         if openai is None:
             raise ImportError("'openai' package not installed. Run 'pip install openai'.")
-        
+
         self.client = openai.AsyncOpenAI(
             api_key=api_key or os.environ.get("OPENAI_API_KEY"),
             base_url=base_url
         )
         self.model = model
         self.thinking = thinking
-        self.resolver = resolver
-        self.graphs = graphs or {}
-        
+
         # Semaphore to limit concurrent LLM API calls (prevent rate limiting)
         self._semaphore = asyncio.Semaphore(3)
 
-    def set_context(self, resolver: Optional[Any] = None, graphs: Optional[Dict[str, Any]] = None):
-        """Update the resolver and graphs for function calling.
-        
-        Args:
-            resolver: SourceResolver for reading source code
-            graphs: Dict mapping module_name -> SimplifiedGraph
-        """
-        if resolver is not None:
-            self.resolver = resolver
-        if graphs is not None:
-            self.graphs = graphs
-
-    def _get_tools_definition(self):
-        """Define the tools available for function calling."""
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "read_block_source",
-                    "description": "Read the source code of a specific BLOCK (PROC or COMB) within a module. "
-                                   "Use this to inspect the detailed RTL implementation of a logical block.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "module_name": {
-                                "type": "string",
-                                "description": "The name of the module containing the block"
-                            },
-                            "block_id": {
-                                "type": "string",
-                                "description": "The ID of the block to read (e.g., 'PROC_0', 'COMB_1', 'IN_COMB_0', 'OUT_COMB_0')"
-                            }
-                        },
-                        "required": ["module_name", "block_id"]
-                    }
-                }
-            }
-        ]
-
-    def _execute_tool(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
-        """Execute a tool call and return the result."""
-        print(f"    [TOOL CALL] {tool_name}({', '.join(f'{k}={repr(v)}' for k, v in tool_args.items())})")
-
-        if tool_name == "read_block_source":
-            result = self._read_block_source(
-                tool_args.get("module_name", ""),
-                tool_args.get("block_id", "")
-            )
-            first_line = result.split('\n')[0] if result else ""
-            if result.startswith("Error:"):
-                print(f"    [TOOL RESULT] ❌ {first_line}")
-            else:
-                source_lines = result.count('\n')
-                print(f"    [TOOL RESULT] ✓ {first_line} ({source_lines} lines)")
-            return result
-        else:
-            print(f"    [TOOL RESULT] ❌ Unknown tool: {tool_name}")
-            return f"Unknown tool: {tool_name}"
-
-    def _read_block_source(self, module_name: str, block_id: str) -> str:
-        """Read source code for a specific PROC or COMB block.
-
-        Args:
-            module_name: Name of the module
-            block_id: ID of the block (e.g., 'PROC_0', 'COMB_1', 'p0', 'c1')
-
-        Returns:
-            Source code string or error message
-        """
-        if not self.resolver:
-            return "Error: SourceResolver not available"
-
-        if not module_name or not block_id:
-            return "Error: module_name and block_id are required"
-
-        graph = self.graphs.get(module_name)
-        if not graph:
-            return f"Error: No graph found for module '{module_name}'"
-
-        # Normalize block_id: support both 'PROC_11' and 'p11' formats
-        normalized_id = block_id
-        if block_id.startswith("PROC_"):
-            normalized_id = "p" + block_id[5:]
-        elif block_id.startswith("COMB_"):
-            normalized_id = "c" + block_id[5:]
-        elif block_id.startswith("IN_COMB_"):
-            normalized_id = "c" + block_id[8:]
-        elif block_id.startswith("OUT_COMB_"):
-            normalized_id = "c" + block_id[9:]
-
-        if normalized_id in graph.proc_nodes:
-            proc_info = graph.proc_nodes[normalized_id]
-            if proc_info.source_location:
-                source = self.resolver.read_block_source([proc_info.source_location])
-                return f"# PROC Block: {block_id}\n{source}"
-            else:
-                return f"Error: No source location available for PROC block '{block_id}'"
-        
-        elif normalized_id in graph.comb_nodes:
-            comb_info = graph.comb_nodes[normalized_id]
-            if comb_info.source_locations:
-                source = self.resolver.read_block_source(comb_info.source_locations)
-                return f"# COMB Block: {block_id} ({comb_info.comb_type})\n{source}"
-            else:
-                return f"Error: No source locations available for COMB block '{block_id}'"
-        
-        else:
-            available_blocks = list(graph.proc_nodes.keys()) + list(graph.comb_nodes.keys())
-            return f"Error: Block '{block_id}' not found in module '{module_name}'. Available: {', '.join(available_blocks[:10])}"
-
-    async def generate(self, system: str, prompt: str, log_path: str = "debug.md", 
-                       disable_thinking: bool = False, tools_enabled: bool = True) -> Tuple[str, Dict[str, int]]:
+    async def generate(self, system: str, prompt: str, log_path: str = "debug.md",
+                       disable_thinking: bool = False) -> Tuple[str, Dict[str, int]]:
         """Generate text from the LLM.
-        
+
         Args:
             system: System prompt
             prompt: User prompt
             log_path: Path for debug log file
             disable_thinking: Whether to disable thinking mode
-            tools_enabled: Whether to enable function calling tools
-        
+
         Returns:
             Tuple of (generated_text, token_stats)
         """
         async with self._semaphore:
             try:
-                import json
-                
                 messages = [
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt}
                 ]
 
-                # Add tools if resolver is available AND tools are enabled
-                tools = self._get_tools_definition() if (self.resolver and tools_enabled) else None
-                
-                max_iterations = 10
-                iteration = 0
                 use_thinking = self.thinking and not disable_thinking
-                
-                while iteration < max_iterations:
-                    iteration += 1
-                    
-                    kwargs = {
-                        "model": self.model,
-                        "messages": messages
-                    }
 
-                    if tools:
-                        kwargs["tools"] = tools
-                        kwargs["tool_choice"] = "auto"
+                kwargs = {
+                    "model": self.model,
+                    "messages": messages
+                }
 
-                    # Common pattern for thinking/reasoning models in OpenAI-compatible APIs
-                    if use_thinking:
-                        kwargs["extra_body"] = {"enable_thinking": True}
+                # Common pattern for thinking/reasoning models in OpenAI-compatible APIs
+                if use_thinking:
+                    kwargs["extra_body"] = {"enable_thinking": True}
 
-                    response = await self.client.chat.completions.create(**kwargs)
-                    assistant_message = response.choices[0].message
-                    
-                    msg_dict = {
-                        "role": "assistant",
-                        "content": assistant_message.content
-                    }
-                    if hasattr(assistant_message, 'tool_calls') and assistant_message.tool_calls:
-                        msg_dict["tool_calls"] = assistant_message.tool_calls
-                    messages.append(msg_dict)
-                    
-                    if hasattr(assistant_message, 'tool_calls') and assistant_message.tool_calls:
-                        num_calls = len(assistant_message.tool_calls)
-                        print(f"    [LLM] Requesting {num_calls} tool call(s)...")
+                response = await self.client.chat.completions.create(**kwargs)
+                assistant_message = response.choices[0].message
 
-                        for tool_call in assistant_message.tool_calls:
-                            function_name = tool_call.function.name
-                            function_args = json.loads(tool_call.function.arguments)
-                            tool_result = self._execute_tool(function_name, function_args)
+                result = assistant_message.content
 
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "name": function_name,
-                                "content": tool_result
-                            })
+                if result and use_thinking:
+                    clean_result, thinking_content = self._extract_thinking_content(result)
+                    if thinking_content:
+                        self._append_thinking_to_log(thinking_content, log_path)
+                    result = clean_result
 
-                        print(f"    [LLM] Continuing generation with tool results...")
-                        continue
-                    else:
-                        result = assistant_message.content
-                        
-                        if result and use_thinking:
-                            clean_result, thinking_content = self._extract_thinking_content(result)
-                            if thinking_content:
-                                self._append_thinking_to_log(thinking_content, log_path)
-                            result = clean_result
-                        
-                        token_stats = {
-                            "input_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') else 0,
-                            "output_tokens": response.usage.completion_tokens if hasattr(response, 'usage') else 0,
-                            "total_tokens": response.usage.total_tokens if hasattr(response, 'usage') else 0
-                        }
-                        
-                        self._log_call(system, prompt, self.model, log_path)
-                        return (result if result else "Error: LLM returned empty response."), token_stats
-                
-                return "Error: Maximum function calling iterations reached.", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-                
+                token_stats = {
+                    "input_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') else 0,
+                    "output_tokens": response.usage.completion_tokens if hasattr(response, 'usage') else 0,
+                    "total_tokens": response.usage.total_tokens if hasattr(response, 'usage') else 0
+                }
+
+                self._log_call(system, prompt, self.model, log_path)
+                return (result if result else "Error: LLM returned empty response."), token_stats
+
             except Exception as e:
                 return f"Error calling LLM API: {str(e)}", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
@@ -327,32 +168,28 @@ class LLMBackend:
             print(f"[WARNING] Failed to write to {log_path}: {e}")
 
 
-def get_llm_backend(config: Any, resolver: Optional[Any] = None, graphs: Optional[Dict[str, Any]] = None) -> LLMBackend:
+def get_llm_backend(config: Any) -> LLMBackend:
     """Factory to get the configured LLM backend.
-    
+
     Note: Only OpenAI-compatible backends are supported.
-    
+
     Args:
         config: Configuration dict with backend settings
-        resolver: Optional SourceResolver for function calling
-        graphs: Optional dict mapping module_name -> SimplifiedGraph
     """
     backend_type = config.get("backend", "openai")
-    
+
     if backend_type not in ("openai", "anthropic", "agent_sdk"):
         raise ValueError(f"Unknown LLM backend: {backend_type}. Only 'openai' (OpenAI-compatible) is supported.")
-    
+
     # All backends now use OpenAI-compatible API
     if backend_type in ("openai", "anthropic", "agent_sdk"):
         # Note: anthropic and agent_sdk are deprecated, treated as openai
         if backend_type in ("anthropic", "agent_sdk"):
             print(f"[WARN] Backend '{backend_type}' is deprecated. Using OpenAI-compatible API instead.")
-    
+
     return LLMBackend(
         model=config.get("model", "gpt-4"),
         api_key=config.get("api_key"),
         base_url=config.get("base_url"),
-        thinking=config.get("thinking", False),
-        resolver=resolver,
-        graphs=graphs or {}
+        thinking=config.get("thinking", False)
     )

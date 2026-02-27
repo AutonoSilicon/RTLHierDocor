@@ -32,6 +32,9 @@ agent:
   model: "deepseek-v3.2"
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   api_key: "sk-22730e3d9366402489918930ed806b32"
+  composer_model: "deepseek-v3.2"
+  composer_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  composer_api_key: "sk-22730e3d9366402489918930ed806b32"
   thinking: true
   skip_modules:
     - "ct_had*"

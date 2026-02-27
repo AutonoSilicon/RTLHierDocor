@@ -2,6 +2,7 @@ import os
 import json
 import fnmatch
 import re
+import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Any
 from pathlib import Path
@@ -12,12 +13,19 @@ from .source_resolver import SourceResolver
 from .progress_tracker import ProgressTracker
 from .project_progress_tracker import ProjectProgressTracker
 from .block_doc_generator import BlockDocGenerator
+from .incremental_composer import IncrementalDocComposer
 from schematic.simplifier import SimplifiedGraph
 from .prompts import (
     PASS1_SYSTEM,
     PASS1_PROMPT,
     PASS2_SYSTEM,
     PASS2_PROMPT,
+    PASS2_A_ROOT_SYSTEM,
+    PASS2_A_ROOT_PROMPT,
+    PASS2_B_EXPAND_SYSTEM,
+    PASS2_B_EXPAND_PROMPT,
+    PASS2_C_POLISH_SYSTEM,
+    PASS2_C_POLISH_PROMPT,
     PASS2_1_SYSTEM,
     PASS2_1_PROMPT,
     PASS2_2_MODULE_SYSTEM,
@@ -45,6 +53,7 @@ class AgentDocGenerator:
         self,
         hierarchy: Any,
         llm: LLMBackend,
+        composer_llm: Optional[LLMBackend],
         resolver: SourceResolver,
         tracker: ProgressTracker,
         output_dir: str,
@@ -79,6 +88,7 @@ class AgentDocGenerator:
         self.chip_dir = self.output_dir / self.pass3_output_subdir
         self.chip_subsystems_dir = self.chip_dir / "subsystems"
         self.project_tracker = ProjectProgressTracker(str(self.chip_dir))
+        self.incremental_composer = IncrementalDocComposer(composer_llm or llm)
         self._graphs: Dict[str, SimplifiedGraph] = {}  # module_name -> SimplifiedGraph
         self._processed_pass1: set = set()
         self._processed_pass2: set = set()
@@ -109,11 +119,6 @@ class AgentDocGenerator:
             print("[INFO] Running Pass 0: Precomputing SimplifiedGraphs...")
             self._precompute_graphs(self.hierarchy)
             print(f"[INFO] Precomputed {len(self._graphs)} simplified graphs")
-            
-            # Update OpenAI backend context if it supports it
-            if hasattr(self.llm, 'set_context'):
-                self.llm.set_context(resolver=self.resolver, graphs=self._graphs)
-                print("[INFO] Updated LLM backend with graphs for function calling")
 
         # Pass 1: Top-down Preview Generation
         print("[INFO] Running Pass 1: Top-down Preview Generation...")
@@ -557,7 +562,6 @@ class AgentDocGenerator:
 
         Reads the block_docs.json file generated in Pass 1.5 and provides
         only the first 3 lines of each block's documentation as a summary.
-        LLM can use read_block_source tool to get detailed implementation if needed.
 
         Args:
             module_name: Module name
@@ -568,7 +572,7 @@ class AgentDocGenerator:
         block_docs_file = self.modules_dir / module_name / "block_docs.json"
 
         if not block_docs_file.exists():
-            return "无逻辑块摘要信息（可使用 read_block_source 工具查看详细源码）"
+            return "无复杂逻辑块需要单独文档化"
 
         try:
             import json
@@ -593,12 +597,10 @@ class AgentDocGenerator:
                     parts.append("...")
                 parts.append("")  # Empty line
 
-            parts.append("\n**说明**: 以上为各逻辑块的功能摘要。如需查看具体实现细节，可使用 `read_block_source(module_name=\"{}\", block_id=\"<BLOCK_ID>\")` 工具。".format(module_name))
-
             return "\n".join(parts)
         except Exception as e:
             print(f"[WARN] Failed to read block summaries for {module_name}: {e}")
-            return f"读取逻辑块摘要失败（可使用 read_block_source 工具查看源码）"
+            return "读取逻辑块摘要失败"
 
     async def _generate_module_preview(self, node: Any, ancestor_context: str):
         module_name = node.module_name
@@ -663,10 +665,12 @@ class AgentDocGenerator:
 
         # 2. Process current module if not already done
         if module_name in self._processed_pass2:
+            print(f"  [Pass 2] Reusing in-session result for {module_name}")
             return self.tracker.get_pass2_content(module_name) or ""
 
         if self.tracker.is_pass2_done(module_name):
             self._processed_pass2.add(module_name)
+            print(f"  [Pass 2] Reusing cached description for {module_name}")
             return self.tracker.get_pass2_content(module_name) or ""
 
         # 3. Check prerequisites: Pass 2.1, Pass 2.2 and Pass 2.3 must be done
@@ -712,46 +716,94 @@ class AgentDocGenerator:
         return description
 
     def _extract_summary(self, content: str, max_lines: int = 30, max_chars: int = 2000) -> str:
-        """Extract a summary from longer content.
-        
-        Args:
-            content: Original content
-            max_lines: Maximum number of lines to extract
-            max_chars: Maximum characters to extract
-            
-        Returns:
-            Truncated content with indicator if truncated
+        """Extract a compact, structured summary from longer content.
+
+        Preference order:
+        1) explicit "摘要" section
+        2) meaningful bullet/table lines (skip empty/template noise)
+        3) fallback truncation
         """
         if not content or content.strip() in ["无设计亮点分析", "无流程图", "无接口规范", 
                                                 "无功能详细描述", "无寄存器描述", 
                                                 "无时序约束与CDC描述", "无架构设计描述"]:
             return content
-        
-        # Extract by lines first
-        lines = content.split('\n')
-        if len(lines) <= max_lines:
-            result = content
+
+        explicit = self._extract_named_section(content, ["摘要", "Summary", "Executive Summary"])
+        if explicit:
+            result = explicit
         else:
-            result = '\n'.join(lines[:max_lines]) + f"\n\n[... 共{len(lines)}行，此处省略后续内容 ...]"
-        
+            lines = [line.rstrip() for line in content.split('\n')]
+            kept: List[str] = []
+            for line in lines:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("```"):
+                    continue
+                if stripped.lower().startswith("gantt") or stripped.lower().startswith("statediagram"):
+                    continue
+                if stripped.startswith("|") or stripped.startswith("-") or stripped.startswith("#"):
+                    kept.append(line)
+                    continue
+                if any(token in stripped for token in ["来源", "待确认", "时钟", "复位", "CDC", "接口", "寄存器", "数据流", "控制流"]):
+                    kept.append(line)
+            if kept:
+                result = "\n".join(kept[:max_lines])
+            else:
+                lines = content.split('\n')
+                if len(lines) <= max_lines:
+                    result = content
+                else:
+                    result = '\n'.join(lines[:max_lines]) + f"\n\n[... 共{len(lines)}行，此处省略后续内容 ...]"
+
         # Then check char limit
         if len(result) > max_chars:
             result = result[:max_chars] + f"\n\n[... 内容过长，共{len(content)}字符，此处截断 ...]"
-        
+
         return result
+
+    def _extract_named_section(self, content: str, section_names: List[str]) -> str:
+        """Extract a markdown section by heading keywords."""
+        if not content:
+            return ""
+
+        lines = content.split('\n')
+        start = -1
+        end = len(lines)
+        for idx, line in enumerate(lines):
+            if not line.strip().startswith("#"):
+                continue
+            normalized = line.strip().lstrip("#").strip().lower()
+            if any(name.lower() in normalized for name in section_names):
+                start = idx
+                break
+
+        if start < 0:
+            return ""
+
+        for idx in range(start + 1, len(lines)):
+            if lines[idx].strip().startswith("#"):
+                end = idx
+                break
+
+        section = "\n".join(lines[start:end]).strip()
+        return section
 
     async def _generate_module_description(self, node: Any, children_descs: Dict[str, str]) -> str:
         """Generate executive summary documentation (Pass 2 - Synthesis).
-        
-        This is an overview document that synthesizes all sub-pass analyses (2.1-2.7)
-        into a high-level module description. Source code is excluded to save context.
+
+        Uses a staged merge workflow:
+        1) root draft from preview + architecture
+        2) incremental expansions with each target sub-doc
+        3) final global polish and conflict consolidation
         """
         module_name = node.module_name
+        pass2_start = time.perf_counter()
         print(f"  [Pass 2] Generating executive summary for {module_name}...")
 
-        state = self.tracker.get_state(module_name)
         preview = self.tracker.get_pass1_content(module_name) or ""
         port_summary = self.resolver.get_port_summary(module_name)
+        block_descriptions = self._format_block_summaries(module_name)
 
         # Get graph description WITHOUT source code (topology only, to save context)
         graph_description = ""
@@ -765,10 +817,9 @@ class AgentDocGenerator:
             graph_description = "无拓扑结构信息（模块未解析）"
             print(f"    [Context] No topology available")
 
-        # Get Pass 2.1-2.7 results and extract summaries (not full content)
-        # This saves context while keeping the essential information
+        # Get Pass 2.1-2.7 summaries
         design_highlights = self._extract_summary(self.tracker.get_pass2_1_content(module_name) or "无设计亮点分析", max_lines=20)
-        flowchart = self._extract_summary(self.tracker.get_pass2_2_content(module_name) or "无流程图", max_lines=15)  # Mermaid usually shorter
+        flowchart = self._extract_summary(self.tracker.get_pass2_2_content(module_name) or "无流程图", max_lines=20)
         interface_spec = self._extract_summary(self.tracker.get_pass2_3_content(module_name) or "无接口规范", max_lines=25)
         functional_desc = self._extract_summary(self.tracker.get_pass2_4_content(module_name) or "无功能详细描述", max_lines=25)
         register_desc = self._extract_summary(self.tracker.get_pass2_5_content(module_name) or "无寄存器描述", max_lines=20)
@@ -785,40 +836,117 @@ class AgentDocGenerator:
         else:
             children_summary = "当前为叶模块，无子模块"
 
-        prompt = PASS2_PROMPT.format(
-            module_name=module_name,
-            preview=preview,
-            children_descriptions=children_summary,
-            port_summary=port_summary,
-            graph_description=graph_description,
-            design_highlights=design_highlights,
-            flowchart=flowchart,
-            interface_spec=interface_spec,
-            functional_desc=functional_desc,
-            register_desc=register_desc,
-            timing_cdc_desc=timing_cdc_desc,
-            architecture_desc=architecture_desc
+        print(
+            f"    [Pass2][{module_name}] Context prepared "
+            f"(preview={len(preview)} chars, ports={len(port_summary)} chars, "
+            f"children={len(children_descs)}, graph={len(graph_description)} chars)"
         )
 
-        log_path = self._module_log_path(module_name, "pass2_description")
-        description, token_stats = await self.llm.generate(
-            PASS2_SYSTEM,
-            prompt,
-            log_path=log_path,
-            tools_enabled=False
+        # Stage A: Root doc (preview + architecture as stable backbone)
+        root_prompt = PASS2_A_ROOT_PROMPT.format(
+            module_name=module_name,
+            preview=preview,
+            architecture_desc=architecture_desc,
+            port_summary=port_summary,
+            block_descriptions=self._extract_summary(block_descriptions, max_lines=40, max_chars=4000),
         )
+        root_result = await self.incremental_composer.compose_root(
+            PASS2_A_ROOT_SYSTEM,
+            root_prompt,
+            log_path=self._module_log_path(module_name, "pass2_a_root"),
+            module_name=module_name,
+        )
+        current_doc = root_result.content
+        self.tracker.update_pass2_a_root(module_name, current_doc)
+        self._save_pass2_debug_file(module_name, "description_root.md", current_doc)
+        print(f"    [Pass2][{module_name}] Root draft saved: debug/{module_name}/description_root.md ({len(current_doc)} chars)")
+
+        # Stage B: Incremental expansion in fixed order
+        expansion_targets = [
+            ("design_highlights", design_highlights, "## 1.3 架构亮点\n## 2.4 子模块综述与协同"),
+            ("flowchart", flowchart, "## 1.1 核心功能\n## 2.4 子模块综述与协同"),
+            ("interface_spec", interface_spec, "## 2.1 接口与协议"),
+            ("timing_cdc", timing_cdc_desc, "## 2.2 时钟与复位"),
+            ("register_desc", register_desc, "## 2.3 配置与参数"),
+            ("functional_desc", functional_desc, "## 1.2 关键特性\n## 1.3 架构亮点"),
+            ("children_descriptions", children_summary, "## 2.4 子模块综述与协同"),
+        ]
+
+        total_targets = len(expansion_targets)
+        for idx, (target_name, target_summary, editable_sections) in enumerate(expansion_targets, start=1):
+            if not target_summary or target_summary.startswith("无"):
+                print(f"    [Pass2][{module_name}] [expand:{idx}/{total_targets}] Skip {target_name} (empty summary)")
+                continue
+
+            print(
+                f"    [Pass2][{module_name}] [expand:{idx}/{total_targets}] "
+                f"Target={target_name}, summary_chars={len(target_summary)}, "
+                f"sections={editable_sections.replace(chr(10), ' | ')}"
+            )
+
+            expand_prompt = PASS2_B_EXPAND_PROMPT.format(
+                module_name=module_name,
+                root_doc=current_doc,
+                target_name=target_name,
+                target_summary=target_summary,
+                editable_sections=editable_sections,
+                graph_overview=self._extract_summary(graph_description, max_lines=30, max_chars=3500),
+                children_summary=children_summary,
+            )
+
+            expand_result = await self.incremental_composer.expand_with_target(
+                PASS2_B_EXPAND_SYSTEM,
+                expand_prompt,
+                log_path=self._module_log_path(module_name, f"pass2_b_expand_{target_name}"),
+                module_name=module_name,
+                target_name=target_name,
+            )
+            current_doc = expand_result.content
+            self.tracker.update_pass2_b_expand(module_name, current_doc)
+            self._save_pass2_debug_file(module_name, "description_working.md", current_doc)
+            print(f"    [Pass2][{module_name}] Working draft updated after {target_name} ({len(current_doc)} chars)")
+            if module_name not in self._token_stats:
+                self._token_stats[module_name] = []
+            self._token_stats[module_name].append({
+                "pass": f"pass2_b_expand_{target_name}",
+                **expand_result.token_stats
+            })
+
+        # Stage C: Final polish and conflict appendix
+        checklist = "\n".join([
+            "- 保持章节结构固定，不新增主章节",
+            "- 删除重复结论，保留最有证据的一条",
+            "- 每条关键结论必须有来源标签",
+            "- 对冲突结论写入附录并标记待确认",
+        ])
+        polish_prompt = PASS2_C_POLISH_PROMPT.format(
+            module_name=module_name,
+            draft_doc=current_doc,
+            consistency_checklist=checklist,
+            cross_refs=children_summary,
+        )
+        polish_result = await self.incremental_composer.polish(
+            PASS2_C_POLISH_SYSTEM,
+            polish_prompt,
+            log_path=self._module_log_path(module_name, "pass2_c_polish"),
+            module_name=module_name,
+        )
+        description = polish_result.content
+        self.tracker.update_pass2_c_polish(module_name, description)
+        self._save_pass2_debug_file(module_name, "description_polished.md", description)
+        print(f"    [Pass2][{module_name}] Polished draft saved: debug/{module_name}/description_polished.md ({len(description)} chars)")
 
         # Record token stats
         if module_name not in self._token_stats:
             self._token_stats[module_name] = []
-        self._token_stats[module_name].append({
-            "pass": "pass2",
-            **token_stats
-        })
+        self._token_stats[module_name].append({"pass": "pass2_a_root", **root_result.token_stats})
+        self._token_stats[module_name].append({"pass": "pass2_c_polish", **polish_result.token_stats})
 
         self.tracker.update_pass2(module_name, description)
         self._save_module_file(module_name, "description.md", description)
+        self._cleanup_pass2_intermediate_files(module_name)
         self._save_metadata(node)
+        print(f"  [Pass 2] Finished {module_name} in {time.perf_counter() - pass2_start:.2f}s")
         return description
 
     def _module_log_path(self, module_name: str, pass_name: str) -> str:
@@ -841,6 +969,25 @@ class AgentDocGenerator:
         module_dir.mkdir(parents=True, exist_ok=True)
         with open(module_dir / filename, 'w', encoding='utf-8') as f:
             f.write(content)
+
+    def _save_pass2_debug_file(self, module_name: str, filename: str, content: str):
+        """Save Pass2 intermediate artifacts under debug tree."""
+        module_debug_dir = self.debug_dir / module_name
+        module_debug_dir.mkdir(parents=True, exist_ok=True)
+        with open(module_debug_dir / filename, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+    def _cleanup_pass2_intermediate_files(self, module_name: str):
+        """Ensure modules output keeps only final description for Pass2."""
+        module_dir = self.modules_dir / module_name
+        for filename in ["description_root.md", "description_working.md", "description_polished.md"]:
+            file_path = module_dir / filename
+            if file_path.exists():
+                try:
+                    file_path.unlink()
+                    print(f"    [Pass2][{module_name}] Removed intermediate module artifact: {filename}")
+                except Exception as e:
+                    print(f"    [WARN] [Pass2][{module_name}] Failed to remove {filename}: {e}")
 
     def _save_metadata(self, node: Any):
         module_name = node.module_name
@@ -1003,7 +1150,6 @@ class AgentDocGenerator:
             PASS2_1_SYSTEM, 
             prompt, 
             log_path=log_path,
-            tools_enabled=False
         )
         
         # Record token stats
@@ -1133,7 +1279,6 @@ class AgentDocGenerator:
             PASS2_2_MODULE_SYSTEM, 
             prompt, 
             log_path=log_path,
-            tools_enabled=False
         )
 
         # Extract mermaid diagram and other content
@@ -1297,7 +1442,6 @@ class AgentDocGenerator:
             PASS2_3_INTERFACE_SYSTEM,
             prompt,
             log_path=log_path,
-            tools_enabled=False
         )
 
         # Record token stats
@@ -1438,7 +1582,6 @@ class AgentDocGenerator:
             PASS2_4_FUNCTIONAL_SYSTEM,
             prompt,
             log_path=log_path,
-            tools_enabled=False
         )
 
         # Record token stats
@@ -1575,7 +1718,6 @@ class AgentDocGenerator:
             PASS2_5_REGISTER_SYSTEM,
             prompt,
             log_path=log_path,
-            tools_enabled=False
         )
 
         # Record token stats
@@ -1712,7 +1854,6 @@ class AgentDocGenerator:
             PASS2_6_TIMING_CDC_SYSTEM,
             prompt,
             log_path=log_path,
-            tools_enabled=False
         )
 
         # Record token stats
@@ -1853,7 +1994,6 @@ class AgentDocGenerator:
             PASS2_7_ARCHITECTURE_SYSTEM,
             prompt,
             log_path=log_path,
-            tools_enabled=False
         )
 
         # Record token stats

@@ -310,6 +310,37 @@ def cmd_docor(args):
         "thinking": cfg.agent_thinking
     }
     llm = get_llm_backend(llm_config)
+
+    # Optional dedicated endpoint for Pass2 incremental composer
+    composer_llm = None
+    composer_enabled = any([
+        cfg.composer_backend,
+        cfg.composer_model,
+        cfg.composer_api_key,
+        cfg.composer_base_url,
+        cfg.composer_thinking is not None,
+    ])
+    if composer_enabled:
+        composer_model = cfg.composer_model if cfg.composer_model else cfg.agent_model
+        composer_api_key = cfg.composer_api_key if cfg.composer_api_key else cfg.agent_api_key
+        composer_base_url = cfg.composer_base_url if cfg.composer_base_url else cfg.agent_base_url
+        composer_thinking = cfg.composer_thinking if cfg.composer_thinking is not None else cfg.agent_thinking
+        composer_backend = cfg.composer_backend or cfg.agent_backend
+
+        composer_llm_config = {
+            "backend": composer_backend,
+            "model": composer_model,
+            "api_key": composer_api_key,
+            "base_url": composer_base_url,
+            "thinking": composer_thinking,
+        }
+        composer_llm = get_llm_backend(composer_llm_config)
+        if cfg.verbose:
+            print(f"[config] composer endpoint: enabled")
+            print(f"[config] composer model:    {composer_model}")
+            if composer_base_url:
+                print(f"[config] composer base_url: {composer_base_url}")
+
     resolver = SourceResolver(backend, code_base_path=cfg.code_base_path)
     tracker = ProgressTracker(cfg.output_dir)
 
@@ -321,6 +352,7 @@ def cmd_docor(args):
     generator = AgentDocGenerator(
         hierarchy=hierarchy,
         llm=llm,
+        composer_llm=composer_llm,
         resolver=resolver,
         tracker=tracker,
         output_dir=cfg.output_dir,
