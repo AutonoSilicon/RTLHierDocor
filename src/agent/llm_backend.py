@@ -7,7 +7,8 @@ supporting OpenAI-compatible APIs (including DeepSeek, vLLM, etc.).
 import os
 import asyncio
 import datetime
-from typing import List, Optional, Any, Dict, Tuple
+import json
+from typing import List, Optional, Any, Dict, Tuple, Callable
 
 try:
     import openai
@@ -42,8 +43,17 @@ class LLMBackend:
         # Semaphore to limit concurrent LLM API calls (prevent rate limiting)
         self._semaphore = asyncio.Semaphore(3)
 
-    async def generate(self, system: str, prompt: str, log_path: str = "debug.md",
-                       disable_thinking: bool = False) -> Tuple[str, Dict[str, int]]:
+    async def generate(
+        self,
+        system: str,
+        prompt: str,
+        log_path: str = "debug.md",
+        disable_thinking: bool = False,
+        tools_enabled: bool = False,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_callback: Optional[Callable[[str, Dict[str, Any]], str]] = None,
+        max_tool_rounds: int = 8,
+    ) -> Tuple[str, Dict[str, int]]:
         """Generate text from the LLM.
 
         Args:
@@ -57,44 +67,116 @@ class LLMBackend:
         """
         async with self._semaphore:
             try:
-                messages = [
+                use_thinking = self.thinking and not disable_thinking
+                messages: List[Dict[str, Any]] = [
                     {"role": "system", "content": system},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": prompt},
                 ]
 
-                use_thinking = self.thinking and not disable_thinking
+                tool_mode = bool(tools_enabled and tools)
+                if tool_mode and tool_callback is None:
+                    return "Error: tools_enabled=True but tool_callback is None.", {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                    }
 
-                kwargs = {
-                    "model": self.model,
-                    "messages": messages
-                }
+                aggregated = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                final_text: str = ""
 
-                # Common pattern for thinking/reasoning models in OpenAI-compatible APIs
-                if use_thinking:
-                    kwargs["extra_body"] = {"enable_thinking": True}
+                # Multi-round tool calling loop.
+                # - Round 0: normal call with tools enabled
+                # - If tool_calls are returned, execute and append tool results, then continue.
+                # - Stop when no tool_calls (final assistant content).
+                rounds = max(1, int(max_tool_rounds) if tool_mode else 1)
+                for _round in range(rounds):
+                    kwargs: Dict[str, Any] = {
+                        "model": self.model,
+                        "messages": messages,
+                    }
+                    if use_thinking:
+                        kwargs["extra_body"] = {"enable_thinking": True}
+                    if tool_mode:
+                        kwargs["tools"] = tools
+                        kwargs["tool_choice"] = "auto"
 
-                response = await self.client.chat.completions.create(**kwargs)
-                assistant_message = response.choices[0].message
+                    response = await self.client.chat.completions.create(**kwargs)
+                    assistant_message = response.choices[0].message
 
-                result = assistant_message.content
+                    if hasattr(response, "usage") and response.usage:
+                        aggregated["input_tokens"] += int(getattr(response.usage, "prompt_tokens", 0) or 0)
+                        aggregated["output_tokens"] += int(getattr(response.usage, "completion_tokens", 0) or 0)
+                        aggregated["total_tokens"] += int(getattr(response.usage, "total_tokens", 0) or 0)
 
-                if result and use_thinking:
-                    clean_result, thinking_content = self._extract_thinking_content(result)
+                    tool_calls = getattr(assistant_message, "tool_calls", None)
+                    if tool_mode and tool_calls:
+                        # Append assistant tool call message
+                        try:
+                            tool_calls_payload = [tc.model_dump() for tc in tool_calls]
+                        except Exception:
+                            tool_calls_payload = []
+                            for tc in tool_calls:
+                                tool_calls_payload.append({
+                                    "id": getattr(tc, "id", ""),
+                                    "type": getattr(tc, "type", "function"),
+                                    "function": {
+                                        "name": getattr(getattr(tc, "function", None), "name", ""),
+                                        "arguments": getattr(getattr(tc, "function", None), "arguments", ""),
+                                    },
+                                })
+
+                        messages.append({
+                            "role": "assistant",
+                            "content": assistant_message.content or "",
+                            "tool_calls": tool_calls_payload,
+                        })
+
+                        # Execute tool calls
+                        for tc in tool_calls:
+                            tc_id = getattr(tc, "id", "")
+                            fn = getattr(tc, "function", None)
+                            tool_name = getattr(fn, "name", "") if fn else ""
+                            raw_args = getattr(fn, "arguments", "") if fn else ""
+
+                            try:
+                                args_dict = json.loads(raw_args) if raw_args else {}
+                                if not isinstance(args_dict, dict):
+                                    args_dict = {"_args": args_dict}
+                            except Exception:
+                                args_dict = {"_raw": raw_args}
+
+                            try:
+                                tool_result = tool_callback(tool_name, args_dict) if tool_callback else ""
+                            except Exception as e:
+                                tool_result = f"Error: tool '{tool_name}' failed: {e}"
+
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc_id,
+                                "content": tool_result or "",
+                            })
+                        continue
+
+                    # Final assistant content (no tool calls)
+                    final_text = assistant_message.content or ""
+                    break
+
+                if final_text and use_thinking:
+                    clean_result, thinking_content = self._extract_thinking_content(final_text)
                     if thinking_content:
                         self._append_thinking_to_log(thinking_content, log_path)
-                    result = clean_result
+                    final_text = clean_result
 
-                token_stats = {
-                    "input_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') else 0,
-                    "output_tokens": response.usage.completion_tokens if hasattr(response, 'usage') else 0,
-                    "total_tokens": response.usage.total_tokens if hasattr(response, 'usage') else 0
-                }
-
+                # Log only the initial system+prompt (keeps log sizes bounded)
                 self._log_call(system, prompt, self.model, log_path)
-                return (result if result else "Error: LLM returned empty response."), token_stats
+                return (final_text if final_text else "Error: LLM returned empty response."), aggregated
 
             except Exception as e:
-                return f"Error calling LLM API: {str(e)}", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                return f"Error calling LLM API: {str(e)}", {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                }
 
     @staticmethod
     def _extract_mermaid_and_content(text: str) -> tuple[str, str]:

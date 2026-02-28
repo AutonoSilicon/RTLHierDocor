@@ -44,6 +44,9 @@ from .pass2_7_architecture import PASS2_7_ARCHITECTURE_SYSTEM, PASS2_7_ARCHITECT
 from .pass3_chip_overview import PASS3_SYSTEM, PASS3_PROMPT
 from .pass3_subsystem_overview import PASS3_SUBSYSTEM_SYSTEM, PASS3_SUBSYSTEM_PROMPT
 
+# Pass 3.1: Subsystem partition (agent exploration)
+from .pass3_1_subsystem_partition import PASS3_1_SYSTEM, PASS3_1_PROMPT
+
 __all__ = [
     # Block-level
     "BLOCK_SYSTEM",
@@ -86,4 +89,7 @@ __all__ = [
     "PASS3_PROMPT",
     "PASS3_SUBSYSTEM_SYSTEM",
     "PASS3_SUBSYSTEM_PROMPT",
+    # Pass 3.1
+    "PASS3_1_SYSTEM",
+    "PASS3_1_PROMPT",
 ]
