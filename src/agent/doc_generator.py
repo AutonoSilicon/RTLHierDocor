@@ -69,6 +69,7 @@ class AgentDocGenerator:
         pass3_key_modules_per_subsystem: int = 24,
         pass3_max_card_lines: int = 12,
         pass3_tree_max_depth_in_doc: int = 4,
+        max_concurrent_modules: int = 4,
     ):
         self.hierarchy = hierarchy
         self.llm = llm
@@ -104,6 +105,8 @@ class AgentDocGenerator:
         self._processed_pass3_subsystems: set = set()
         self._mermaid_summaries: Dict[str, str] = {}  # module_name -> 精简版 mermaid
         self._token_stats: Dict[str, List[Dict[str, int]]] = {}  # module_name -> list of token stats per pass
+        # Concurrency control semaphore
+        self._module_semaphore = asyncio.Semaphore(max_concurrent_modules)
 
     def _should_skip(self, module_name: str) -> bool:
         """Check if a module should be skipped based on skip_modules patterns."""
@@ -190,9 +193,13 @@ class AgentDocGenerator:
             self._precompute_graphs(child)
 
     async def _run_pass1(self, node: Any, ancestor_context: str):
-        """Pass 1: Top-down (Overview)"""
+        """Pass 1: Top-down (Overview) with concurrency control.
+
+        Parent is processed first, then children are processed concurrently
+        (up to max_concurrent_modules at a time).
+        """
         module_name = node.module_name
-        
+
         # Skip logic
         if self._should_skip(module_name):
             print(f"[INFO] [Pass 1] Skipping module {module_name} (matches skip pattern)")
@@ -206,7 +213,9 @@ class AgentDocGenerator:
         # Process current module (only if not already done in this session)
         if module_name not in self._processed_pass1:
             if not self.tracker.is_pass1_done(module_name):
-                await self._generate_module_preview(node, ancestor_context)
+                # Use semaphore to control concurrency
+                async with self._module_semaphore:
+                    await self._generate_module_preview(node, ancestor_context)
             else:
                 print(f"  [Pass 1] Module {module_name} already has preview (skipping LLM)")
             self._processed_pass1.add(module_name)
@@ -214,34 +223,52 @@ class AgentDocGenerator:
         # Get current preview to pass down (load from file)
         state = self.tracker.get_state(module_name)
         current_preview = self.tracker.get_pass1_content(module_name) or ""
-        
-        # Always recurse to children (to ensure they are processed with current context)
-        for child in node.children.values():
-            await self._run_pass1(child, current_preview)
+
+        # Process children concurrently with semaphore control
+        if node.children:
+            tasks = []
+            for child in node.children.values():
+                task = self._run_pass1(child, current_preview)
+                tasks.append(task)
+
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _run_pass1_5(self, node: Any):
         """Pass 1.5: Block-level documentation generation (extracted from old Pass 2).
 
         Depends only on Pass 0 (SimplifiedGraph) and SourceResolver, not on Pass 1.
+        Children are processed concurrently (up to max_concurrent_modules at a time).
         """
         module_name = node.module_name
 
         # Skip logic
         if self._should_skip(module_name):
             print(f"[INFO] [Pass 1.5] Skipping module {module_name} (matches skip pattern)")
+            # Still recurse to children
+            if node.children:
+                tasks = [self._run_pass1_5(child) for child in node.children.values()]
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
             return
 
         # Check limit
         if self.max_modules > 0 and module_name not in self._processed_pass1:
+            if node.children:
+                tasks = [self._run_pass1_5(child) for child in node.children.values()]
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
             return
 
-        # 1. Check if already processed in this session (before recursion)
+        # 1. Check if already processed in this session (before processing)
         if module_name in getattr(self, '_processed_pass1_5', set()):
-            # Already processed, just recurse children (which should also be cached)
-            for child in node.children.values():
-                await self._run_pass1_5(child)
+            # Already processed, just recurse children concurrently
+            if node.children:
+                tasks = [self._run_pass1_5(child) for child in node.children.values()]
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
             return
-        
+
         # Initialize the set if not already done
         if not hasattr(self, '_processed_pass1_5'):
             self._processed_pass1_5 = set()
@@ -250,9 +277,11 @@ class AgentDocGenerator:
         if self.tracker.is_pass1_5_done(module_name):
             self._processed_pass1_5.add(module_name)
             print(f"  [Pass 1.5] Module {module_name} already has block docs (skipping LLM)")
-            # Still need to recurse children
-            for child in node.children.values():
-                await self._run_pass1_5(child)
+            # Recurse children concurrently
+            if node.children:
+                tasks = [self._run_pass1_5(child) for child in node.children.values()]
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
             return
 
         # 3. Generate (only if not already done)
@@ -273,7 +302,9 @@ class AgentDocGenerator:
                 log_path=block_log_path,
                 block_doc_threshold=self.block_doc_threshold
             )
-            block_docs_dict = await block_gen.generate_all()
+            # Use semaphore to control concurrency
+            async with self._module_semaphore:
+                block_docs_dict = await block_gen.generate_all()
 
             # Format block docs for markdown
             if block_docs_dict:
@@ -304,9 +335,11 @@ class AgentDocGenerator:
         self.tracker.update_pass1_5(module_name, "done")
         self._processed_pass1_5.add(module_name)
 
-        # Recurse to children
-        for child in node.children.values():
-            await self._run_pass1_5(child)
+        # Recurse to children concurrently
+        if node.children:
+            tasks = [self._run_pass1_5(child) for child in node.children.values()]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     def _format_block_sources_topological(self, graph: SimplifiedGraph, module_name: str) -> str:
         """Format block source code in topological order.
@@ -650,7 +683,10 @@ class AgentDocGenerator:
         self._save_metadata(node)
 
     async def _run_pass2(self, node: Any) -> str:
-        """Pass 2: Bottom-up synthesis documentation (runs after Pass 2.1, Pass 2.2 and Pass 2.3)."""
+        """Pass 2: Bottom-up synthesis documentation (runs after Pass 2.1, Pass 2.2 and Pass 2.3).
+
+        Children are processed concurrently (up to max_concurrent_modules at a time).
+        """
         module_name = node.module_name
 
         # Skip logic
@@ -662,11 +698,21 @@ class AgentDocGenerator:
         if self.max_modules > 0 and node.module_name not in self._processed_pass1:
             return "Skipped due to max_modules limit."
 
-        # 1. Recurse to children first
+        # 1. Recurse to children first - concurrently
         children_descriptions = {}
-        for child in node.children.values():
-            child_desc = await self._run_pass2(child)
-            children_descriptions[child.module_name] = child_desc
+        if node.children:
+            async def process_child(child):
+                child_desc = await self._run_pass2(child)
+                return child.module_name, child_desc
+
+            child_tasks = [process_child(child) for child in node.children.values()]
+            if child_tasks:
+                results = await asyncio.gather(*child_tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        continue
+                    child_name, child_desc = result
+                    children_descriptions[child_name] = child_desc
 
         # 2. Process current module if not already done
         if module_name in self._processed_pass2:
@@ -1017,6 +1063,7 @@ class AgentDocGenerator:
         """Pass 2.1: Bottom-up design highlight identification.
 
         Returns the highlights summary for this module (for parent to use).
+        Children are processed concurrently (up to max_concurrent_modules at a time).
         """
         module_name = node.module_name
 
@@ -1028,10 +1075,12 @@ class AgentDocGenerator:
         if self.max_modules > 0 and module_name not in self._processed_pass1:
             return ""
 
-        # 1. Recurse children first (ALWAYS, even if this module is already done)
-        for child in node.children.values():
-            await self._run_pass2_1(child)
-        
+        # 1. Recurse children first (ALWAYS, even if this module is already done) - concurrently
+        if node.children:
+            child_tasks = [self._run_pass2_1(child) for child in node.children.values()]
+            if child_tasks:
+                await asyncio.gather(*child_tasks, return_exceptions=True)
+
         # 2. Collect children previews (Pass 1 results) for context
         children_previews = {}
         for child in node.children.values():
@@ -1057,16 +1106,18 @@ class AgentDocGenerator:
 
         # 5. Generate design highlights
         print(f"  [Pass 2.1] Analyzing design highlights for {module_name}...")
-        
+
         try:
-            highlights = await self._generate_design_highlights(
-                node, children_previews
-            )
-            
+            # Use semaphore to control concurrency
+            async with self._module_semaphore:
+                highlights = await self._generate_design_highlights(
+                    node, children_previews
+                )
+
             if highlights:
                 self._save_module_file(module_name, "design_highlights.md", highlights)
                 self.tracker.update_pass2_1(module_name, highlights)
-            
+
             self._processed_pass2_1.add(module_name)
             self._save_metadata(node)
             return highlights
@@ -1173,6 +1224,7 @@ class AgentDocGenerator:
         """Pass 2.2: Bottom-up Mermaid flowchart generation.
 
         Returns the summary mermaid for this module (for parent to use).
+        Children are processed concurrently (up to max_concurrent_modules at a time).
         """
         module_name = node.module_name
 
@@ -1184,12 +1236,22 @@ class AgentDocGenerator:
         if self.max_modules > 0 and module_name not in self._processed_pass1:
             return ""
 
-        # 1. Recurse children first (ALWAYS, even if this module is already done)
+        # 1. Recurse children first (ALWAYS, even if this module is already done) - concurrently
         children_summaries = {}
-        for child in node.children.values():
-            summary = await self._run_pass2_2(child)
-            if summary:
-                children_summaries[child.module_name] = summary
+        if node.children:
+            async def process_child(child):
+                summary = await self._run_pass2_2(child)
+                return child.module_name, summary
+
+            child_tasks = [process_child(child) for child in node.children.values()]
+            if child_tasks:
+                results = await asyncio.gather(*child_tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        continue
+                    child_name, summary = result
+                    if summary:
+                        children_summaries[child_name] = summary
 
         # 2. Check if already processed in this session
         if module_name in self._processed_pass2_2:
@@ -1214,12 +1276,14 @@ class AgentDocGenerator:
         graph = self._graphs[module_name]
 
         try:
-            # Generate full module behavioral flowchart in one shot
-            # (returns only the mermaid code, other content goes to debug log)
-            mermaid_code = await self._generate_module_flowchart(
-                module_name, graph, children_summaries
-            )
-            
+            # Use semaphore to control concurrency
+            async with self._module_semaphore:
+                # Generate full module behavioral flowchart in one shot
+                # (returns only the mermaid code, other content goes to debug log)
+                mermaid_code = await self._generate_module_flowchart(
+                    module_name, graph, children_summaries
+                )
+
             # Store mermaid for summary (parent module uses it)
             self._mermaid_summaries[module_name] = mermaid_code
 
@@ -1327,6 +1391,7 @@ class AgentDocGenerator:
         """Pass 2.3: Bottom-up interface specification generation.
 
         Returns the interface specification for this module.
+        Children are processed concurrently (up to max_concurrent_modules at a time).
         """
         module_name = node.module_name
 
@@ -1338,10 +1403,12 @@ class AgentDocGenerator:
         if self.max_modules > 0 and module_name not in self._processed_pass1:
             return ""
 
-        # 1. Recurse children first (ALWAYS, even if this module is already done)
-        for child in node.children.values():
-            await self._run_pass2_3(child)
-        
+        # 1. Recurse children first (ALWAYS, even if this module is already done) - concurrently
+        if node.children:
+            child_tasks = [self._run_pass2_3(child) for child in node.children.values()]
+            if child_tasks:
+                await asyncio.gather(*child_tasks, return_exceptions=True)
+
         # 2. Collect children interface specs for context
         children_interfaces = {}
         for child in node.children.values():
@@ -1369,9 +1436,11 @@ class AgentDocGenerator:
         print(f"  [Pass 2.3] Generating interface spec for {module_name}...")
 
         try:
-            interface_doc = await self._generate_interface_spec(
-                node, children_interfaces
-            )
+            # Use semaphore to control concurrency
+            async with self._module_semaphore:
+                interface_doc = await self._generate_interface_spec(
+                    node, children_interfaces
+                )
 
             if interface_doc:
                 self._save_module_file(module_name, "interface_spec.md", interface_doc)
@@ -1466,6 +1535,7 @@ class AgentDocGenerator:
         """Pass 2.4: Bottom-up functional detailed description generation.
 
         Returns the functional description for this module.
+        Children are processed concurrently (up to max_concurrent_modules at a time).
         """
         module_name = node.module_name
 
@@ -1477,12 +1547,22 @@ class AgentDocGenerator:
         if self.max_modules > 0 and module_name not in self._processed_pass1:
             return ""
 
-        # 1. Recurse children first (ALWAYS, even if this module is already done)
+        # 1. Recurse children first (ALWAYS, even if this module is already done) - concurrently
         children_functional = {}
-        for child in node.children.values():
-            child_desc = await self._run_pass2_4(child)
-            if child_desc:
-                children_functional[child.module_name] = child_desc
+        if node.children:
+            async def process_child(child):
+                child_desc = await self._run_pass2_4(child)
+                return child.module_name, child_desc
+
+            child_tasks = [process_child(child) for child in node.children.values()]
+            if child_tasks:
+                results = await asyncio.gather(*child_tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        continue
+                    child_name, child_desc = result
+                    if child_desc:
+                        children_functional[child_name] = child_desc
 
         # 2. Check if already processed in this session
         if module_name in self._processed_pass2_4:
@@ -1504,9 +1584,11 @@ class AgentDocGenerator:
         print(f"  [Pass 2.4] Generating functional description for {module_name}...")
 
         try:
-            functional_doc = await self._generate_functional_description(
-                node, children_functional
-            )
+            # Use semaphore to control concurrency
+            async with self._module_semaphore:
+                functional_doc = await self._generate_functional_description(
+                    node, children_functional
+                )
 
             if functional_doc:
                 self._save_module_file(module_name, "functional_desc.md", functional_doc)
@@ -1606,6 +1688,7 @@ class AgentDocGenerator:
         """Pass 2.5: Bottom-up register description generation.
 
         Returns the register description for this module.
+        Children are processed concurrently (up to max_concurrent_modules at a time).
         """
         module_name = node.module_name
 
@@ -1617,12 +1700,22 @@ class AgentDocGenerator:
         if self.max_modules > 0 and module_name not in self._processed_pass1:
             return ""
 
-        # 1. Recurse children first (ALWAYS, even if this module is already done)
+        # 1. Recurse children first (ALWAYS, even if this module is already done) - concurrently
         children_register = {}
-        for child in node.children.values():
-            child_desc = await self._run_pass2_5(child)
-            if child_desc:
-                children_register[child.module_name] = child_desc
+        if node.children:
+            async def process_child(child):
+                child_desc = await self._run_pass2_5(child)
+                return child.module_name, child_desc
+
+            child_tasks = [process_child(child) for child in node.children.values()]
+            if child_tasks:
+                results = await asyncio.gather(*child_tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        continue
+                    child_name, child_desc = result
+                    if child_desc:
+                        children_register[child_name] = child_desc
 
         # 2. Check if already processed in this session
         if module_name in self._processed_pass2_5:
@@ -1644,9 +1737,11 @@ class AgentDocGenerator:
         print(f"  [Pass 2.5] Generating register description for {module_name}...")
 
         try:
-            register_doc = await self._generate_register_description(
-                node, children_register
-            )
+            # Use semaphore to control concurrency
+            async with self._module_semaphore:
+                register_doc = await self._generate_register_description(
+                    node, children_register
+                )
 
             if register_doc:
                 self._save_module_file(module_name, "register_desc.md", register_doc)
@@ -1742,6 +1837,7 @@ class AgentDocGenerator:
         """Pass 2.6: Bottom-up timing constraints and CDC documentation generation.
 
         Returns the timing constraints and CDC documentation for this module.
+        Children are processed concurrently (up to max_concurrent_modules at a time).
         """
         module_name = node.module_name
 
@@ -1753,12 +1849,22 @@ class AgentDocGenerator:
         if self.max_modules > 0 and module_name not in self._processed_pass1:
             return ""
 
-        # 1. Recurse children first (ALWAYS, even if this module is already done)
+        # 1. Recurse children first (ALWAYS, even if this module is already done) - concurrently
         children_timing = {}
-        for child in node.children.values():
-            child_desc = await self._run_pass2_6(child)
-            if child_desc:
-                children_timing[child.module_name] = child_desc
+        if node.children:
+            async def process_child(child):
+                child_desc = await self._run_pass2_6(child)
+                return child.module_name, child_desc
+
+            child_tasks = [process_child(child) for child in node.children.values()]
+            if child_tasks:
+                results = await asyncio.gather(*child_tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        continue
+                    child_name, child_desc = result
+                    if child_desc:
+                        children_timing[child_name] = child_desc
 
         # 2. Check if already processed in this session
         if module_name in self._processed_pass2_6:
@@ -1780,9 +1886,11 @@ class AgentDocGenerator:
         print(f"  [Pass 2.6] Generating timing/CDC doc for {module_name}...")
 
         try:
-            timing_cdc_doc = await self._generate_timing_cdc_doc(
-                node, children_timing
-            )
+            # Use semaphore to control concurrency
+            async with self._module_semaphore:
+                timing_cdc_doc = await self._generate_timing_cdc_doc(
+                    node, children_timing
+                )
 
             if timing_cdc_doc:
                 self._save_module_file(module_name, "timing_cdc.md", timing_cdc_doc)
@@ -1889,12 +1997,22 @@ class AgentDocGenerator:
         if self.max_modules > 0 and module_name not in self._processed_pass1:
             return ""
 
-        # 1. Recurse children first (ALWAYS, even if this module is already done)
+        # 1. Recurse children first (ALWAYS, even if this module is already done) - concurrently
         children_architecture = {}
-        for child in node.children.values():
-            child_desc = await self._run_pass2_7(child)
-            if child_desc:
-                children_architecture[child.module_name] = child_desc
+        if node.children:
+            async def process_child(child):
+                child_desc = await self._run_pass2_7(child)
+                return child.module_name, child_desc
+
+            child_tasks = [process_child(child) for child in node.children.values()]
+            if child_tasks:
+                results = await asyncio.gather(*child_tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        continue
+                    child_name, child_desc = result
+                    if child_desc:
+                        children_architecture[child_name] = child_desc
 
         # 2. Check if already processed in this session
         if module_name in self._processed_pass2_7:
@@ -1916,9 +2034,11 @@ class AgentDocGenerator:
         print(f"  [Pass 2.7] Generating architecture doc for {module_name}...")
 
         try:
-            architecture_doc = await self._generate_architecture_doc(
-                node, children_architecture
-            )
+            # Use semaphore to control concurrency
+            async with self._module_semaphore:
+                architecture_doc = await self._generate_architecture_doc(
+                    node, children_architecture
+                )
 
             if architecture_doc:
                 self._save_module_file(module_name, "architecture.md", architecture_doc)

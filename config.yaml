@@ -37,10 +37,9 @@ verbose: true
 # ── Agent Docor ────────────────────────────────────────────────
 agent:
   backend: "openai"              # anthropic | openai | agent_sdk
-  # base_url: "https://open.bigmodel.cn/api/paas/v4/"                      # Custom LLM API base URL if needed
-  model: "deepseek-v3.2"
-  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  api_key: "sk-22730e3d9366402489918930ed806b32"
+  model: "qwen3.5-plus"
+  base_url: "https://coding.dashscope.aliyuncs.com/v1"
+  api_key: "sk-sp-0b4bfeb434d946bda2d005ac9c85026e"
   thinking: true                   # Enable thinking/reasoning mode
   skip_modules:                     # Modules matching these patterns will be skipped
     - "ct_had*"
@@ -48,9 +47,10 @@ agent:
   resume: true                      # Resume from last checkpoint
   code_base_path: "$CODE_BASE_PATH" # Base path for source file resolution
   max_modules: 0                    # 0 = all, N = limit for debugging
+  max_concurrent_modules: 4         # Max concurrent LLM requests per pass
+  pass3_enabled: false               # Enable Pass 3 (chip-level overview & subsystem docs)
   # composer 专用 endpoint（仅用于 Pass2 的 staged composer）
-  # composer_model: "deepseek-v3.2"
-  # composer_base_url: "https://your-composer-endpoint/v1"
-  # composer_api_key: "$COMPOSER_API_KEY"
-  # composer_thinking: false
-  # api_key: "941daa47276a40998a357e4485b03581.cjwMaOjjocv3xJXa"    # Or use ANTHROPIC_API_KEY env var
+  composer_model: "kimi-k2.5"
+  base_url: "https://coding.dashscope.aliyuncs.com/v1"
+  api_key: "sk-sp-0b4bfeb434d946bda2d005ac9c85026e"
+  composer_thinking: true

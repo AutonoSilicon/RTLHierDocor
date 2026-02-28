@@ -185,6 +185,8 @@ class ProjectConfig:
     resume: bool = True
     max_modules: int = 0  # 0 for unlimited
     block_doc_threshold: int = 64  # Min lines for block-level LLM call
+    pass3_enabled: bool = True  # Enable Pass 3 (chip-level overview & subsystem docs)
+    max_concurrent_modules: int = 4  # Max concurrent LLM requests per pass
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ProjectConfig':
@@ -278,6 +280,10 @@ class ProjectConfig:
                 config.max_modules = int(agent['max_modules'])
             if 'block_doc_threshold' in agent:
                 config.block_doc_threshold = int(agent['block_doc_threshold'])
+            if 'pass3_enabled' in agent:
+                config.pass3_enabled = bool(agent['pass3_enabled'])
+            if 'max_concurrent_modules' in agent:
+                config.max_concurrent_modules = int(agent['max_concurrent_modules'])
 
         return config
 

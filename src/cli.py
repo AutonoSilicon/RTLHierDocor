@@ -361,6 +361,8 @@ def cmd_docor(args):
         skip_modules=cfg.skip_modules,
         schematic_gen=schematic_gen,
         block_doc_threshold=cfg.block_doc_threshold,
+        pass3_enabled=cfg.pass3_enabled,
+        max_concurrent_modules=cfg.max_concurrent_modules,
     )
 
     # Run async generator
