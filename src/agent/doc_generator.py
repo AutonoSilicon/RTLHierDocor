@@ -59,7 +59,6 @@ class AgentDocGenerator:
         resolver: SourceResolver,
         tracker: ProgressTracker,
         output_dir: str,
-        max_source_lines: int = 2000,
         max_modules: int = 0,
         skip_modules: Optional[List[str]] = None,
         schematic_gen: Optional[Any] = None,
@@ -78,7 +77,6 @@ class AgentDocGenerator:
         self.output_dir = Path(output_dir)
         self.modules_dir = self.output_dir / "modules"
         self.debug_dir = self.output_dir / "debug"  # Debug output subdirectory
-        self.max_source_lines = max_source_lines
         self.max_modules = max_modules
         self.skip_modules = skip_modules or []
         self.schematic_gen = schematic_gen
@@ -652,9 +650,9 @@ class AgentDocGenerator:
             # graph_description now includes source code embedded in each block (topological order)
             graph_description = self._format_graph_description(self._graphs[module_name], include_source=True)
         else:
-            # Fallback: use truncated source code
-            source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
-            graph_description = f"Source code (first {self.max_source_lines} lines):\n```verilog\n{source_code}\n```"
+            # Fallback: read full source code (no truncation)
+            source_code = self.resolver.read_source(module_name) or "Source not found."
+            graph_description = f"```verilog\n{source_code}\n```"
             if module_name not in self._graphs and self.schematic_gen:
                 print(f"  [WARN] Module {module_name}: using source fallback (no SimplifiedGraph)")
 
@@ -1167,10 +1165,10 @@ class AgentDocGenerator:
                     parts.append("")
                 block_descriptions = "\n".join(parts)
         else:
-            # Fallback: use truncated source code
-            source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
+            # Fallback: read full source code (no truncation)
+            source_code = self.resolver.read_source(module_name) or "Source not found."
             graph_description = f"```verilog\n{source_code}\n```"
-        
+
         # Format children previews (Pass 1 results)
         children_previews_str = ""
         if children_previews:
@@ -1629,8 +1627,8 @@ class AgentDocGenerator:
             graph = self._graphs[module_name]
             graph_description = self._format_graph_description(graph, include_source=True)
         else:
-            # Fallback: use source code
-            source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
+            # Fallback: read full source code (no truncation)
+            source_code = self.resolver.read_source(module_name) or "Source not found."
             graph_description = f"```verilog\n{source_code}\n```"
 
         # Get block descriptions from Pass 1.5
@@ -1782,8 +1780,8 @@ class AgentDocGenerator:
             graph = self._graphs[module_name]
             graph_description = self._format_graph_description(graph, include_source=True)
         else:
-            # Fallback: use source code
-            source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
+            # Fallback: read full source code (no truncation)
+            source_code = self.resolver.read_source(module_name) or "Source not found."
             graph_description = f"```verilog\n{source_code}\n```"
 
         # Format children register descriptions
@@ -1931,8 +1929,8 @@ class AgentDocGenerator:
             graph = self._graphs[module_name]
             graph_description = self._format_graph_description(graph, include_source=True)
         else:
-            # Fallback: use source code
-            source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
+            # Fallback: read full source code (no truncation)
+            source_code = self.resolver.read_source(module_name) or "Source not found."
             graph_description = f"```verilog\n{source_code}\n```"
 
         # Format children timing/CDC descriptions
@@ -2079,8 +2077,8 @@ class AgentDocGenerator:
             graph = self._graphs[module_name]
             graph_description = self._format_graph_description(graph, include_source=True)
         else:
-            # Fallback: use source code
-            source_code = self.resolver.read_source(module_name, max_lines=self.max_source_lines) or "Source not found."
+            # Fallback: read full source code (no truncation)
+            source_code = self.resolver.read_source(module_name) or "Source not found."
             graph_description = f"```verilog\n{source_code}\n```"
 
         # Get block descriptions from Pass 1.5

@@ -45,7 +45,6 @@ agent:
   thinking: true                   # Enable thinking/reasoning mode
   skip_modules:                     # Modules matching these patterns will be skipped
     - "ct_had*"
-  max_source_lines: 10000            # Truncate source files after N lines
   resume: true                      # Resume from last checkpoint
   code_base_path: "$CODE_BASE_PATH" # Base path for source file resolution
   max_modules: 0                    # 0 = all, N = limit for debugging

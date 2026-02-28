@@ -38,7 +38,6 @@ agent:
   thinking: true
   skip_modules:
     - "ct_had*"
-  max_source_lines: 5000
   resume: true
   code_base_path: "$CODE_BASE_PATH"
   max_modules: 0

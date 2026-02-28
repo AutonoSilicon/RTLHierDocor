@@ -356,7 +356,6 @@ def cmd_docor(args):
         resolver=resolver,
         tracker=tracker,
         output_dir=cfg.output_dir,
-        max_source_lines=cfg.max_source_lines,
         max_modules=cfg.max_modules,
         skip_modules=cfg.skip_modules,
         schematic_gen=schematic_gen,

@@ -54,11 +54,11 @@ agent:
   thinking: true
   skip_modules:
     - "ct_had*"
-  max_source_lines: 10000
   max_modules: 0             # 0 = unlimited, limit for testing
   resume: true
   code_base_path: "$CODE_BASE_PATH"  # for source file resolution
   block_doc_threshold: 64    # min lines for block-level LLM call
+  max_concurrent_modules: 4  # max concurrent LLM calls per pass
 verbose: true
 ```
 

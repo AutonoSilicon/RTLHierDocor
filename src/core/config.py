@@ -180,7 +180,6 @@ class ProjectConfig:
     composer_base_url: Optional[str] = None
     composer_thinking: Optional[bool] = None
     skip_modules: List[str] = field(default_factory=lambda: ["ct_had*"])
-    max_source_lines: int = 2000
     code_base_path: str = ""
     resume: bool = True
     max_modules: int = 0  # 0 for unlimited
@@ -270,8 +269,6 @@ class ProjectConfig:
                 skips = agent['skip_modules']
                 if isinstance(skips, list):
                     config.skip_modules = [str(s) for s in skips]
-            if 'max_source_lines' in agent:
-                config.max_source_lines = int(agent['max_source_lines'])
             if 'code_base_path' in agent:
                 config.code_base_path = str(agent['code_base_path'])
             if 'resume' in agent:
@@ -333,8 +330,6 @@ class ProjectConfig:
             self.agent_base_url = args.base_url
         if getattr(args, 'thinking', False):
             self.agent_thinking = True
-        if getattr(args, 'max_source_lines', None) is not None:
-            self.max_source_lines = args.max_source_lines
         if getattr(args, 'no_resume', False):
             self.resume = False
         if getattr(args, 'max_modules', None) is not None:

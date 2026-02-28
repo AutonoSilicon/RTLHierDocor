@@ -123,7 +123,6 @@ agent:
   thinking: true
   skip_modules:
     - "ct_had*"
-  max_source_lines: 10000
   resume: true
 verbose: true
 ```
