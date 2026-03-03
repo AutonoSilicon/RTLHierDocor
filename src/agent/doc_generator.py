@@ -5,7 +5,7 @@ import re
 import time
 import asyncio
 from collections import defaultdict
-from typing import Dict, List, Optional, Any, Tuple, Callable
+from typing import Dict, List, Optional, Any, Tuple, Callable, Awaitable
 from pathlib import Path
 from urllib.parse import quote
 
@@ -97,6 +97,7 @@ class AgentDocGenerator:
         self.incremental_composer = IncrementalDocComposer(composer_llm or llm)
         self._graphs: Dict[str, SimplifiedGraph] = {}  # module_name -> SimplifiedGraph
         self._processed_pass1: set = set()
+        self._processed_pass1_5: set = set()
         self._processed_pass2: set = set()
         self._processed_pass2_1: set = set()  # Track Pass 2.1 completion
         self._processed_pass2_2: set = set()
@@ -108,6 +109,7 @@ class AgentDocGenerator:
         self._processed_pass3_subsystems: set = set()
         self._mermaid_summaries: Dict[str, str] = {}  # module_name -> 精简版 mermaid
         self._token_stats: Dict[str, List[Dict[str, int]]] = {}  # module_name -> list of token stats per pass
+        self._inflight_pass_tasks: Dict[Tuple[str, str], asyncio.Task] = {}
         # Concurrency control semaphore
         self._module_semaphore = asyncio.Semaphore(max_concurrent_modules)
 
@@ -117,6 +119,26 @@ class AgentDocGenerator:
             if fnmatch.fnmatch(module_name, pattern):
                 return True
         return False
+
+    async def _run_singleflight(
+        self,
+        pass_name: str,
+        module_name: str,
+        coro_factory: Callable[[], Awaitable[str]],
+    ) -> str:
+        """Ensure only one in-flight task per (pass_name, module_name)."""
+        key = (pass_name, module_name)
+        existing = self._inflight_pass_tasks.get(key)
+        if existing is not None:
+            return await existing
+
+        task = asyncio.create_task(coro_factory())
+        self._inflight_pass_tasks[key] = task
+        try:
+            return await task
+        finally:
+            if self._inflight_pass_tasks.get(key) is task:
+                self._inflight_pass_tasks.pop(key, None)
 
     async def run(self):
         """Run the full documentation generation process."""
@@ -196,6 +218,14 @@ class AgentDocGenerator:
             self._precompute_graphs(child)
 
     async def _run_pass1(self, node: Any, ancestor_context: str):
+        module_name = node.module_name
+        return await self._run_singleflight(
+            "pass1",
+            module_name,
+            lambda: self._run_pass1_impl(node, ancestor_context),
+        )
+
+    async def _run_pass1_impl(self, node: Any, ancestor_context: str):
         """Pass 1: Top-down (Overview) with concurrency control.
 
         Parent is processed first, then children are processed concurrently
@@ -238,6 +268,14 @@ class AgentDocGenerator:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _run_pass1_5(self, node: Any):
+        module_name = node.module_name
+        return await self._run_singleflight(
+            "pass1_5",
+            module_name,
+            lambda: self._run_pass1_5_impl(node),
+        )
+
+    async def _run_pass1_5_impl(self, node: Any):
         """Pass 1.5: Block-level documentation generation (extracted from old Pass 2).
 
         Depends only on Pass 0 (SimplifiedGraph) and SourceResolver, not on Pass 1.
@@ -264,17 +302,13 @@ class AgentDocGenerator:
             return
 
         # 1. Check if already processed in this session (before processing)
-        if module_name in getattr(self, '_processed_pass1_5', set()):
+        if module_name in self._processed_pass1_5:
             # Already processed, just recurse children concurrently
             if node.children:
                 tasks = [self._run_pass1_5(child) for child in node.children.values()]
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
             return
-
-        # Initialize the set if not already done
-        if not hasattr(self, '_processed_pass1_5'):
-            self._processed_pass1_5 = set()
 
         # 2. Check if already done in persistent storage
         if self.tracker.is_pass1_5_done(module_name):
@@ -686,6 +720,14 @@ class AgentDocGenerator:
         self._save_metadata(node)
 
     async def _run_pass2(self, node: Any) -> str:
+        module_name = node.module_name
+        return await self._run_singleflight(
+            "pass2",
+            module_name,
+            lambda: self._run_pass2_impl(node),
+        )
+
+    async def _run_pass2_impl(self, node: Any) -> str:
         """Pass 2: Bottom-up synthesis documentation (runs after Pass 2.1, Pass 2.2 and Pass 2.3).
 
         Children are processed concurrently (up to max_concurrent_modules at a time).
@@ -981,53 +1023,62 @@ class AgentDocGenerator:
         raw_architecture_desc = self.tracker.get_pass2_7_content(module_name) or "无架构设计描述"
 
         print(f"    [Pass2][{module_name}] Refining Pass2 subdocs before composition (excluding flowchart)")
-        design_highlights = await self._refine_pass2_subdoc(
-            module_name,
-            "design_highlights",
-            raw_design_highlights,
-            coverage_focus="架构亮点、关键取舍、与子模块协同要点",
-            fallback_lines=20,
-            fallback_chars=2200,
-        )
-        interface_spec = await self._refine_pass2_subdoc(
-            module_name,
-            "interface_spec",
-            raw_interface_spec,
-            coverage_focus="端口分组、握手/时序语义、输入输出约束",
-            fallback_lines=25,
-            fallback_chars=2600,
-        )
-        functional_desc = await self._refine_pass2_subdoc(
-            module_name,
-            "functional_desc",
-            raw_functional_desc,
-            coverage_focus="主功能路径、关键条件分支、异常/边界行为",
-            fallback_lines=25,
-            fallback_chars=2600,
-        )
-        register_desc = await self._refine_pass2_subdoc(
-            module_name,
-            "register_desc",
-            raw_register_desc,
-            coverage_focus="寄存器字段含义、可配参数、复位默认值与作用",
-            fallback_lines=20,
-            fallback_chars=2200,
-        )
-        timing_cdc_desc = await self._refine_pass2_subdoc(
-            module_name,
-            "timing_cdc",
-            raw_timing_cdc_desc,
-            coverage_focus="时钟复位关系、CDC风险点、约束假设与限制",
-            fallback_lines=20,
-            fallback_chars=2200,
-        )
-        architecture_desc = await self._refine_pass2_subdoc(
-            module_name,
-            "architecture",
-            raw_architecture_desc,
-            coverage_focus="模块内功能分层、数据/控制通路、设计边界",
-            fallback_lines=25,
-            fallback_chars=2600,
+        (
+            design_highlights,
+            interface_spec,
+            functional_desc,
+            register_desc,
+            timing_cdc_desc,
+            architecture_desc,
+        ) = await asyncio.gather(
+            self._refine_pass2_subdoc(
+                module_name,
+                "design_highlights",
+                raw_design_highlights,
+                coverage_focus="架构亮点、关键取舍、与子模块协同要点",
+                fallback_lines=20,
+                fallback_chars=2200,
+            ),
+            self._refine_pass2_subdoc(
+                module_name,
+                "interface_spec",
+                raw_interface_spec,
+                coverage_focus="端口分组、握手/时序语义、输入输出约束",
+                fallback_lines=25,
+                fallback_chars=2600,
+            ),
+            self._refine_pass2_subdoc(
+                module_name,
+                "functional_desc",
+                raw_functional_desc,
+                coverage_focus="主功能路径、关键条件分支、异常/边界行为",
+                fallback_lines=25,
+                fallback_chars=2600,
+            ),
+            self._refine_pass2_subdoc(
+                module_name,
+                "register_desc",
+                raw_register_desc,
+                coverage_focus="寄存器字段含义、可配参数、复位默认值与作用",
+                fallback_lines=20,
+                fallback_chars=2200,
+            ),
+            self._refine_pass2_subdoc(
+                module_name,
+                "timing_cdc",
+                raw_timing_cdc_desc,
+                coverage_focus="时钟复位关系、CDC风险点、约束假设与限制",
+                fallback_lines=20,
+                fallback_chars=2200,
+            ),
+            self._refine_pass2_subdoc(
+                module_name,
+                "architecture",
+                raw_architecture_desc,
+                coverage_focus="模块内功能分层、数据/控制通路、设计边界",
+                fallback_lines=25,
+                fallback_chars=2600,
+            ),
         )
 
         # Handle children_descriptions: use default for leaf modules
@@ -1096,6 +1147,8 @@ class AgentDocGenerator:
             current_doc = current_doc + "".join(subdoc_sections)
             print(f"    [Pass2][{module_name}] Sub-docs appended: {len(subdoc_sections)} sections, total {len(current_doc)} chars")
 
+        # Stage B cache checkpoint (expand/working draft)
+        self.tracker.update_pass2_b_expand(module_name, current_doc)
         self._save_pass2_debug_file(module_name, "description_working.md", current_doc)
 
         # Stage C: Final polish and conflict appendix
@@ -1195,6 +1248,14 @@ class AgentDocGenerator:
     # ==================== Pass 2.1: Design Highlight/Trick Identification ====================
 
     async def _run_pass2_1(self, node: Any) -> str:
+        module_name = node.module_name
+        return await self._run_singleflight(
+            "pass2_1",
+            module_name,
+            lambda: self._run_pass2_1_impl(node),
+        )
+
+    async def _run_pass2_1_impl(self, node: Any) -> str:
         """Pass 2.1: Bottom-up design highlight identification.
 
         Returns the highlights summary for this module (for parent to use).
@@ -1356,6 +1417,14 @@ class AgentDocGenerator:
     # ==================== Pass 2.2: Mermaid Flowchart Generation ====================
 
     async def _run_pass2_2(self, node: Any) -> str:
+        module_name = node.module_name
+        return await self._run_singleflight(
+            "pass2_2",
+            module_name,
+            lambda: self._run_pass2_2_impl(node),
+        )
+
+    async def _run_pass2_2_impl(self, node: Any) -> str:
         """Pass 2.2: Bottom-up Mermaid flowchart generation.
 
         Returns the summary mermaid for this module (for parent to use).
@@ -1523,6 +1592,14 @@ class AgentDocGenerator:
     # ==================== Pass 2.3: Interface Specification Generation ====================
 
     async def _run_pass2_3(self, node: Any) -> str:
+        module_name = node.module_name
+        return await self._run_singleflight(
+            "pass2_3",
+            module_name,
+            lambda: self._run_pass2_3_impl(node),
+        )
+
+    async def _run_pass2_3_impl(self, node: Any) -> str:
         """Pass 2.3: Bottom-up interface specification generation.
 
         Returns the interface specification for this module.
@@ -1667,6 +1744,14 @@ class AgentDocGenerator:
     # ==================== Pass 2.4: Functional Detailed Description ====================
 
     async def _run_pass2_4(self, node: Any) -> str:
+        module_name = node.module_name
+        return await self._run_singleflight(
+            "pass2_4",
+            module_name,
+            lambda: self._run_pass2_4_impl(node),
+        )
+
+    async def _run_pass2_4_impl(self, node: Any) -> str:
         """Pass 2.4: Bottom-up functional detailed description generation.
 
         Returns the functional description for this module.
@@ -1735,6 +1820,7 @@ class AgentDocGenerator:
 
         except Exception as e:
             print(f"  [ERROR] [Pass 2.4] Failed to generate functional description for {module_name}: {e}")
+            self.tracker.mark_failed(module_name, f"[Pass 2.4] {e}")
             self._processed_pass2_4.add(module_name)
             return ""
 
@@ -1820,6 +1906,14 @@ class AgentDocGenerator:
     # ==================== Pass 2.5: Register Description Generation ====================
 
     async def _run_pass2_5(self, node: Any) -> str:
+        module_name = node.module_name
+        return await self._run_singleflight(
+            "pass2_5",
+            module_name,
+            lambda: self._run_pass2_5_impl(node),
+        )
+
+    async def _run_pass2_5_impl(self, node: Any) -> str:
         """Pass 2.5: Bottom-up register description generation.
 
         Returns the register description for this module.
@@ -1888,6 +1982,7 @@ class AgentDocGenerator:
 
         except Exception as e:
             print(f"  [ERROR] [Pass 2.5] Failed to generate register description for {module_name}: {e}")
+            self.tracker.mark_failed(module_name, f"[Pass 2.5] {e}")
             self._processed_pass2_5.add(module_name)
             return ""
 
@@ -1969,6 +2064,14 @@ class AgentDocGenerator:
     # ==================== Pass 2.6: Timing Constraints and CDC Generation ====================
 
     async def _run_pass2_6(self, node: Any) -> str:
+        module_name = node.module_name
+        return await self._run_singleflight(
+            "pass2_6",
+            module_name,
+            lambda: self._run_pass2_6_impl(node),
+        )
+
+    async def _run_pass2_6_impl(self, node: Any) -> str:
         """Pass 2.6: Bottom-up timing constraints and CDC documentation generation.
 
         Returns the timing constraints and CDC documentation for this module.
@@ -2037,6 +2140,7 @@ class AgentDocGenerator:
 
         except Exception as e:
             print(f"  [ERROR] [Pass 2.6] Failed to generate timing/CDC doc for {module_name}: {e}")
+            self.tracker.mark_failed(module_name, f"[Pass 2.6] {e}")
             self._processed_pass2_6.add(module_name)
             return ""
 
@@ -2118,6 +2222,14 @@ class AgentDocGenerator:
     # ==================== Pass 2.7: Architecture Design Generation ====================
 
     async def _run_pass2_7(self, node: Any) -> str:
+        module_name = node.module_name
+        return await self._run_singleflight(
+            "pass2_7",
+            module_name,
+            lambda: self._run_pass2_7_impl(node),
+        )
+
+    async def _run_pass2_7_impl(self, node: Any) -> str:
         """Pass 2.7: Bottom-up architecture design documentation generation.
 
         Returns the architecture design documentation for this module.
@@ -2185,6 +2297,7 @@ class AgentDocGenerator:
 
         except Exception as e:
             print(f"  [ERROR] [Pass 2.7] Failed to generate architecture doc for {module_name}: {e}")
+            self.tracker.mark_failed(module_name, f"[Pass 2.7] {e}")
             self._processed_pass2_7.add(module_name)
             return ""
 

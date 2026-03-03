@@ -61,6 +61,21 @@ class ProgressTracker:
         "pass2": "pass2_done",
     }
 
+    STATUS_ORDER = [
+        "pending",
+        "pass1_done",
+        "pass1_5_done",
+        "pass2_1_done",
+        "pass2_2_done",
+        "pass2_3_done",
+        "pass2_4_done",
+        "pass2_5_done",
+        "pass2_6_done",
+        "pass2_7_done",
+        "pass2_done",
+        "failed",
+    ]
+
     PASS_FIELD_MAP = {
         "pass1": "pass1_overview_hash",
         "pass1_5": "pass1_5_block_docs_hash",
@@ -158,7 +173,15 @@ class ProgressTracker:
         # Update status
         status = self.PASS_STATUS_MAP.get(pass_name)
         if status:
-            state.status = status
+            current_status = state.status or "pending"
+            if current_status in self.STATUS_ORDER and status in self.STATUS_ORDER:
+                if self.STATUS_ORDER.index(status) >= self.STATUS_ORDER.index(current_status):
+                    state.status = status
+            else:
+                state.status = status
+
+        # A successful update clears previous transient error
+        state.error = None
 
         state.timestamp = datetime.now().isoformat()
         self.save()
@@ -223,12 +246,10 @@ class ProgressTracker:
         target_status = self.PASS_STATUS_MAP.get(pass_name)
         if not target_status:
             return False
-            
-        status_order = ["pending"] + [self.PASS_STATUS_MAP.get(p, f"{p}_done") 
-                                       for p in self.LINEAR_PASSES]
+
         try:
-            target_idx = status_order.index(target_status)
-            current_idx = status_order.index(state.status) if state.status in status_order else -1
+            target_idx = self.STATUS_ORDER.index(target_status)
+            current_idx = self.STATUS_ORDER.index(state.status) if state.status in self.STATUS_ORDER else -1
             return current_idx >= target_idx
         except ValueError:
             return False
@@ -363,7 +384,8 @@ class ProgressTracker:
 
     def mark_failed(self, module_name: str, error: str):
         state = self.get_state(module_name)
-        state.status = "failed"
+        if state.status not in ("pass2_done",):
+            state.status = "failed"
         state.error = error
         state.timestamp = datetime.now().isoformat()
         self.save()

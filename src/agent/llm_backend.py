@@ -41,7 +41,7 @@ class LLMBackend:
         self.thinking = thinking
 
         # Semaphore to limit concurrent LLM API calls (prevent rate limiting)
-        self._semaphore = asyncio.Semaphore(3)
+        self._semaphore = asyncio.Semaphore(6)
 
     async def generate(
         self,
@@ -100,7 +100,11 @@ class LLMBackend:
                         kwargs["tools"] = tools
                         kwargs["tool_choice"] = "auto"
 
-                    response = await self.client.chat.completions.create(**kwargs)
+                    timeout_sec = float(os.environ.get("RTL_DOCOR_LLM_TIMEOUT_SEC", "600"))
+                    response = await asyncio.wait_for(
+                        self.client.chat.completions.create(**kwargs),
+                        timeout=timeout_sec,
+                    )
                     assistant_message = response.choices[0].message
 
                     if hasattr(response, "usage") and response.usage:
