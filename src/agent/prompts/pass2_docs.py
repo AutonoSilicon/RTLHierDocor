@@ -111,9 +111,6 @@ PASS2_PROMPT = """请为非叶模块 `{module_name}` 撰写高质量的模块综
 ## Design Highlights Summary
 {design_highlights}
 
-## Behavior Flow Summary
-{flowchart}
-
 ## Interface Specification Summary
 {interface_spec}
 

@@ -3,6 +3,7 @@ import json
 import fnmatch
 import re
 import time
+import asyncio
 from collections import defaultdict
 from typing import Dict, List, Optional, Any, Tuple, Callable
 from pathlib import Path
@@ -13,7 +14,7 @@ from .source_resolver import SourceResolver
 from .progress_tracker import ProgressTracker
 from .project_progress_tracker import ProjectProgressTracker
 from .block_doc_generator import BlockDocGenerator
-from .incremental_composer import IncrementalDocComposer
+from .incremental_composer import IncrementalDocComposer, SectionPatch
 from schematic.simplifier import SimplifiedGraph
 from .prompts import (
     PASS1_SYSTEM,
@@ -24,8 +25,12 @@ from .prompts import (
     PASS2_A_ROOT_PROMPT,
     PASS2_B_EXPAND_SYSTEM,
     PASS2_B_EXPAND_PROMPT,
+    PASS2_B_PATCH_SYSTEM,
+    PASS2_B_PATCH_PROMPT,
     PASS2_C_POLISH_SYSTEM,
     PASS2_C_POLISH_PROMPT,
+    PASS2_SUBDOC_REFINE_SYSTEM,
+    PASS2_SUBDOC_REFINE_PROMPT,
     PASS2_1_SYSTEM,
     PASS2_1_PROMPT,
     PASS2_2_MODULE_SYSTEM,
@@ -838,6 +843,106 @@ class AgentDocGenerator:
         section = "\n".join(lines[start:end]).strip()
         return section
 
+    def _parse_editable_section_titles(self, editable_sections: str) -> List[str]:
+        """Parse titles from 'Editable Sections' list.
+
+        The input is expected to be one or more lines, each like '## <title>'.
+        Returned titles are without leading '#'.
+        """
+        titles: List[str] = []
+        for line in (editable_sections or "").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("##"):
+                titles.append(stripped.lstrip("#").strip())
+        return titles
+
+    def _parse_section_patches(self, llm_output: str, editable_sections: str) -> List[SectionPatch]:
+        """Parse patch-mode output into section patches.
+
+        Expected format: only a list of sections, each beginning with '## <title>'.
+        The section title must match one of the Editable Sections.
+        Unexpected sections (e.g., child module descriptions) are silently ignored.
+        """
+        allowed_titles = set(self._parse_editable_section_titles(editable_sections))
+        text = (llm_output or "").strip()
+        if not text:
+            raise ValueError("empty patch output")
+
+        if "无须更新" in text or "无更新" in text:
+            return []
+
+        matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", text))
+        if not matches:
+            raise ValueError("no '##' section headers found in patch output")
+
+        patches: List[SectionPatch] = []
+        for i, m in enumerate(matches):
+            title = m.group(1).strip()
+            if title not in allowed_titles:
+                # Skip unexpected sections (e.g., child module descriptions)
+                continue
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            body = text[start:end].strip()
+            patches.append(SectionPatch(section_title=title, replacement_markdown=body))
+
+        return patches
+
+    async def _refine_pass2_subdoc(
+        self,
+        module_name: str,
+        subdoc_name: str,
+        raw_content: str,
+        coverage_focus: str,
+        fallback_lines: int = 25,
+        fallback_chars: int = 2500,
+    ) -> str:
+        """Refine one Pass2 sub-document into concise high-coverage bullets.
+
+        Falls back to rule-based summary when refinement fails or returns empty/error text.
+        """
+        if not raw_content:
+            return ""
+        if raw_content.strip().startswith("无"):
+            return raw_content
+
+        refine_prompt = PASS2_SUBDOC_REFINE_PROMPT.format(
+            module_name=module_name,
+            subdoc_name=subdoc_name,
+            coverage_focus=coverage_focus,
+            raw_subdoc=raw_content,
+        )
+        refine_result = await self.incremental_composer.refine_subdoc(
+            PASS2_SUBDOC_REFINE_SYSTEM,
+            refine_prompt,
+            log_path=self._module_log_path(module_name, f"pass2_refine_{subdoc_name}"),
+            module_name=module_name,
+            subdoc_name=subdoc_name,
+        )
+
+        refined = (refine_result.content or "").strip()
+        if module_name not in self._token_stats:
+            self._token_stats[module_name] = []
+        self._token_stats[module_name].append({
+            "pass": f"pass2_refine_{subdoc_name}",
+            **refine_result.token_stats
+        })
+
+        if (
+            not refined
+            or refined.startswith("Error calling LLM API")
+            or refined.startswith("Error:")
+        ):
+            fallback = self._extract_summary(raw_content, max_lines=fallback_lines, max_chars=fallback_chars)
+            print(f"    [WARN] [Pass2][{module_name}] refine {subdoc_name} failed, fallback to rule summary")
+            self._save_pass2_debug_file(module_name, f"description_refined_{subdoc_name}.md", fallback)
+            return fallback
+
+        self._save_pass2_debug_file(module_name, f"description_refined_{subdoc_name}.md", refined)
+        return refined
+
     async def _generate_module_description(self, node: Any, children_descs: Dict[str, str]) -> str:
         """Generate executive summary documentation (Pass 2 - Synthesis).
 
@@ -866,14 +971,64 @@ class AgentDocGenerator:
             graph_description = "无拓扑结构信息（模块未解析）"
             print(f"    [Context] No topology available")
 
-        # Get Pass 2.1-2.7 summaries
-        design_highlights = self._extract_summary(self.tracker.get_pass2_1_content(module_name) or "无设计亮点分析", max_lines=20)
-        flowchart = self._extract_summary(self.tracker.get_pass2_2_content(module_name) or "无流程图", max_lines=20)
-        interface_spec = self._extract_summary(self.tracker.get_pass2_3_content(module_name) or "无接口规范", max_lines=25)
-        functional_desc = self._extract_summary(self.tracker.get_pass2_4_content(module_name) or "无功能详细描述", max_lines=25)
-        register_desc = self._extract_summary(self.tracker.get_pass2_5_content(module_name) or "无寄存器描述", max_lines=20)
-        timing_cdc_desc = self._extract_summary(self.tracker.get_pass2_6_content(module_name) or "无时序约束与CDC描述", max_lines=20)
-        architecture_desc = self._extract_summary(self.tracker.get_pass2_7_content(module_name) or "无架构设计描述", max_lines=25)
+        # Get Pass 2.1/2.3/2.4/2.5/2.6/2.7 raw content and refine them with composer model.
+        # Note: Pass 2.2 flowchart is intentionally excluded from textual synthesis.
+        raw_design_highlights = self.tracker.get_pass2_1_content(module_name) or "无设计亮点分析"
+        raw_interface_spec = self.tracker.get_pass2_3_content(module_name) or "无接口规范"
+        raw_functional_desc = self.tracker.get_pass2_4_content(module_name) or "无功能详细描述"
+        raw_register_desc = self.tracker.get_pass2_5_content(module_name) or "无寄存器描述"
+        raw_timing_cdc_desc = self.tracker.get_pass2_6_content(module_name) or "无时序约束与CDC描述"
+        raw_architecture_desc = self.tracker.get_pass2_7_content(module_name) or "无架构设计描述"
+
+        print(f"    [Pass2][{module_name}] Refining Pass2 subdocs before composition (excluding flowchart)")
+        design_highlights = await self._refine_pass2_subdoc(
+            module_name,
+            "design_highlights",
+            raw_design_highlights,
+            coverage_focus="架构亮点、关键取舍、与子模块协同要点",
+            fallback_lines=20,
+            fallback_chars=2200,
+        )
+        interface_spec = await self._refine_pass2_subdoc(
+            module_name,
+            "interface_spec",
+            raw_interface_spec,
+            coverage_focus="端口分组、握手/时序语义、输入输出约束",
+            fallback_lines=25,
+            fallback_chars=2600,
+        )
+        functional_desc = await self._refine_pass2_subdoc(
+            module_name,
+            "functional_desc",
+            raw_functional_desc,
+            coverage_focus="主功能路径、关键条件分支、异常/边界行为",
+            fallback_lines=25,
+            fallback_chars=2600,
+        )
+        register_desc = await self._refine_pass2_subdoc(
+            module_name,
+            "register_desc",
+            raw_register_desc,
+            coverage_focus="寄存器字段含义、可配参数、复位默认值与作用",
+            fallback_lines=20,
+            fallback_chars=2200,
+        )
+        timing_cdc_desc = await self._refine_pass2_subdoc(
+            module_name,
+            "timing_cdc",
+            raw_timing_cdc_desc,
+            coverage_focus="时钟复位关系、CDC风险点、约束假设与限制",
+            fallback_lines=20,
+            fallback_chars=2200,
+        )
+        architecture_desc = await self._refine_pass2_subdoc(
+            module_name,
+            "architecture",
+            raw_architecture_desc,
+            coverage_focus="模块内功能分层、数据/控制通路、设计边界",
+            fallback_lines=25,
+            fallback_chars=2600,
+        )
 
         # Handle children_descriptions: use default for leaf modules
         if children_descs:
@@ -910,56 +1065,38 @@ class AgentDocGenerator:
         self._save_pass2_debug_file(module_name, "description_root.md", current_doc)
         print(f"    [Pass2][{module_name}] Root draft saved: debug/{module_name}/description_root.md ({len(current_doc)} chars)")
 
-        # Stage B: Incremental expansion in fixed order
-        expansion_targets = [
-            ("design_highlights", design_highlights, "## 1.3 架构亮点\n## 2.4 子模块综述与协同"),
-            ("flowchart", flowchart, "## 1.1 核心功能\n## 2.4 子模块综述与协同"),
-            ("interface_spec", interface_spec, "## 2.1 接口与协议"),
-            ("timing_cdc", timing_cdc_desc, "## 2.2 时钟与复位"),
-            ("register_desc", register_desc, "## 2.3 配置与参数"),
-            ("functional_desc", functional_desc, "## 1.2 关键特性\n## 1.3 架构亮点"),
-            ("children_descriptions", children_summary, "## 2.4 子模块综述与协同"),
-        ]
+        # Stage B: Simple concatenation of refined sub-docs
+        # Append each refined sub-document as additional sections
+        subdoc_sections = []
 
-        total_targets = len(expansion_targets)
-        for idx, (target_name, target_summary, editable_sections) in enumerate(expansion_targets, start=1):
-            if not target_summary or target_summary.startswith("无"):
-                print(f"    [Pass2][{module_name}] [expand:{idx}/{total_targets}] Skip {target_name} (empty summary)")
-                continue
+        if design_highlights and not design_highlights.startswith("无"):
+            subdoc_sections.append(f"\n\n## 设计亮点 (Design Highlights)\n\n{design_highlights}")
 
-            print(
-                f"    [Pass2][{module_name}] [expand:{idx}/{total_targets}] "
-                f"Target={target_name}, summary_chars={len(target_summary)}, "
-                f"sections={editable_sections.replace(chr(10), ' | ')}"
-            )
+        if interface_spec and not interface_spec.startswith("无"):
+            subdoc_sections.append(f"\n\n## 接口规范 (Interface Specification)\n\n{interface_spec}")
 
-            expand_prompt = PASS2_B_EXPAND_PROMPT.format(
-                module_name=module_name,
-                root_doc=current_doc,
-                target_name=target_name,
-                target_summary=target_summary,
-                editable_sections=editable_sections,
-                graph_overview=self._extract_summary(graph_description, max_lines=30, max_chars=3500),
-                children_summary=children_summary,
-            )
+        if timing_cdc_desc and not timing_cdc_desc.startswith("无"):
+            subdoc_sections.append(f"\n\n## 时钟复位与时序 (Clocking, Reset & Timing)\n\n{timing_cdc_desc}")
 
-            expand_result = await self.incremental_composer.expand_with_target(
-                PASS2_B_EXPAND_SYSTEM,
-                expand_prompt,
-                log_path=self._module_log_path(module_name, f"pass2_b_expand_{target_name}"),
-                module_name=module_name,
-                target_name=target_name,
-            )
-            current_doc = expand_result.content
-            self.tracker.update_pass2_b_expand(module_name, current_doc)
-            self._save_pass2_debug_file(module_name, "description_working.md", current_doc)
-            print(f"    [Pass2][{module_name}] Working draft updated after {target_name} ({len(current_doc)} chars)")
-            if module_name not in self._token_stats:
-                self._token_stats[module_name] = []
-            self._token_stats[module_name].append({
-                "pass": f"pass2_b_expand_{target_name}",
-                **expand_result.token_stats
-            })
+        if register_desc and not register_desc.startswith("无"):
+            subdoc_sections.append(f"\n\n## 寄存器描述 (Register Description)\n\n{register_desc}")
+
+        if functional_desc and not functional_desc.startswith("无"):
+            subdoc_sections.append(f"\n\n## 功能描述 (Functional Description)\n\n{functional_desc}")
+
+        if children_descs:
+            children_summary_parts = []
+            for name, desc in children_descs.items():
+                child_summary = self._extract_summary(desc, max_lines=15, max_chars=1000)
+                children_summary_parts.append(f"### 子模块 {name}\n{child_summary}")
+            subdoc_sections.append(f"\n\n## 子模块综述 (Sub-modules Overview)\n\n" + "\n\n".join(children_summary_parts))
+
+        # Concatenate all sections
+        if subdoc_sections:
+            current_doc = current_doc + "".join(subdoc_sections)
+            print(f"    [Pass2][{module_name}] Sub-docs appended: {len(subdoc_sections)} sections, total {len(current_doc)} chars")
+
+        self._save_pass2_debug_file(module_name, "description_working.md", current_doc)
 
         # Stage C: Final polish and conflict appendix
         checklist = "\n".join([

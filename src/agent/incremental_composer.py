@@ -129,6 +129,23 @@ class IncrementalDocComposer:
             module_name=module_name,
         )
 
+    async def refine_subdoc(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        log_path: str,
+        module_name: str,
+        subdoc_name: str,
+    ) -> ComposeResult:
+        """Refine one sub-document into concise, high-coverage bullet summary."""
+        return await self._run_stage(
+            system_prompt,
+            user_prompt,
+            log_path,
+            stage_name=f"refine:{subdoc_name}",
+            module_name=module_name,
+        )
+
     @staticmethod
     def apply_section_patches(content: str, patches: List[SectionPatch]) -> str:
         """Apply simple title-based section replacements.

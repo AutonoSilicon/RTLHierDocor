@@ -1,6 +1,6 @@
 # RTLHierDocor Test Configuration for ct_ifu_pcgen
 #
-# Usage: python3 -m cli docor -c config_ct_pcgen.yaml
+# Usage: python3 -m cli -c config_ct_pcgen.yaml docor
 
 # ── Design source ──────────────────────────────────────────────
 design:
@@ -8,10 +8,9 @@ design:
   top_module: "ct_ifu_pcgen"
 
 # ── Output settings ───────────────────────────────────────────
-# Output dir uses default "./rtl_docs" if not specified
-# output:
-#   dir: "./rtl_docs_ct_pcgen"
-#   cache_dir: ".rtl_cache"
+output:
+  dir: "./output/ct_pcgen"
+  cache_dir: ".rtl_cache"
 
 # ── Schematic simplification ──────────────────────────────────
 simplify:
@@ -32,12 +31,15 @@ agent:
   model: "qwen3.5-plus"
   base_url: "https://coding.dashscope.aliyuncs.com/v1"
   api_key: "sk-sp-0b4bfeb434d946bda2d005ac9c85026e"
-  composer_model: "deepseek-v3.2"
-  composer_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  composer_api_key: "sk-22730e3d9366402489918930ed806b32"
   thinking: true
+  composer_model: "qwen3.5-plus"
+  composer_base_url: "https://coding.dashscope.aliyuncs.com/v1"
+  composer_api_key: "sk-sp-0b4bfeb434d946bda2d005ac9c85026e"
+  composer_thinking: false
+  pass3_enabled: false
   skip_modules:
     - "ct_had*"
   resume: true
   code_base_path: "$CODE_BASE_PATH"
   max_modules: 0
+  max_concurrent_modules: 4
