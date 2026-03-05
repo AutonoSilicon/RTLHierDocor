@@ -8,7 +8,9 @@ import os
 import asyncio
 import datetime
 import json
-from typing import List, Optional, Any, Dict, Tuple, Callable
+from typing import List, Optional, Any, Dict, Tuple
+
+from .llm_toolcall import ToolCallback, build_tool_round_messages
 
 try:
     import openai
@@ -41,7 +43,7 @@ class LLMBackend:
         self.thinking = thinking
 
         # Semaphore to limit concurrent LLM API calls (prevent rate limiting)
-        self._semaphore = asyncio.Semaphore(6)
+        self._semaphore = asyncio.Semaphore(16)
 
     async def generate(
         self,
@@ -51,7 +53,7 @@ class LLMBackend:
         disable_thinking: bool = False,
         tools_enabled: bool = False,
         tools: Optional[List[Dict[str, Any]]] = None,
-        tool_callback: Optional[Callable[[str, Dict[str, Any]], str]] = None,
+        tool_callback: Optional[ToolCallback] = None,
         max_tool_rounds: int = 8,
     ) -> Tuple[str, Dict[str, int]]:
         """Generate text from the LLM.
@@ -114,55 +116,36 @@ class LLMBackend:
 
                     tool_calls = getattr(assistant_message, "tool_calls", None)
                     if tool_mode and tool_calls:
-                        # Append assistant tool call message
-                        try:
-                            tool_calls_payload = [tc.model_dump() for tc in tool_calls]
-                        except Exception:
-                            tool_calls_payload = []
-                            for tc in tool_calls:
-                                tool_calls_payload.append({
-                                    "id": getattr(tc, "id", ""),
-                                    "type": getattr(tc, "type", "function"),
-                                    "function": {
-                                        "name": getattr(getattr(tc, "function", None), "name", ""),
-                                        "arguments": getattr(getattr(tc, "function", None), "arguments", ""),
-                                    },
-                                })
-
-                        messages.append({
-                            "role": "assistant",
-                            "content": assistant_message.content or "",
-                            "tool_calls": tool_calls_payload,
-                        })
-
-                        # Execute tool calls
+                        tool_round_log_lines: List[str] = []
                         for tc in tool_calls:
-                            tc_id = getattr(tc, "id", "")
                             fn = getattr(tc, "function", None)
                             tool_name = getattr(fn, "name", "") if fn else ""
                             raw_args = getattr(fn, "arguments", "") if fn else ""
+                            if len(raw_args or "") > 1200:
+                                raw_args = (raw_args or "")[:1200] + "..."
+                            tool_round_log_lines.append(
+                                f"- call `{tool_name}` args: `{raw_args}`"
+                            )
 
-                            try:
-                                args_dict = json.loads(raw_args) if raw_args else {}
-                                if not isinstance(args_dict, dict):
-                                    args_dict = {"_args": args_dict}
-                            except Exception:
-                                args_dict = {"_raw": raw_args}
+                        has_tool_calls, tool_messages = await build_tool_round_messages(
+                            assistant_message,
+                            tool_callback,
+                        )
+                        if has_tool_calls:
+                            messages.extend(tool_messages)
 
-                            try:
-                                tool_result = tool_callback(tool_name, args_dict) if tool_callback else ""
-                            except Exception as e:
-                                tool_result = f"Error: tool '{tool_name}' failed: {e}"
-
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc_id,
-                                "content": tool_result or "",
-                            })
+                            # Persist tool traces incrementally so Ctrl-C still keeps useful logs.
+                            self._append_tool_trace_to_log(
+                                log_path=log_path,
+                                round_idx=_round + 1,
+                                call_lines=tool_round_log_lines,
+                                tool_messages=tool_messages,
+                            )
                         continue
 
                     # Final assistant content (no tool calls)
                     final_text = assistant_message.content or ""
+                    self._append_final_response_to_log(final_text, log_path)
                     break
 
                 if final_text and use_thinking:
@@ -231,6 +214,59 @@ class LLMBackend:
                 f.write("\n\n")
         except Exception as e:
             print(f"[WARN] Failed to append thinking to log: {e}")
+
+    def _append_tool_trace_to_log(
+        self,
+        log_path: str,
+        round_idx: int,
+        call_lines: List[str],
+        tool_messages: List[Dict[str, Any]],
+    ):
+        """Append one tool-calling round trace to debug log."""
+        try:
+            result_lines: List[str] = []
+            for msg in tool_messages:
+                if msg.get("role") != "tool":
+                    continue
+                tc_id = msg.get("tool_call_id", "")
+                content = msg.get("content", "")
+                if not isinstance(content, str):
+                    try:
+                        content = json.dumps(content, ensure_ascii=False)
+                    except Exception:
+                        content = str(content)
+                if len(content) > 2000:
+                    content = content[:2000] + "\n\n[... truncated ...]"
+                result_lines.append(f"- result `{tc_id}`:\n```text\n{content}\n```")
+
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write("\n\n" + "=" * 80 + "\n")
+                f.write(f"## Tool Trace Round {round_idx}\n")
+                f.write("=" * 80 + "\n\n")
+                if call_lines:
+                    f.write("### Calls\n")
+                    f.write("\n".join(call_lines) + "\n\n")
+                if result_lines:
+                    f.write("### Results\n")
+                    f.write("\n\n".join(result_lines) + "\n")
+        except Exception as e:
+            print(f"[WARN] Failed to append tool trace to log: {e}")
+
+    def _append_final_response_to_log(self, final_text: str, log_path: str):
+        """Append final assistant response summary to debug log."""
+        if not final_text:
+            return
+        try:
+            text = final_text
+            if len(text) > 6000:
+                text = text[:6000] + "\n\n[... truncated ...]"
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write("\n\n" + "=" * 80 + "\n")
+                f.write("## Final Assistant Response\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(text + "\n")
+        except Exception as e:
+            print(f"[WARN] Failed to append final response to log: {e}")
 
     def _log_call(self, system: str, prompt: str, model: str, log_path: str = "debug.md"):
         """Log the LLM call to a markdown file."""

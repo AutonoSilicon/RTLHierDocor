@@ -1,0 +1,40 @@
+# RTLHierDocor Configuration for full openC910 documentation generation
+# Model/profile aligned with config_ct_pcgen.yaml
+
+design:
+  filelist: "$CODE_BASE_PATH/gen_rtl/filelists/C910_asic_rtl.fl"
+  top_module: "openC910"
+
+output:
+  dir: "./output/openC910_full"
+  cache_dir: ".rtl_cache"
+  max_schematics: 0
+
+simplify:
+  enabled: true
+  strategy: "proc_group"
+
+verbose: true
+
+agent:
+  backend: "openai"
+  model: "qwen3.5-plus"
+  base_url: "https://coding.dashscope.aliyuncs.com/v1"
+  api_key: "sk-sp-0b4bfeb434d946bda2d005ac9c85026e"
+  thinking: true
+
+  composer_model: "qwen3.5-plus"
+  composer_base_url: "https://coding.dashscope.aliyuncs.com/v1"
+  composer_api_key: "sk-sp-0b4bfeb434d946bda2d005ac9c85026e"
+  composer_thinking: false
+
+  # Full design means no module skipping
+  skip_modules: []
+
+  resume: true
+  code_base_path: "$CODE_BASE_PATH"
+  max_modules: 0
+  max_concurrent_modules: 16
+
+  # Enable chip/subsystem level docs for complete full-design output
+  pass3_enabled: true

@@ -7,7 +7,6 @@ import asyncio
 from collections import defaultdict
 from typing import Dict, List, Optional, Any, Tuple, Callable, Awaitable
 from pathlib import Path
-from urllib.parse import quote
 
 from .llm_backend import LLMBackend
 from .source_resolver import SourceResolver
@@ -15,6 +14,7 @@ from .progress_tracker import ProgressTracker
 from .project_progress_tracker import ProjectProgressTracker
 from .block_doc_generator import BlockDocGenerator
 from .incremental_composer import IncrementalDocComposer, SectionPatch
+from .pass3_generator import Pass3Generator
 from schematic.simplifier import SimplifiedGraph
 from .prompts import (
     PASS1_SYSTEM,
@@ -45,12 +45,6 @@ from .prompts import (
     PASS2_6_TIMING_CDC_PROMPT,
     PASS2_7_ARCHITECTURE_SYSTEM,
     PASS2_7_ARCHITECTURE_PROMPT,
-    PASS3_SYSTEM,
-    PASS3_PROMPT,
-    PASS3_SUBSYSTEM_SYSTEM,
-    PASS3_SUBSYSTEM_PROMPT,
-    PASS3_1_SYSTEM,
-    PASS3_1_PROMPT,
 )
 
 class AgentDocGenerator:
@@ -81,7 +75,7 @@ class AgentDocGenerator:
         self.tracker = tracker
         self.output_dir = Path(output_dir)
         self.modules_dir = self.output_dir / "modules"
-        self.debug_dir = self.output_dir / "debug"  # Debug output subdirectory
+        self.debug_dir = self.output_dir / "debug"
         self.max_modules = max_modules
         self.skip_modules = skip_modules or []
         self.schematic_gen = schematic_gen
@@ -93,6 +87,7 @@ class AgentDocGenerator:
         self.pass3_tree_max_depth_in_doc = pass3_tree_max_depth_in_doc
         self.chip_dir = self.output_dir / self.pass3_output_subdir
         self.chip_subsystems_dir = self.chip_dir / "subsystems"
+        self.chip_debug_dir = self.chip_dir / "debug"
         self.project_tracker = ProjectProgressTracker(str(self.chip_dir))
         self.incremental_composer = IncrementalDocComposer(composer_llm or llm)
         self._graphs: Dict[str, SimplifiedGraph] = {}  # module_name -> SimplifiedGraph
@@ -110,6 +105,7 @@ class AgentDocGenerator:
         self._mermaid_summaries: Dict[str, str] = {}  # module_name -> 精简版 mermaid
         self._token_stats: Dict[str, List[Dict[str, int]]] = {}  # module_name -> list of token stats per pass
         self._inflight_pass_tasks: Dict[Tuple[str, str], asyncio.Task] = {}
+        self.pass3_generator = Pass3Generator(self)
         # Concurrency control semaphore
         self._module_semaphore = asyncio.Semaphore(max_concurrent_modules)
 
@@ -177,8 +173,11 @@ class AgentDocGenerator:
 
         # Pass 3: Chip-level top-down overview and subsystem index pages
         if self.pass3_enabled:
-            print("[INFO] Running Pass 3.1: Subsystem Partition (Agent exploration)...")
+            print("[INFO] Running Pass 3.1: SoC-level Subsystem Partition (Agent exploration)...")
             await self._run_pass3_1(self.hierarchy)
+
+            print("[INFO] Running Pass 3.2: Core Microarchitecture Partition (Agent Explore)...")
+            await self._run_pass3_2(self.hierarchy)
 
             print("[INFO] Running Pass 3: Chip-level Overview & Subsystem Overview...")
             await self._run_pass3(self.hierarchy)
@@ -467,7 +466,7 @@ class AgentDocGenerator:
         successors: Dict[str, List[str]] = {}    # node -> list of successors
         
         all_nodes = set(graph.proc_nodes.keys()) | set(graph.comb_nodes.keys()) | \
-                    set(graph.io_ports.keys()) | set(graph.submodules.keys())
+                set(graph.io_ports.keys()) | set(graph.submodules.keys()) | set(graph.seq_cells.keys())
         
         for node in all_nodes:
             predecessors[node] = []
@@ -495,6 +494,9 @@ class AgentDocGenerator:
                     name = f"{name}(submodule)"
                 elif node_id in graph.io_ports:
                     name = f"{name}(port)"
+                elif node_id in graph.seq_cells:
+                    seq_type = graph.seq_cells[node_id] or "seq"
+                    name = f"{name}({seq_type})"
                 names.append(name)
             return ", ".join(names)
         
@@ -580,9 +582,11 @@ class AgentDocGenerator:
             else:
                 continue
             
-            # Connectivity (for both PROC and COMB)
-            block_section.append(f"  - Inputs from: {format_conn_list(predecessors.get(block_id, []), graph)}")
-            block_section.append(f"  - Outputs to: {format_conn_list(successors.get(block_id, []), graph)}")
+            # Block-level connectivity (PROC/COMB only).
+            # Boundary/direct links to ports/submodules/seq cells are listed in
+            # the dedicated section below to avoid semantic ambiguity.
+            block_section.append(f"  - Inputs from blocks: {format_conn_list(predecessors.get(block_id, []), graph)}")
+            block_section.append(f"  - Outputs to blocks: {format_conn_list(successors.get(block_id, []), graph)}")
             
             # Source code
             if include_source:
@@ -598,8 +602,50 @@ class AgentDocGenerator:
         
         # Add all blocks section
         if block_parts:
-            parts.append("## Circuit Blocks (in topological order):")
+            parts.append("## Circuit Blocks (in topological order, block-to-block view):")
             parts.append("\n\n".join(block_parts))
+
+        # Add non-block connectivity section so direct port/submodule/seq links are visible
+        # (e.g., port->port direct assigns in simple modules)
+        boundary_edges: List[Tuple[str, str]] = []
+        for src, dst in graph.edges:
+            src_is_block = src in graph.proc_nodes or src in graph.comb_nodes
+            dst_is_block = dst in graph.proc_nodes or dst in graph.comb_nodes
+            if not (src_is_block and dst_is_block):
+                boundary_edges.append((src, dst))
+
+        if boundary_edges:
+            parts.append("\n## Boundary Connections (including direct links):")
+            for src, dst in sorted(boundary_edges):
+                src_name = self._resolve_node_name_for_desc(src, graph)
+                dst_name = self._resolve_node_name_for_desc(dst, graph)
+                src_type = ""
+                dst_type = ""
+                if src in graph.io_ports:
+                    src_type = "(port)"
+                elif src in graph.submodules:
+                    src_type = "(submodule)"
+                elif src in graph.seq_cells:
+                    seq_type = graph.seq_cells[src] or "seq"
+                    src_type = f"({seq_type})"
+                elif src in graph.proc_nodes:
+                    src_type = "(PROC)"
+                elif src in graph.comb_nodes:
+                    src_type = f"({graph.comb_nodes[src].comb_type})"
+
+                if dst in graph.io_ports:
+                    dst_type = "(port)"
+                elif dst in graph.submodules:
+                    dst_type = "(submodule)"
+                elif dst in graph.seq_cells:
+                    seq_type = graph.seq_cells[dst] or "seq"
+                    dst_type = f"({seq_type})"
+                elif dst in graph.proc_nodes:
+                    dst_type = "(PROC)"
+                elif dst in graph.comb_nodes:
+                    dst_type = f"({graph.comb_nodes[dst].comb_type})"
+
+                parts.append(f"- {src_name}{src_type} -> {dst_name}{dst_type}")
 
         # Submodules with connectivity (alphabetical order)
         if graph.submodules:
@@ -630,6 +676,8 @@ class AgentDocGenerator:
             return graph.io_ports[node_id].strip()[:30]  # Truncate long port names
         if node_id in graph.submodules:
             return graph.submodules[node_id]
+        if node_id in graph.seq_cells:
+            return node_id
         return node_id
 
     def _format_block_summaries(self, module_name: str) -> str:
@@ -2383,764 +2431,16 @@ class AgentDocGenerator:
 
     def clear_pass3_progress(self):
         """Clear pass3 project-level progress state."""
-        self.project_tracker.clear()
-
-    def _project_log_path(self, name: str) -> str:
-        """Get debug log path for project-level pass3 generation."""
-        project_debug_dir = self.debug_dir / "chip"
-        project_debug_dir.mkdir(parents=True, exist_ok=True)
-        return str(project_debug_dir / f"debug_{name}.md")
-
-    def _safe_slug(self, text: str) -> str:
-        """Create filesystem-safe slug for subsystem filenames."""
-        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", text or "")
-        safe = safe.strip("_")
-        return safe or "unknown"
-
-    def _encode_rel_path(self, rel_path: str) -> str:
-        """URL-encode path segments for robust markdown links."""
-        segments = rel_path.replace("\\", "/").split("/")
-        encoded = []
-        for segment in segments:
-            if segment in ("", ".", ".."):
-                encoded.append(segment)
-            else:
-                encoded.append(quote(segment))
-        return "/".join(encoded)
-
-    def _build_instance_path_index(self, root: Any) -> Dict[str, Any]:
-        """Build mapping from instance_path -> hierarchy node.
-
-        Path format: relative to top, joined by '/'.
-        Top node is mapped to empty string "".
-        """
-        index: Dict[str, Any] = {}
-
-        def walk(node: Any, path: str):
-            index[path] = node
-            for child in node.children.values():
-                child_path = f"{path}/{child.instance_name}" if path else child.instance_name
-                walk(child, child_path)
-
-        walk(root, "")
-        return index
-
-    # Pass 3.1 intentionally does NOT provide an instance-path tree or candidate roots list.
-    # The agent should infer a software-visible subsystem partition from existing module docs.
-
-    def _pass3_1_tools(self) -> List[Dict[str, Any]]:
-        """Tool schema for Pass 3.1 agent exploration."""
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "readDoc",
-                    "description": "Read generated RTL documentation for a module. Optionally extract specific markdown sections.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "module": {"type": "string", "description": "RTL module name"},
-                            "doc": {
-                                "type": "string",
-                                "description": "Which doc to read: auto|preview|architecture|description|interface_spec|design_highlights|functional_desc|register_desc|timing_cdc|block_docs|flowchart|metadata",
-                                "default": "auto",
-                            },
-                            "sections": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Heading keywords to extract (e.g. 接口/寄存器/中断/异常/配置). Empty means return full doc (truncated).",
-                            },
-                            "max_chars": {"type": "integer", "description": "Max chars to return", "default": 12000},
-                        },
-                        "required": ["module"],
-                    },
-                },
-            },
-        ]
-
-    def _tool_tree_codebase(
-        self,
-        root: str = "src",
-        max_depth: int = 4,
-        max_entries: int = 400,
-        include_files: bool = True,
-        ignore: Optional[List[str]] = None,
-    ) -> str:
-        """Implementation of treeCodebase tool."""
-        ignore_set = set(ignore or [
-            ".git",
-            ".venv",
-            "__pycache__",
-            ".rtl_cache",
-            "oss-cad-suite",
-            "rtl_docs",
-            "target",
-        ])
-
-        repo_root = Path.cwd()
-        root_path = (repo_root / (root or "src")).resolve()
-        try:
-            root_path.relative_to(repo_root.resolve())
-        except Exception:
-            return "Error: root must be within repo"
-
-        if not root_path.exists() or not root_path.is_dir():
-            return f"Error: root not found or not a directory: {root}"
-
-        lines: List[str] = []
-        entries = 0
-
-        def walk(dir_path: Path, depth: int):
-            nonlocal entries
-            if entries >= max_entries:
-                return
-            if depth > max_depth:
-                return
-
-            try:
-                children = sorted(dir_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-            except Exception:
-                return
-
-            for child in children:
-                if entries >= max_entries:
-                    return
-                if child.name in ignore_set:
-                    continue
-                if child.is_dir():
-                    prefix = "  " * depth
-                    rel = child.relative_to(repo_root).as_posix()
-                    lines.append(f"{prefix}- {rel}/")
-                    entries += 1
-                    walk(child, depth + 1)
-                else:
-                    if not include_files:
-                        continue
-                    prefix = "  " * depth
-                    rel = child.relative_to(repo_root).as_posix()
-                    lines.append(f"{prefix}- {rel}")
-                    entries += 1
-
-        lines.append(f"- {root_path.relative_to(repo_root).as_posix()}/")
-        walk(root_path, 1)
-
-        if entries >= max_entries:
-            lines.append(f"\n[... truncated: reached max_entries={max_entries} ...]")
-
-        return "[treeCodebase]\n\n" + "\n".join(lines)
-
-    def _tool_read_doc(
-        self,
-        module: str,
-        doc: str = "auto",
-        sections: Optional[List[str]] = None,
-        max_chars: int = 12000,
-    ) -> str:
-        """Implementation of readDoc tool."""
-        module_name = (module or "").strip()
-        if not module_name:
-            return "Error: module is empty"
-
-        doc_key = (doc or "auto").strip().lower()
-        name_map = {
-            "preview": "preview.md",
-            "architecture": "architecture.md",
-            "description": "description.md",
-            "interface_spec": "interface_spec.md",
-            "design_highlights": "design_highlights.md",
-            "functional_desc": "functional_desc.md",
-            "register_desc": "register_desc.md",
-            "timing_cdc": "timing_cdc.md",
-            "block_docs": "block_docs.md",
-            "flowchart": "flowchart.mmd",
-            "metadata": "metadata.json",
-        }
-
-        module_dir = self.modules_dir / module_name
-        if not module_dir.exists():
-            return f"Error: module docs not found for '{module_name}'"
-
-        if doc_key == "auto":
-            candidates = ["architecture.md", "description.md", "preview.md", "interface_spec.md"]
-            chosen = None
-            for fn in candidates:
-                p = module_dir / fn
-                if p.exists():
-                    chosen = p
-                    break
-            if chosen is None:
-                return f"Error: no doc files found for '{module_name}'"
-            path = chosen
-        else:
-            fn = name_map.get(doc_key)
-            if not fn:
-                return f"Error: unknown doc type '{doc_key}'"
-            path = module_dir / fn
-
-        if not path.exists():
-            return f"Error: doc file not found: {path.name}"
-
-        try:
-            text = path.read_text(encoding="utf-8")
-        except Exception as e:
-            return f"Error: failed to read {path.name}: {e}"
-
-        # If json, pretty print a little (still bounded)
-        if path.suffix == ".json":
-            try:
-                obj = json.loads(text)
-                text = json.dumps(obj, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
-
-        # Sections extraction
-        extracted_parts: List[str] = []
-        if sections:
-            for sec in sections:
-                sec = (sec or "").strip()
-                if not sec:
-                    continue
-                block = self._extract_named_section(text, [sec])
-                if block:
-                    extracted_parts.append(block)
-            if extracted_parts:
-                text = "\n\n---\n\n".join(extracted_parts)
-
-        # Truncate
-        if max_chars and len(text) > int(max_chars):
-            text = text[: int(max_chars)] + "\n\n[... truncated ...]"
-
-        # Always return with a small header for provenance
-        return f"[readDoc] module={module_name}, file={path.name}\n\n{text}"
+        self.pass3_generator.clear_progress()
 
     async def _run_pass3_1(self, top_node: Any) -> Optional[str]:
-        """Pass 3.1: Generate subsystem partition markdown using Agent exploration."""
-        self.chip_dir.mkdir(parents=True, exist_ok=True)
+        """Pass 3.1: Generate SoC-level subsystem partition markdown using Agent exploration."""
+        return await self.pass3_generator.run_pass3_1(top_node)
 
-        artifact_md = "subsystem_partition.md"
-        out_md = self.chip_dir / artifact_md
-
-        if self.project_tracker.is_done(artifact_md, str(out_md)):
-            try:
-                return out_md.read_text(encoding="utf-8")
-            except Exception:
-                return None
-
-        top_preview = self.tracker.get_pass1_content(top_node.module_name) or "无预览"
-        top_arch = self.tracker.get_pass2_content(top_node.module_name) or self.tracker.get_pass2_7_content(
-            top_node.module_name
-        ) or "无架构摘要"
-        top_overview = "\n\n".join(
-            [
-                "### Top Preview (summary)",
-                self._extract_summary(top_preview, max_lines=10, max_chars=1500),
-                "",
-                "### Top Architecture (summary)",
-                self._extract_summary(top_arch, max_lines=48, max_chars=5000),
-            ]
-        )
-
-        codebase_tree = self._tool_tree_codebase(
-            root="src",
-            max_depth=4,
-            max_entries=300,
-            include_files=True,
-            ignore=[".git", ".venv", "__pycache__", ".rtl_cache", "oss-cad-suite", "rtl_docs", "target"],
-        )
-
-        prompt = PASS3_1_PROMPT.format(
-            top_module=top_node.module_name,
-            top_overview=top_overview,
-            codebase_tree=codebase_tree,
-        )
-
-        # Tool callback
-        def _tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
-            if tool_name == "readDoc":
-                module = args.get("module") or args.get("module_name") or ""
-                doc = args.get("doc") or "auto"
-                sections = args.get("sections")
-                if sections is not None and not isinstance(sections, list):
-                    sections = [str(sections)]
-                max_chars = args.get("max_chars", 12000)
-                try:
-                    max_chars = int(max_chars)
-                except Exception:
-                    max_chars = 12000
-                return self._tool_read_doc(module=str(module), doc=str(doc), sections=sections, max_chars=max_chars)
-
-            return f"Error: unknown tool '{tool_name}'"
-
-        log_path = self._project_log_path("pass3_1_partition")
-        try:
-            content, _token_stats = await self.llm.generate(
-                PASS3_1_SYSTEM,
-                prompt,
-                log_path=log_path,
-                tools_enabled=True,
-                tools=self._pass3_1_tools(),
-                tool_callback=_tool_callback,
-                max_tool_rounds=10,
-            )
-        except Exception as e:
-            self.project_tracker.mark_failed(artifact_md, str(e))
-            return None
-
-        # Write artifact
-        out_md.write_text(content, encoding="utf-8")
-        self.project_tracker.update(artifact_md, content)
-
-        return content
-
-    def _resolve_module_doc_rel_path(self, module_name: str, from_dir: Path) -> str:
-        """Resolve best-effort module doc path with fallback priority.
-
-        Priority: architecture.md -> description.md -> preview.md
-        """
-        module_dir = self.modules_dir / module_name
-        candidates = ["architecture.md", "description.md", "preview.md"]
-
-        target = module_dir / "preview.md"
-        for name in candidates:
-            candidate = module_dir / name
-            if candidate.exists():
-                target = candidate
-                break
-
-        rel_path = os.path.relpath(str(target), str(from_dir))
-        return self._encode_rel_path(rel_path)
-
-    def _collect_subtree_nodes(self, node: Any) -> List[Any]:
-        """Collect all hierarchy nodes under a subtree (including root)."""
-        result: List[Any] = []
-        queue = [node]
-        while queue:
-            current = queue.pop(0)
-            result.append(current)
-            for child in current.children.values():
-                queue.append(child)
-        return result
-
-    def _select_key_nodes(self, subsystem_root: Any) -> List[Any]:
-        """Select key nodes for LLM context to control token usage."""
-        nodes = self._collect_subtree_nodes(subsystem_root)
-
-        def score(n: Any):
-            return (
-                n.depth,
-                -len(n.children),
-                n.module_name,
-                n.instance_name,
-            )
-
-        nodes = sorted(nodes, key=score)
-        limit = max(1, self.pass3_key_modules_per_subsystem)
-        return nodes[:limit]
-
-    def _render_hierarchy_tree_with_links(self, root: Any, from_dir: Path, max_depth: Optional[int] = None) -> str:
-        """Render markdown hierarchy tree with module doc links."""
-        lines: List[str] = []
-
-        def walk(node: Any, depth: int):
-            if max_depth is not None and depth > max_depth:
-                return
-            rel_doc = self._resolve_module_doc_rel_path(node.module_name, from_dir)
-            line = (
-                f"{'  ' * depth}- `{node.instance_name}` ({node.module_name}) "
-                f"→ [module doc]({rel_doc})"
-            )
-            lines.append(line)
-            for child in sorted(node.children.values(), key=lambda c: (c.module_name, c.instance_name)):
-                walk(child, depth + 1)
-
-        walk(root, 0)
-        return "\n".join(lines)
-
-    def _build_module_card(self, node: Any, from_dir: Path) -> str:
-        """Build compact module card used by pass3 prompts."""
-        module_name = node.module_name
-        preview = self.tracker.get_pass1_content(module_name) or "无预览"
-        architecture = self.tracker.get_pass2_7_content(module_name) or ""
-        description = self.tracker.get_pass2_content(module_name) or ""
-        summary_source = architecture or description or preview
-
-        preview_short = self._extract_summary(preview, max_lines=3, max_chars=450)
-        summary_short = self._extract_summary(
-            summary_source,
-            max_lines=max(4, self.pass3_max_card_lines),
-            max_chars=1200,
-        )
-        port_short = self._extract_summary(self.resolver.get_port_summary(module_name), max_lines=8, max_chars=800)
-        rel_doc = self._resolve_module_doc_rel_path(module_name, from_dir)
-
-        return (
-            f"### {node.instance_name} ({module_name})\n"
-            f"- 文档: [module doc]({rel_doc})\n"
-            f"- 子模块数量: {len(node.children)}\n"
-            f"- 预览摘要:\n{preview_short}\n\n"
-            f"- 关键说明:\n{summary_short}\n\n"
-            f"- 端口概览:\n{port_short}\n"
-        )
-
-    def _partition_to_groups(self, partition: Optional[Dict[str, Any]], root: Any) -> Optional[List[Dict[str, Any]]]:
-        """Convert pass3.1 partition JSON into internal group list with resolved nodes."""
-        if not partition or not isinstance(partition, dict):
-            return None
-        subsystems = partition.get("subsystems")
-        if not isinstance(subsystems, list) or not subsystems:
-            return None
-
-        path_index = self._build_instance_path_index(root)
-        groups: List[Dict[str, Any]] = []
-        for ss in subsystems:
-            if not isinstance(ss, dict):
-                continue
-            ss_id = str(ss.get("id") or "")
-            name = str(ss.get("name") or ss_id or "subsystem")
-            roots = ss.get("roots")
-            if not isinstance(roots, list) or not roots:
-                continue
-            root_nodes: List[Tuple[str, Any]] = []
-            for r in roots:
-                if not isinstance(r, dict):
-                    continue
-                path = str(r.get("instance_path") or "").strip().strip("/")
-                if path == "<top>":
-                    path = ""
-                if path not in path_index:
-                    continue
-                node = path_index[path]
-                if self._should_skip(node.module_name):
-                    continue
-                root_nodes.append((path, node))
-            if not root_nodes:
-                continue
-            groups.append({
-                "id": ss_id,
-                "name": name,
-                "root_nodes": root_nodes,
-                "intent": ss.get("intent", ""),
-            })
-        return groups or None
+    async def _run_pass3_2(self, top_node: Any) -> Optional[str]:
+        """Pass 3.2: Generate core microarchitecture partition markdown."""
+        return await self.pass3_generator.run_pass3_2(top_node)
 
     async def _run_pass3(self, root: Any):
         """Run chip-level pass3 generation (overview + subsystem pages)."""
-        self.chip_dir.mkdir(parents=True, exist_ok=True)
-        self.chip_subsystems_dir.mkdir(parents=True, exist_ok=True)
-
-        partition = None
-        try:
-            # Pass 3.1 may have produced JSON; try load it if present
-            partition_path = self.chip_dir / "subsystem_partition.json"
-            if partition_path.exists():
-                partition = json.loads(partition_path.read_text(encoding="utf-8"))
-        except Exception:
-            partition = None
-
-        groups = self._partition_to_groups(partition, root)
-
-        subsystem_entries: List[Dict[str, str]] = []
-        if groups:
-            for g in groups:
-                entry = await self._run_pass3_subsystem_group(root, g)
-                if entry:
-                    subsystem_entries.append(entry)
-        else:
-            for child in sorted(root.children.values(), key=lambda c: (c.module_name, c.instance_name)):
-                if self._should_skip(child.module_name):
-                    continue
-                entry = await self._run_pass3_subsystem(root, child)
-                if entry:
-                    subsystem_entries.append(entry)
-
-        await self._generate_chip_overview(root, subsystem_entries)
-
-    async def _run_pass3_subsystem_group(self, top_node: Any, group: Dict[str, Any]) -> Optional[Dict[str, str]]:
-        """Generate one subsystem overview page for a pass3.1-defined group (multi-root)."""
-        group_name = str(group.get("name") or "subsystem")
-        group_id = str(group.get("id") or "")
-        root_nodes: List[Tuple[str, Any]] = group.get("root_nodes") or []
-        if not root_nodes:
-            return None
-
-        file_name = f"{self._safe_slug(group_id)}__{self._safe_slug(group_name)}.md" if group_id else f"{self._safe_slug(group_name)}.md"
-        artifact = f"subsystems/{file_name}"
-        output_path = self.chip_subsystems_dir / file_name
-
-        if self.project_tracker.is_done(artifact, str(output_path)):
-            content = output_path.read_text(encoding="utf-8")
-            return {
-                "instance": group_name,
-                "module": "multi-root",
-                "artifact": artifact,
-                "summary": self._extract_summary(content, max_lines=12, max_chars=1200),
-            }
-
-        # Collect union of subtree nodes
-        all_nodes: List[Any] = []
-        seen_ids: set = set()
-        for _path, node in root_nodes:
-            for n in self._collect_subtree_nodes(node):
-                nid = id(n)
-                if nid in seen_ids:
-                    continue
-                seen_ids.add(nid)
-                all_nodes.append(n)
-
-        # Key nodes selection from union
-        def score(n: Any):
-            return (n.depth, -len(n.children), n.module_name, n.instance_name)
-
-        key_nodes = sorted(all_nodes, key=score)[: max(1, self.pass3_key_modules_per_subsystem)]
-
-        # Render trees per root
-        tree_parts: List[str] = []
-        for path, node in root_nodes:
-            tree_parts.append(f"### Root: {path} ({node.module_name})")
-            tree_parts.append(
-                self._render_hierarchy_tree_with_links(
-                    node,
-                    from_dir=self.chip_subsystems_dir,
-                    max_depth=self.pass3_tree_max_depth_in_doc,
-                )
-            )
-        subsystem_tree = "\n".join(tree_parts)
-
-        module_cards = []
-        for key_node in key_nodes:
-            module_cards.append(self._build_module_card(key_node, from_dir=self.chip_subsystems_dir))
-        module_cards_text = "\n\n".join(module_cards) if module_cards else "无重点模块卡片"
-
-        # Module table (include instance name only; full path not always available)
-        table_lines = [
-            "| Instance | Module | Children | Link |",
-            "|---|---|---:|---|",
-        ]
-        for n in sorted(all_nodes, key=lambda x: (x.module_name, x.instance_name)):
-            rel_doc = self._resolve_module_doc_rel_path(n.module_name, self.chip_subsystems_dir)
-            table_lines.append(
-                f"| {n.instance_name} | {n.module_name} | {len(n.children)} | [doc]({rel_doc}) |"
-            )
-        module_table = "\n".join(table_lines)
-
-        prompt = PASS3_SUBSYSTEM_PROMPT.format(
-            top_module=top_node.module_name,
-            subsystem_instance=group_name,
-            subsystem_module="multi-root",
-            total_modules=len(all_nodes),
-            key_modules=len(key_nodes),
-            subsystem_tree=subsystem_tree,
-            module_cards=module_cards_text,
-            module_table=module_table,
-        )
-
-        log_path = self._project_log_path(f"pass3_subsystem_group_{self._safe_slug(group_name)}")
-        subsystem_body, _token_stats = await self.llm.generate(
-            PASS3_SUBSYSTEM_SYSTEM,
-            prompt,
-            log_path=log_path,
-            tools_enabled=False,
-        )
-
-        index_block = [
-            f"# Subsystem Overview: {group_name}",
-            "",
-            "## 内嵌索引",
-            "",
-            "### 子系统层次树",
-            subsystem_tree,
-            "",
-            "### 模块链接表",
-            module_table,
-            "",
-            "## 架构叙述",
-            "",
-            subsystem_body,
-            "",
-        ]
-        final_content = "\n".join(index_block)
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(final_content, encoding="utf-8")
-        self.project_tracker.update(artifact, final_content)
-
-        return {
-            "instance": group_name,
-            "module": "multi-root",
-            "artifact": artifact,
-            "summary": self._extract_summary(subsystem_body, max_lines=12, max_chars=1200),
-        }
-
-    async def _run_pass3_subsystem(self, top_node: Any, subsystem_node: Any) -> Optional[Dict[str, str]]:
-        """Generate one subsystem overview page under chip/subsystems/."""
-        file_name = f"{self._safe_slug(subsystem_node.instance_name)}__{self._safe_slug(subsystem_node.module_name)}.md"
-        artifact = f"subsystems/{file_name}"
-        output_path = self.chip_subsystems_dir / file_name
-
-        if self.project_tracker.is_done(artifact, str(output_path)):
-            content = output_path.read_text(encoding="utf-8")
-            return {
-                "instance": subsystem_node.instance_name,
-                "module": subsystem_node.module_name,
-                "artifact": artifact,
-                "summary": self._extract_summary(content, max_lines=12, max_chars=1200),
-            }
-
-        all_nodes = self._collect_subtree_nodes(subsystem_node)
-        key_nodes = self._select_key_nodes(subsystem_node)
-
-        subsystem_tree = self._render_hierarchy_tree_with_links(
-            subsystem_node,
-            from_dir=self.chip_subsystems_dir,
-            max_depth=self.pass3_tree_max_depth_in_doc,
-        )
-
-        module_cards = []
-        for key_node in key_nodes:
-            module_cards.append(self._build_module_card(key_node, from_dir=self.chip_subsystems_dir))
-        module_cards_text = "\n\n".join(module_cards) if module_cards else "无重点模块卡片"
-
-        table_lines = [
-            "| Instance | Module | Children | Link |",
-            "|---|---|---:|---|",
-        ]
-        for n in all_nodes:
-            rel_doc = self._resolve_module_doc_rel_path(n.module_name, self.chip_subsystems_dir)
-            table_lines.append(
-                f"| {n.instance_name} | {n.module_name} | {len(n.children)} | [doc]({rel_doc}) |"
-            )
-        module_table = "\n".join(table_lines)
-
-        prompt = PASS3_SUBSYSTEM_PROMPT.format(
-            top_module=top_node.module_name,
-            subsystem_instance=subsystem_node.instance_name,
-            subsystem_module=subsystem_node.module_name,
-            total_modules=len(all_nodes),
-            key_modules=len(key_nodes),
-            subsystem_tree=subsystem_tree,
-            module_cards=module_cards_text,
-            module_table=module_table,
-        )
-
-        log_path = self._project_log_path(f"pass3_subsystem_{self._safe_slug(subsystem_node.instance_name)}")
-        subsystem_body, _token_stats = await self.llm.generate(
-            PASS3_SUBSYSTEM_SYSTEM,
-            prompt,
-            log_path=log_path,
-            tools_enabled=False,
-        )
-
-        index_block = [
-            f"# Subsystem Overview: {subsystem_node.instance_name} ({subsystem_node.module_name})",
-            "",
-            "## 内嵌索引",
-            "",
-            "### 子系统层次树",
-            subsystem_tree,
-            "",
-            "### 模块链接表",
-            module_table,
-            "",
-            "## 架构叙述",
-            "",
-            subsystem_body,
-            "",
-        ]
-        final_content = "\n".join(index_block)
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(final_content, encoding="utf-8")
-        self.project_tracker.update(artifact, final_content)
-
-        return {
-            "instance": subsystem_node.instance_name,
-            "module": subsystem_node.module_name,
-            "artifact": artifact,
-            "summary": self._extract_summary(subsystem_body, max_lines=12, max_chars=1200),
-        }
-
-    async def _generate_chip_overview(self, top_node: Any, subsystem_entries: List[Dict[str, str]]):
-        """Generate chip/overview.md with embedded index and navigation."""
-        artifact = "overview.md"
-        output_path = self.chip_dir / "overview.md"
-
-        if self.project_tracker.is_done(artifact, str(output_path)):
-            return
-
-        top_preview = self.tracker.get_pass1_content(top_node.module_name) or "无预览"
-        top_architecture = self.tracker.get_pass2_7_content(top_node.module_name) or self.tracker.get_pass2_content(top_node.module_name) or "无架构摘要"
-
-        table_lines = [
-            "| Subsystem Instance | Subsystem Module | Subsystem Page | Module Doc |",
-            "|---|---|---|---|",
-        ]
-        summary_lines = []
-        for entry in subsystem_entries:
-            subsystem_page_rel = self._encode_rel_path(entry["artifact"])
-            module_doc_rel = self._resolve_module_doc_rel_path(entry["module"], self.chip_dir)
-            table_lines.append(
-                f"| {entry['instance']} | {entry['module']} | [overview]({subsystem_page_rel}) | [module doc]({module_doc_rel}) |"
-            )
-            summary_lines.append(
-                f"## {entry['instance']} ({entry['module']})\n{entry['summary']}"
-            )
-
-        subsystem_table = "\n".join(table_lines) if subsystem_entries else "无子系统"
-        subsystem_summaries = "\n\n".join(summary_lines) if summary_lines else "无子系统摘要"
-
-        hierarchy_index = self._render_hierarchy_tree_with_links(
-            top_node,
-            from_dir=self.chip_dir,
-            max_depth=self.pass3_tree_max_depth_in_doc,
-        )
-
-        codebase_tree = self._tool_tree_codebase(
-            root="src",
-            max_depth=4,
-            max_entries=300,
-            include_files=True,
-            ignore=[".git", ".venv", "__pycache__", ".rtl_cache", "oss-cad-suite", "rtl_docs", "target"],
-        )
-
-        prompt = PASS3_1_PROMPT.format(
-            top_module=top_node.module_name,
-            top_preview=self._extract_summary(top_preview, max_lines=6, max_chars=900),
-            top_architecture=self._extract_summary(top_architecture, max_lines=16, max_chars=1800),
-            subsystem_table=subsystem_table,
-            codebase_tree=codebase_tree,
-            subsystem_summaries=subsystem_summaries,
-            hierarchy_index=hierarchy_index,
-        )
-
-        log_path = self._project_log_path("pass3_overview")
-        overview_body, _token_stats = await self.llm.generate(
-            PASS3_SYSTEM,
-            prompt,
-            log_path=log_path,
-            tools_enabled=False,
-        )
-
-        final_parts = [
-            "# CHIP 架构概览",
-            "",
-            "## 内嵌索引",
-            "",
-            "### 子系统划分（Pass 3.1）",
-            "- 子系统划分输出: [subsystem_partition.md](subsystem_partition.md)",
-            "",
-            "### 子系统总览",
-            subsystem_table,
-            "",
-            "### 层次结构索引",
-            hierarchy_index,
-            "",
-            "## 架构叙述",
-            "",
-            overview_body,
-            "",
-        ]
-        final_content = "\n".join(final_parts)
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(final_content, encoding="utf-8")
-        self.project_tracker.update(artifact, final_content)
+        await self.pass3_generator.run_pass3(root)

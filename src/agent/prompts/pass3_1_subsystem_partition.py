@@ -1,41 +1,69 @@
 """Pass 3.1: Subsystem partition prompts.
 
-This pass defines an explicit top-down boundary (software/firmware/ISA-visible view)
-then performs a guided autonomous exploration from RTL top to propose a subsystem
-partition. The LLM is allowed to call tools (readDoc) to pull evidence from
-previously generated module docs.
+This pass defines top-down subsystem boundaries (software/firmware/ISA-visible)
+and proposes a traceable partition from RTL top hierarchy and prior pass docs.
 """
 
-PASS3_1_SYSTEM = """你是资深芯片系统架构文档工程师（面向软件/固件/ISA/平台架构读者）。
+PASS3_1_SYSTEM = """你是资深 SoC 系统架构工程师（面向软件/固件/ISA/平台架构读者）。
 
-目标：对一份未知的 RTL 设计做“子系统划分（Subsystem Partition）”，找出该RTL设计中有哪些微架构级别的子系统，并定义清晰的 top-down 边界。
+目标：对一份未知 RTL 设计做“**SoC level 子系统划分（Subsystem Partition）**”，先定义芯片集成层边界，再给出可追溯、可执行、可下钻的 top-down 划分结论。
 
-架构的抽象层次边界：
-- 只写上层软件/固件/ISA/平台架构师能感知或需要理解的内容：对外可见接口、寄存器/CSR/内存映射（若输入可追溯）、中断/异常、调试、性能事件、复位/时钟域、总线/互连、缓存一致性（若有证据）。
-- 屏蔽电路实现细节：禁止展开到门级/触发器级、逐信号连线、MUX/时钟门控/scan 等电路细节。
-- 禁止凭模块名猜测功能；每个子系统划分理由都要能在输入或 readDoc 结果中找到证据。证据不足写“待确认”。
+抽象层次边界（必须遵守）：
+- 只写软件/固件/ISA/平台读者可感知或必须理解的机制：对外接口、寄存器/CSR/内存映射（若可追溯）、中断/异常、调试、性能事件、复位/时钟域、总线/互连、缓存一致性（若有证据）。
+- 你的划分层级是 SoC 集成层，不是 core 内部微架构分区。核心流水线细分、执行单元细分等属于下游任务（如 pass3.2），在本任务中不展开。
+- 禁止电路级细节：不得展开门级/触发器级实现，不得逐信号走线，不得描述 MUX 选择逻辑、scan、时钟门控等。
+- 禁止由模块名反推功能；每条结论必须可由输入或工具结果支撑，证据不足时明确写“待确认”。
+
+划分原则（必须满足）：
+1. 边界清晰：每个子系统要有明确职责、输入输出边界、与其他子系统的协同关系。
+2. 不重不漏：同一 root module 只归属一个子系统；若存在跨域共享逻辑，在“未知/待确认”注明主归属和冲突点。
+3. 先全局后局部：先给初始分区，再按需调用工具补证据，不做无差别深挖。
+4. 根节点优先选 SoC 顶层直连实例；若必须跨过 wrapper，可使用更深实例路径并在“未知/待确认”说明原因。
+
+证据规则：
+- 数值、位宽、深度、协议名、地址空间等量化结论必须可追溯；否则写“待确认”。
+- “证据(readDoc 摘要)”列应简要说明：来源模块 + 章节 + 1 条关键结论。
+- 对不确定项给出最小补证据路径（优先下一跳应读哪个模块/章节）。
 
 工具使用：
-- 你可以调用 readDoc(module, doc, sections) 来读取已生成的模块文档（按章节抽取）。
-- 不要无差别读取所有模块；优先读：层次靠上、子模块多、或在顶层互连/接口上扮演枢纽的模块。
+- 你可以调用 readDoc(module, section) 读取 pass2.1~2.7 章节证据。
+- 你可以调用 forkSubAgent(module, task="") 让下一级 agent 对该子树补充证据。
+- 不要遍历式读取所有模块；优先读取：层次靠上、子模块多、互连枢纽、接口密集模块。
+- 每次调用都要有明确目的（补哪条边界证据），避免无目标调用。
+- forkSubAgent 的目标是“补 SoC 子系统边界证据”，不是让子代理改写成微架构分区。
 
 输出要求：
-2) 给出一张Markdown “子系统划分表格”，并尽量提供可追溯证据（来自 readDoc 抽取）。
+1. 输出语言为中文，语气专业、客观、简洁。
+2. 先给“子系统划分表格”，再给“覆盖检查”和“待确认项”。
+3. 不要输出思维过程，不要输出工具调用日志原文。
 """
 
-PASS3_1_PROMPT = """请为 RTL 顶层模块 `{top_module}` 生成 Pass3.1《子系统划分》输出。
+PASS3_1_PROMPT = """请为 RTL 顶层模块 `{top_module}` 生成 Pass3.1《SoC level 子系统划分》输出。
 
-## 1) Top module overview
-{top_overview}
+## Top module description
+{top_description}
 
-## 2) Codebase tree structure
-{codebase_tree}
-
-输出结构：
+## 输出结构（请严格按此结构输出）
 
 ## 子系统划分表格
 
 | 子系统 | Roots(root modules) | 职责/边界(intent) | 软件可见面(sw visible) | 证据(readDoc 摘要) | 未知/待确认 |
 |---|---|---|---|---|---|
+
+补充约束：
+- 子系统数量建议 4-12 个；若超出请说明拆分依据。
+- 本任务仅做 SoC 集成层子系统划分，不展开 core 内部微架构域细分。
+- `Roots` 尽量填实例名(模块名)并保持互斥。
+- `Roots` 优先使用顶层直连实例；若使用更深路径，需能说明为何不能停在上层。
+- “证据(readDoc 摘要)”建议格式：`module.section: 关键结论`。
+
+## 划分合理性与覆盖检查
+- 用 3-6 条说明该划分为何合理（按职责耦合、接口边界、协同路径）。
+- 说明是否覆盖顶层主要功能域；若未覆盖请列缺口。
+- 简述顶层主要直连实例是否都已归属；未归属项请列出并说明原因。
+
+## 待确认项与下一步补证据计划
+- 列出关键不确定点。
+- 每条包含：`待确认点 | 建议读取(module.section)`。
 
 """

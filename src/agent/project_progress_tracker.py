@@ -9,7 +9,7 @@ import json
 import os
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 
 @dataclass
@@ -18,9 +18,11 @@ class ProjectArtifactState:
 
     artifact: str
     content_hash: Optional[str] = None
+    input_hash: Optional[str] = None
     status: str = "pending"
     timestamp: Optional[str] = None
     error: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None
 
 
 class ProjectProgressTracker:
@@ -39,7 +41,13 @@ class ProjectProgressTracker:
             with open(self.progress_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             for artifact, state_dict in data.items():
-                self.states[artifact] = ProjectArtifactState(**state_dict)
+                state = ProjectArtifactState(**state_dict)
+                # Crash-safe recovery: stale running state should not block resume.
+                if state.status == "running":
+                    state.status = "failed"
+                    state.error = state.error or "Interrupted before completion"
+                    state.timestamp = datetime.now().isoformat()
+                self.states[artifact] = state
         except Exception as e:
             print(f"[WARN] Failed to load project progress: {e}")
 
@@ -60,17 +68,40 @@ class ProjectProgressTracker:
             self.states[artifact] = ProjectArtifactState(artifact=artifact)
         return self.states[artifact]
 
-    def update(self, artifact: str, content: str):
+    def mark_running(self, artifact: str, input_hash: Optional[str] = None, meta: Optional[Dict[str, Any]] = None):
+        state = self.get_state(artifact)
+        state.status = "running"
+        state.timestamp = datetime.now().isoformat()
+        state.error = None
+        if input_hash:
+            state.input_hash = input_hash
+        if meta is not None:
+            state.meta = meta
+        self.save()
+
+    def update(
+        self,
+        artifact: str,
+        content: str,
+        input_hash: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ):
         state = self.get_state(artifact)
         state.content_hash = self._compute_hash(content)
+        if input_hash is not None:
+            state.input_hash = input_hash
         state.status = "done"
         state.timestamp = datetime.now().isoformat()
         state.error = None
+        if meta is not None:
+            state.meta = meta
         self.save()
 
-    def is_done(self, artifact: str, file_path: str) -> bool:
+    def is_done(self, artifact: str, file_path: str, expected_input_hash: Optional[str] = None) -> bool:
         state = self.states.get(artifact)
         if not state or state.status != "done" or not state.content_hash:
+            return False
+        if expected_input_hash is not None and state.input_hash != expected_input_hash:
             return False
         if not os.path.exists(file_path):
             return False
