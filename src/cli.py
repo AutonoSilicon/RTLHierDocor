@@ -361,6 +361,11 @@ def cmd_docor(args):
         schematic_gen=schematic_gen,
         block_doc_threshold=cfg.block_doc_threshold,
         pass3_enabled=cfg.pass3_enabled,
+        pass3_3_enabled=cfg.pass3_3_enabled,
+        isa_profile=cfg.isa_profile,
+        isa_instructions=cfg.isa_instructions,
+        instrack_single_instruction=cfg.instrack_single_instruction,
+        instrack_use_graph_markers=cfg.instrack_use_graph_markers,
         max_concurrent_modules=cfg.max_concurrent_modules,
     )
 

@@ -56,6 +56,9 @@ from .pass3_1_subsystem_partition import PASS3_1_SYSTEM, PASS3_1_PROMPT
 # Pass 3.2: Core microarchitecture partition (agent exploration)
 from .pass3_2_core_partition import PASS3_2_SYSTEM, PASS3_2_PROMPT
 
+# Pass 3.3: Instruction track (agent exploration)
+from .pass3_3_instrack import PASS3_3_SYSTEM, PASS3_3_PROMPT
+
 __all__ = [
     # Block-level
     "BLOCK_SYSTEM",
@@ -108,4 +111,7 @@ __all__ = [
     # Pass 3.2
     "PASS3_2_SYSTEM",
     "PASS3_2_PROMPT",
+    # Pass 3.3
+    "PASS3_3_SYSTEM",
+    "PASS3_3_PROMPT",
 ]

@@ -13,7 +13,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
-from .prompts import PASS3_1_SYSTEM, PASS3_1_PROMPT, PASS3_2_SYSTEM, PASS3_2_PROMPT
+from .prompts import (
+    PASS3_1_SYSTEM,
+    PASS3_1_PROMPT,
+    PASS3_2_SYSTEM,
+    PASS3_2_PROMPT,
+    PASS3_3_SYSTEM,
+    PASS3_3_PROMPT,
+)
 
 
 class Pass3Generator:
@@ -119,6 +126,115 @@ class Pass3Generator:
             "tools_schema": self._pass3_2_tools(),
         }
         return self._hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    def _build_pass3_3_input_hash(
+        self,
+        top_module: str,
+        instruction: str,
+        top_description: str,
+        core_partition: str,
+    ) -> str:
+        payload = {
+            "version": "pass3_3_instrack_cache_v1",
+            "top_module": top_module,
+            "instruction": instruction,
+            "system_prompt": PASS3_3_SYSTEM,
+            "prompt_template": PASS3_3_PROMPT,
+            "top_description_hash": self._hash_text(top_description),
+            "core_partition_hash": self._hash_text(core_partition),
+            "tools_schema": self._pass3_3_tools(),
+        }
+        return self._hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    @staticmethod
+    def _instruction_profiles() -> Dict[str, List[str]]:
+        rv64i = [
+            "LUI", "AUIPC", "JAL", "JALR", "BEQ", "BNE", "BLT", "BGE", "BLTU", "BGEU",
+            "LB", "LH", "LW", "LBU", "LHU", "LWU", "LD",
+            "SB", "SH", "SW", "SD",
+            "ADDI", "SLTI", "SLTIU", "XORI", "ORI", "ANDI", "SLLI", "SRLI", "SRAI",
+            "ADDIW", "SLLIW", "SRLIW", "SRAIW",
+            "ADD", "SUB", "SLL", "SLT", "SLTU", "XOR", "SRL", "SRA", "OR", "AND",
+            "ADDW", "SUBW", "SLLW", "SRLW", "SRAW",
+            "FENCE", "ECALL", "EBREAK",
+        ]
+        zifencei = ["FENCE.I"]
+        zicsr = ["CSRRW", "CSRRS", "CSRRC", "CSRRWI", "CSRRSI", "CSRRCI"]
+        rv64m = [
+            "MUL", "MULH", "MULHSU", "MULHU", "DIV", "DIVU", "REM", "REMU",
+            "MULW", "DIVW", "DIVUW", "REMW", "REMUW",
+        ]
+        rv64a = [
+            "LR.W", "SC.W", "AMOSWAP.W", "AMOADD.W", "AMOXOR.W", "AMOAND.W", "AMOOR.W", "AMOMIN.W", "AMOMAX.W", "AMOMINU.W", "AMOMAXU.W",
+            "LR.D", "SC.D", "AMOSWAP.D", "AMOADD.D", "AMOXOR.D", "AMOAND.D", "AMOOR.D", "AMOMIN.D", "AMOMAX.D", "AMOMINU.D", "AMOMAXU.D",
+        ]
+        rv64f = [
+            "FLW", "FSW",
+            "FMADD.S", "FMSUB.S", "FNMSUB.S", "FNMADD.S",
+            "FADD.S", "FSUB.S", "FMUL.S", "FDIV.S", "FSQRT.S",
+            "FSGNJ.S", "FSGNJN.S", "FSGNJX.S", "FMIN.S", "FMAX.S",
+            "FCVT.W.S", "FCVT.WU.S", "FCVT.L.S", "FCVT.LU.S",
+            "FCVT.S.W", "FCVT.S.WU", "FCVT.S.L", "FCVT.S.LU",
+            "FMV.X.W", "FMV.W.X",
+            "FEQ.S", "FLT.S", "FLE.S", "FCLASS.S",
+        ]
+        rv64d = [
+            "FLD", "FSD",
+            "FMADD.D", "FMSUB.D", "FNMSUB.D", "FNMADD.D",
+            "FADD.D", "FSUB.D", "FMUL.D", "FDIV.D", "FSQRT.D",
+            "FSGNJ.D", "FSGNJN.D", "FSGNJX.D", "FMIN.D", "FMAX.D",
+            "FCVT.W.D", "FCVT.WU.D", "FCVT.L.D", "FCVT.LU.D",
+            "FCVT.D.W", "FCVT.D.WU", "FCVT.D.L", "FCVT.D.LU",
+            "FCVT.S.D", "FCVT.D.S",
+            "FMV.X.D", "FMV.D.X",
+            "FEQ.D", "FLT.D", "FLE.D", "FCLASS.D",
+        ]
+        rv64c = [
+            "C.ADDI4SPN",
+            "C.FLD", "C.LW", "C.LD", "C.FSD", "C.SW", "C.SD",
+            "C.NOP", "C.ADDI", "C.ADDIW", "C.LI", "C.ADDI16SP", "C.LUI",
+            "C.SRLI", "C.SRAI", "C.ANDI", "C.SUB", "C.XOR", "C.OR", "C.AND", "C.SUBW", "C.ADDW",
+            "C.J", "C.BEQZ", "C.BNEZ",
+            "C.SLLI", "C.FLDSP", "C.LWSP", "C.LDSP", "C.JR", "C.MV", "C.EBREAK", "C.JALR", "C.ADD",
+            "C.FSDSP", "C.SWSP", "C.SDSP",
+        ]
+        return {
+            "rv64i": rv64i + zifencei + zicsr,
+            "rv64gc": rv64i + zifencei + zicsr + rv64m + rv64a + rv64f + rv64d + rv64c,
+            # c910 default profile keeps common integer/system instructions for phase-1 throughput.
+            "c910": rv64i + zifencei + zicsr + rv64m + rv64a + ["MRET", "SRET", "WFI"],
+        }
+
+    @staticmethod
+    def _normalize_instruction(inst: str) -> str:
+        text = (inst or "").strip().upper()
+        return re.sub(r"\s+", "", text)
+
+    def _resolve_instrack_instructions(self) -> List[str]:
+        single = self._normalize_instruction(getattr(self.owner, "instrack_single_instruction", "") or "")
+        if single:
+            return [single]
+
+        configured = [
+            self._normalize_instruction(i)
+            for i in (getattr(self.owner, "isa_instructions", []) or [])
+            if self._normalize_instruction(i)
+        ]
+        if configured:
+            # Keep insertion order while de-duplicating.
+            seen = set()
+            ordered: List[str] = []
+            for inst in configured:
+                if inst in seen:
+                    continue
+                seen.add(inst)
+                ordered.append(inst)
+            return ordered
+
+        profile = str(getattr(self.owner, "isa_profile", "c910") or "c910").strip().lower()
+        profiles = self._instruction_profiles()
+        base = profiles.get(profile, profiles["c910"])
+        return [self._normalize_instruction(i) for i in base if self._normalize_instruction(i)]
 
     @staticmethod
     def _safe_slug(text: str) -> str:
@@ -333,6 +449,72 @@ class Pass3Generator:
             "micro_domains": micro_domains,
         }
 
+    def _extract_pass3_3_instrack_json(
+        self,
+        markdown: str,
+        top_node: Any,
+        instruction: str,
+    ) -> Dict[str, Any]:
+        content = (markdown or "").strip()
+        out: Dict[str, Any] = {
+            "top_module": top_node.module_name,
+            "instruction": instruction,
+            "route_instances": [],
+            "route_modules": [],
+            "evidence": "",
+            "unknown": "",
+            "verification_mode": "doc_evidence",
+        }
+        if not content:
+            return out
+
+        table_lines = [line.strip() for line in content.splitlines() if line.strip().startswith("|")]
+        if len(table_lines) < 3:
+            out["raw_summary"] = self.owner._extract_summary(content, max_lines=24, max_chars=3000)
+            return out
+
+        header_cells = [c.strip() for c in table_lines[0].strip('|').split('|')]
+        header_map = {cell: idx for idx, cell in enumerate(header_cells)}
+        idx_inst = header_map.get("指令", 0)
+        idx_route_inst = header_map.get("路线(实例路径链)", 1)
+        idx_route_mod = header_map.get("路线(模块链)", 2)
+        idx_evidence = header_map.get("证据(readDoc 摘要)", 3)
+        idx_unknown = header_map.get("未知/待确认", 4)
+
+        target_row: Optional[List[str]] = None
+        normalized_target = self._normalize_instruction(instruction)
+        for line in table_lines[2:]:
+            cells = [c.strip() for c in line.strip('|').split('|')]
+            if len(cells) < 3:
+                continue
+            inst = cells[idx_inst] if idx_inst < len(cells) else ""
+            if self._normalize_instruction(inst) == normalized_target:
+                target_row = cells
+                break
+            if target_row is None:
+                target_row = cells
+
+        if not target_row:
+            out["raw_summary"] = self.owner._extract_summary(content, max_lines=24, max_chars=3000)
+            return out
+
+        route_inst_text = target_row[idx_route_inst] if idx_route_inst < len(target_row) else ""
+        route_mod_text = target_row[idx_route_mod] if idx_route_mod < len(target_row) else ""
+        evidence_text = target_row[idx_evidence] if idx_evidence < len(target_row) else ""
+        unknown_text = target_row[idx_unknown] if idx_unknown < len(target_row) else ""
+
+        def _split_chain(text: str) -> List[str]:
+            chain = (text or "").replace("→", "->").replace("=>", "->")
+            parts = [p.strip() for p in chain.split("->") if p.strip()]
+            return parts
+
+        out["route_instances"] = _split_chain(route_inst_text)
+        out["route_modules"] = _split_chain(route_mod_text)
+        out["evidence"] = evidence_text
+        out["unknown"] = unknown_text
+        out["raw_summary"] = self.owner._extract_summary(content, max_lines=24, max_chars=3000)
+        return out
+
     @staticmethod
     def _contains_any(text: str, keywords: List[str]) -> List[str]:
         t = (text or "").lower()
@@ -446,6 +628,94 @@ class Pass3Generator:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _classify_instruction(instruction: str) -> str:
+        inst = (instruction or "").upper()
+        if not inst:
+            return "unknown"
+        if inst.startswith("C."):
+            return "compressed"
+        if inst in {"JAL", "JALR", "BEQ", "BNE", "BLT", "BGE", "BLTU", "BGEU"}:
+            return "branch_jump"
+        if inst.startswith("AMO") or inst.startswith("LR.") or inst.startswith("SC."):
+            return "atomic"
+        if inst.startswith("CSR") or inst in {"ECALL", "EBREAK", "MRET", "SRET", "WFI", "FENCE", "FENCE.I"}:
+            return "system"
+        if inst.startswith("L") and inst not in {"LUI"}:
+            return "load"
+        if inst.startswith("S") and inst not in {"SLT", "SLTI", "SLTU", "SLTIU", "SLL", "SLLI", "SRL", "SRLI", "SRA", "SRAI", "SUB"}:
+            return "store"
+        if inst.startswith("MUL") or inst.startswith("DIV") or inst.startswith("REM"):
+            return "muldiv"
+        return "integer"
+
+    def _tool_explore_inst_route(self, top_node: Any, instruction: str, max_domains: int = 12) -> str:
+        category = self._classify_instruction(instruction)
+        core_json_path = self.owner.chip_dir / "core_partition.json"
+        domains: List[Dict[str, Any]] = []
+        if core_json_path.exists():
+            try:
+                data = json.loads(core_json_path.read_text(encoding="utf-8"))
+                values = data.get("micro_domains")
+                if isinstance(values, list):
+                    domains = [d for d in values if isinstance(d, dict)]
+            except Exception:
+                domains = []
+
+        keyword_map: Dict[str, List[str]] = {
+            "integer": ["ifu", "idu", "iu", "rtu"],
+            "branch_jump": ["ifu", "idu", "iu", "rtu", "pc"],
+            "load": ["ifu", "idu", "lsu", "biu", "rtu"],
+            "store": ["ifu", "idu", "lsu", "biu", "rtu"],
+            "system": ["ifu", "idu", "cp0", "rtu", "had"],
+            "atomic": ["ifu", "idu", "lsu", "biu", "rtu"],
+            "muldiv": ["ifu", "idu", "iu", "rtu"],
+            "compressed": ["ifu", "idu", "iu", "rtu"],
+            "unknown": ["ifu", "idu", "iu", "lsu", "rtu"],
+        }
+        keywords = keyword_map.get(category, keyword_map["unknown"])
+
+        ranked: List[Tuple[int, Dict[str, Any]]] = []
+        for domain in domains:
+            name = str(domain.get("name") or "").lower()
+            intent = str(domain.get("intent") or "").lower()
+            evidence = str(domain.get("evidence") or "").lower()
+            text = f"{name} {intent} {evidence}"
+            score = 0
+            for kw in keywords:
+                if kw in text:
+                    score += 10
+            if score > 0:
+                ranked.append((score, domain))
+
+        ranked.sort(key=lambda x: -x[0])
+        lines = [
+            f"[exploreInstRoute] instruction={instruction}",
+            f"- category: {category}",
+            f"- keywords: {', '.join(keywords)}",
+            "",
+        ]
+        if not ranked:
+            lines.append("No strong domain match from core_partition.json; fallback to exploreCore + readDoc is recommended.")
+            return "\n".join(lines)
+
+        lines.append("## Candidate Micro Domains")
+        lines.append("| Rank | Score | Domain | Roots | Evidence |")
+        lines.append("|---:|---:|---|---|---|")
+        for idx, (score, domain) in enumerate(ranked[: max(1, min(max_domains, 24))], start=1):
+            roots = domain.get("roots") or []
+            root_paths = []
+            for root in roots:
+                if isinstance(root, dict):
+                    path = str(root.get("instance_path") or "")
+                    if path:
+                        root_paths.append(path)
+            lines.append(
+                f"| {idx} | {score} | {domain.get('name', '')} | {', '.join(root_paths) or '-'} | {domain.get('evidence', '')} |"
+            )
+
+        return "\n".join(lines)
+
     def _pass3_1_tools(self) -> List[Dict[str, Any]]:
         return [
             {
@@ -543,6 +813,101 @@ class Pass3Generator:
                             "section": {
                                 "type": "string",
                                 "description": "Convenience alias for one section keyword (equivalent to sections=[section]).",
+                            },
+                            "max_chars": {"type": "integer", "description": "Max chars to return", "default": 12000},
+                        },
+                        "required": ["module"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "forkSubAgent",
+                    "description": "Delegate deeper analysis to a child-level recursive agent. Only direct children of top are allowed.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "module": {
+                                "type": "string",
+                                "description": "Target child module selector (instance_name or module_name).",
+                            },
+                            "task": {
+                                "type": "string",
+                                "description": "Task for child agent.",
+                                "default": "",
+                            },
+                        },
+                        "required": ["module"],
+                    },
+                },
+            },
+        ]
+
+    def _pass3_3_tools(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "exploreCore",
+                    "description": "Agent Explore mode: find likely core roots and rank candidates by hierarchy/data evidence.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "max_candidates": {
+                                "type": "integer",
+                                "description": "Maximum ranked candidates to return (1-20).",
+                                "default": 10,
+                            },
+                        },
+                        "required": [],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "exploreInstRoute",
+                    "description": "Rank likely instruction-route micro-domains for one instruction using core partition evidence.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "instruction": {
+                                "type": "string",
+                                "description": "Instruction mnemonic, e.g. ADD, BEQ, LD, CSRRW.",
+                            },
+                            "max_domains": {
+                                "type": "integer",
+                                "description": "Maximum candidate domains to return (1-24).",
+                                "default": 12,
+                            },
+                        },
+                        "required": ["instruction"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "readDoc",
+                    "description": "Read generated RTL documentation for a module. Optionally extract specific markdown sections.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "module": {"type": "string", "description": "RTL module name"},
+                            "doc": {
+                                "type": "string",
+                                "description": "Which doc to read: auto|preview|architecture|description|interface_spec|design_highlights|functional_desc|register_desc|timing_cdc|block_docs|flowchart|metadata",
+                                "default": "auto",
+                            },
+                            "sections": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Heading keywords to extract.",
+                            },
+                            "section": {
+                                "type": "string",
+                                "description": "Convenience alias for one section keyword.",
                             },
                             "max_chars": {"type": "integer", "description": "Max chars to return", "default": 12000},
                         },
@@ -747,6 +1112,14 @@ class Pass3Generator:
         )
 
     def _build_pass3_recursive_system(self, prompt_style: str = "architecture") -> str:
+        if prompt_style == "instrack":
+            return (
+                "你是指令流向分析子代理。目标是为单条指令补充当前层级的模块流向证据。\n"
+                "你只能读取本级和直接子级文档；更深层必须 forkSubAgent。\n"
+                "输出聚焦：候选路径、保留/剔除理由、最终实例路径链、证据与待确认项。\n"
+                "禁止臆断，证据不足时明确写待确认。"
+            )
+
         if prompt_style != "partition":
             return (
                 "你是芯片架构文档Agent。请以top-down方式输出本层级架构结论和任务拆解。\n"
@@ -774,6 +1147,25 @@ class Pass3Generator:
         child_overview: str,
         prompt_style: str = "architecture",
     ) -> str:
+        if prompt_style == "instrack":
+            return (
+                f"# Recursive Pass3.3 InStrack Agent\n\n"
+                f"- Top module: {top_node.module_name}\n"
+                f"- Current level: {level}\n"
+                f"- Current node: {current_node.instance_name} ({current_node.module_name})\n"
+                f"- Task: {task}\n\n"
+                "## Current module description\n"
+                f"{self.owner._extract_summary(current_description, max_lines=20, max_chars=2400)}\n\n"
+                "## Direct children snapshot\n"
+                f"{child_overview}\n\n"
+                "请按以下结构输出：\n"
+                "## 候选路径\n"
+                "## 裁剪理由\n"
+                "## 最终实例路径链\n"
+                "## 证据\n"
+                "## 待确认项\n"
+            )
+
         if prompt_style != "partition":
             return (
                 f"# Recursive Pass3 Agent\n\n"
@@ -1535,6 +1927,197 @@ class Pass3Generator:
             )
 
         return content
+
+    async def run_pass3_3(self, top_node: Any) -> Optional[str]:
+        if not getattr(self.owner, "pass3_3_enabled", True):
+            return None
+
+        self.owner.chip_dir.mkdir(parents=True, exist_ok=True)
+        instrack_dir = self.owner.chip_dir / "instrack"
+        instrack_dir.mkdir(parents=True, exist_ok=True)
+
+        instructions = self._resolve_instrack_instructions()
+        if not instructions:
+            return None
+
+        top_description = self.owner.tracker.get_pass2_content(top_node.module_name) or ""
+        if not top_description:
+            top_description = self.owner.tracker.get_pass2_7_content(top_node.module_name) or ""
+        if not top_description:
+            top_description = self.owner.tracker.get_pass1_content(top_node.module_name) or "无可用 description 文档"
+
+        pass3_2_path = self.owner.chip_dir / "core_partition.md"
+        core_partition_text = "未检测到 pass3.2 输出，可结合 exploreCore/readDoc 工具补齐证据。"
+        if pass3_2_path.exists():
+            try:
+                core_partition_text = pass3_2_path.read_text(encoding="utf-8")
+            except Exception:
+                pass
+
+        index_entries: List[Dict[str, Any]] = []
+
+        for instruction in instructions:
+            slug = self._safe_slug(instruction)
+            artifact_md = f"instrack/{slug}.md"
+            artifact_json = f"instrack/{slug}.json"
+            out_md = instrack_dir / f"{slug}.md"
+            out_json = instrack_dir / f"{slug}.json"
+
+            input_hash = self._build_pass3_3_input_hash(
+                top_module=top_node.module_name,
+                instruction=instruction,
+                top_description=top_description,
+                core_partition=core_partition_text,
+            )
+
+            content: Optional[str] = None
+            if self.owner.project_tracker.is_done(artifact_md, str(out_md), expected_input_hash=input_hash):
+                try:
+                    content = out_md.read_text(encoding="utf-8")
+                except Exception:
+                    content = None
+
+            if content is None:
+                prompt = PASS3_3_PROMPT.format(
+                    top_module=top_node.module_name,
+                    instruction=instruction,
+                    top_description=top_description,
+                    core_partition=self.owner._extract_summary(core_partition_text, max_lines=80, max_chars=12000),
+                )
+
+                async def _tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
+                    if tool_name == "exploreCore":
+                        max_candidates = args.get("max_candidates", 10)
+                        try:
+                            max_candidates = int(max_candidates)
+                        except Exception:
+                            max_candidates = 10
+                        return self._tool_explore_core(top_node, max_candidates=max_candidates)
+
+                    if tool_name == "exploreInstRoute":
+                        tool_instruction = str(args.get("instruction") or instruction)
+                        max_domains = args.get("max_domains", 12)
+                        try:
+                            max_domains = int(max_domains)
+                        except Exception:
+                            max_domains = 12
+                        return self._tool_explore_inst_route(top_node, tool_instruction, max_domains=max_domains)
+
+                    if tool_name == "readDoc":
+                        module = args.get("module") or args.get("module_name") or ""
+                        doc = args.get("doc") or "auto"
+                        sections = args.get("sections")
+                        section = args.get("section")
+                        if section and sections is None:
+                            sections = [str(section)]
+                        if sections is not None and not isinstance(sections, list):
+                            sections = [str(sections)]
+                        max_chars = args.get("max_chars", 12000)
+                        try:
+                            max_chars = int(max_chars)
+                        except Exception:
+                            max_chars = 12000
+                        return self._tool_read_doc(module=str(module), doc=str(doc), sections=sections, max_chars=max_chars)
+
+                    if tool_name == "forkSubAgent":
+                        module = str(args.get("module") or "")
+                        task = str(args.get("task") or "").strip()
+                        child_node, error = self._resolve_scope_node(top_node, module, child_only=True)
+                        if child_node is None:
+                            return error
+                        if not task:
+                            task = (
+                                f"请针对指令 {instruction}，分析 {child_node.instance_name}({child_node.module_name}) 层级中的模块流向证据，"
+                                "仅输出路径证据与待确认项，并按需继续 fork。"
+                            )
+                        report = await self._run_pass3_recursive_agent(
+                            top_node=top_node,
+                            current_node=child_node,
+                            task=task,
+                            level=1,
+                            prompt_style="instrack",
+                        )
+                        if len(report) > 16000:
+                            report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
+                        return (
+                            f"[forkSubAgent] child={child_node.instance_name}({child_node.module_name}), level=1\n\n"
+                            f"{report}"
+                        )
+
+                    return f"Error: unknown tool '{tool_name}'"
+
+                log_path = self._project_log_path(f"pass3_3_instrack_{slug}")
+                self.owner.project_tracker.mark_running(
+                    artifact_md,
+                    input_hash=input_hash,
+                    meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3"},
+                )
+
+                try:
+                    content, _token_stats = await self.owner.llm.generate(
+                        PASS3_3_SYSTEM,
+                        prompt,
+                        log_path=log_path,
+                        tools_enabled=True,
+                        tools=self._pass3_3_tools(),
+                        tool_callback=_tool_callback,
+                        max_tool_rounds=12,
+                    )
+                except Exception as e:
+                    self.owner.project_tracker.mark_failed(artifact_md, str(e))
+                    index_entries.append({
+                        "instruction": instruction,
+                        "slug": slug,
+                        "status": "failed",
+                        "error": str(e),
+                    })
+                    continue
+
+                out_md.write_text(content, encoding="utf-8")
+                self.owner.project_tracker.update(
+                    artifact_md,
+                    content,
+                    input_hash=input_hash,
+                    meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3"},
+                )
+
+            parsed = self._extract_pass3_3_instrack_json(content or "", top_node, instruction)
+            json_text = json.dumps(parsed, ensure_ascii=False, indent=2)
+            out_json.write_text(json_text, encoding="utf-8")
+            self.owner.project_tracker.update(
+                artifact_json,
+                json_text,
+                input_hash=input_hash,
+                meta={"source": artifact_md, "parser": "instrack_table_v1"},
+            )
+
+            index_entries.append({
+                "instruction": instruction,
+                "slug": slug,
+                "status": "done",
+                "artifact_md": artifact_md,
+                "artifact_json": artifact_json,
+                "route_instance_count": len(parsed.get("route_instances") or []),
+                "route_module_count": len(parsed.get("route_modules") or []),
+            })
+
+        index_payload = {
+            "top_module": top_node.module_name,
+            "isa_profile": getattr(self.owner, "isa_profile", "c910"),
+            "total": len(index_entries),
+            "entries": index_entries,
+        }
+        index_text = json.dumps(index_payload, ensure_ascii=False, indent=2)
+        index_path = instrack_dir / "index.json"
+        index_path.write_text(index_text, encoding="utf-8")
+        self.owner.project_tracker.update(
+            "instrack/index.json",
+            index_text,
+            input_hash=self._hash_text(index_text),
+            meta={"pass": "pass3_3", "type": "instrack_index"},
+        )
+
+        return index_text
 
     def _resolve_module_doc_rel_path(self, module_name: str, from_dir: Path) -> str:
         module_dir = self.owner.modules_dir / module_name

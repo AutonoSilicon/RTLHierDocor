@@ -185,6 +185,11 @@ class ProjectConfig:
     max_modules: int = 0  # 0 for unlimited
     block_doc_threshold: int = 64  # Min lines for block-level LLM call
     pass3_enabled: bool = True  # Enable Pass 3 (chip-level overview & subsystem docs)
+    pass3_3_enabled: bool = True  # Enable Pass 3.3 (instrack)
+    isa_profile: str = "c910"  # Instruction profile: c910|rv64i|rv64gc
+    isa_instructions: List[str] = field(default_factory=list)  # Explicit instruction list override
+    instrack_single_instruction: Optional[str] = None  # Run only one instruction when set
+    instrack_use_graph_markers: bool = False  # Phase-2 switch (kept for forward compatibility)
     max_concurrent_modules: int = 4  # Max concurrent LLM requests per pass
 
     @classmethod
@@ -279,6 +284,17 @@ class ProjectConfig:
                 config.block_doc_threshold = int(agent['block_doc_threshold'])
             if 'pass3_enabled' in agent:
                 config.pass3_enabled = bool(agent['pass3_enabled'])
+            if 'pass3_3_enabled' in agent:
+                config.pass3_3_enabled = bool(agent['pass3_3_enabled'])
+            if 'isa_profile' in agent:
+                config.isa_profile = str(agent['isa_profile'])
+            if 'isa_instructions' in agent and isinstance(agent['isa_instructions'], list):
+                config.isa_instructions = [str(i) for i in agent['isa_instructions'] if str(i).strip()]
+            if 'instrack_single_instruction' in agent:
+                text = str(agent['instrack_single_instruction']).strip()
+                config.instrack_single_instruction = text or None
+            if 'instrack_use_graph_markers' in agent:
+                config.instrack_use_graph_markers = bool(agent['instrack_use_graph_markers'])
             if 'max_concurrent_modules' in agent:
                 config.max_concurrent_modules = int(agent['max_concurrent_modules'])
 

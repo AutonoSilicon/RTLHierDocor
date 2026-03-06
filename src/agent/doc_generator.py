@@ -63,6 +63,11 @@ class AgentDocGenerator:
         schematic_gen: Optional[Any] = None,
         block_doc_threshold: int = 64,
         pass3_enabled: bool = True,
+        pass3_3_enabled: bool = True,
+        isa_profile: str = "c910",
+        isa_instructions: Optional[List[str]] = None,
+        instrack_single_instruction: Optional[str] = None,
+        instrack_use_graph_markers: bool = False,
         pass3_output_subdir: str = "chip",
         pass3_key_modules_per_subsystem: int = 24,
         pass3_max_card_lines: int = 12,
@@ -81,6 +86,11 @@ class AgentDocGenerator:
         self.schematic_gen = schematic_gen
         self.block_doc_threshold = block_doc_threshold
         self.pass3_enabled = pass3_enabled
+        self.pass3_3_enabled = pass3_3_enabled
+        self.isa_profile = isa_profile
+        self.isa_instructions = isa_instructions or []
+        self.instrack_single_instruction = instrack_single_instruction
+        self.instrack_use_graph_markers = instrack_use_graph_markers
         self.pass3_output_subdir = pass3_output_subdir
         self.pass3_key_modules_per_subsystem = pass3_key_modules_per_subsystem
         self.pass3_max_card_lines = pass3_max_card_lines
@@ -178,6 +188,10 @@ class AgentDocGenerator:
 
             print("[INFO] Running Pass 3.2: Core Microarchitecture Partition (Agent Explore)...")
             await self._run_pass3_2(self.hierarchy)
+
+            if self.pass3_3_enabled:
+                print("[INFO] Running Pass 3.3: InStrack (Instruction Route Tracking)...")
+                await self._run_pass3_3(self.hierarchy)
 
             print("[INFO] Running Pass 3: Chip-level Overview & Subsystem Overview...")
             await self._run_pass3(self.hierarchy)
@@ -2440,6 +2454,10 @@ class AgentDocGenerator:
     async def _run_pass3_2(self, top_node: Any) -> Optional[str]:
         """Pass 3.2: Generate core microarchitecture partition markdown."""
         return await self.pass3_generator.run_pass3_2(top_node)
+
+    async def _run_pass3_3(self, top_node: Any) -> Optional[str]:
+        """Pass 3.3: Generate per-instruction instrack artifacts."""
+        return await self.pass3_generator.run_pass3_3(top_node)
 
     async def _run_pass3(self, root: Any):
         """Run chip-level pass3 generation (overview + subsystem pages)."""
