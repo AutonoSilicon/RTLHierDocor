@@ -36,5 +36,12 @@ agent:
   max_modules: 0
   max_concurrent_modules: 16
 
-  # Enable chip/subsystem level docs for complete full-design output
+  # Run pass3.1/pass3.2/pass3.3 only (final pass3 overview is skipped in code flow)
   pass3_enabled: true
+  pass3_3_enabled: true
+
+  # Development-time instrack scope: only test three instructions
+  isa_instructions:
+    - "ADD"
+    - "MUL"
+    - "DIV"

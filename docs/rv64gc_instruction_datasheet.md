@@ -3306,15 +3306,15 @@
 - 指令形式: `C.FLD rd', offset(rs1')`
 - 所属扩展: `C`
 - 编码格式: `CL`
-- 类汇编软件表达式: `f[rd'] = M[x[rs1'] + zext(uimm << 3)][63:0]`
+- 类汇编软件表达式: `f[rd'] = M[x[rs1'] + zext(offset)][63:0]`
 - inst bit range:
 
 | Inst bit range | Field |
 |---|---|
 | `inst[15:13]` | `001` |
-| `inst[12:10]` | `uimm[5:3]` |
+| `inst[12:10]` | `offset[5:3]` |
 | `inst[9:7]` | `rs1'` |
-| `inst[6:5]` | `uimm[7:6]` |
+| `inst[6:5]` | `offset[7:6]` |
 | `inst[4:2]` | `rd'` |
 | `inst[1:0]` | `00` |
 
@@ -3326,16 +3326,16 @@
 - 指令形式: `C.LW rd', offset(rs1')`
 - 所属扩展: `C`
 - 编码格式: `CL`
-- 类汇编软件表达式: `x[rd'] = sext(M[x[rs1'] + zext(uimm << 2)][31:0])`
+- 类汇编软件表达式: `x[rd'] = sext(M[x[rs1'] + zext(offset)][31:0])`
 - inst bit range:
 
 | Inst bit range | Field |
 |---|---|
 | `inst[15:13]` | `010` |
-| `inst[12:10]` | `uimm[5:3]` |
+| `inst[12:10]` | `offset[5:3]` |
 | `inst[9:7]` | `rs1'` |
-| `inst[6]` | `uimm[2]` |
-| `inst[5]` | `uimm[6]` |
+| `inst[6]` | `offset[2]` |
+| `inst[5]` | `offset[6]` |
 | `inst[4:2]` | `rd'` |
 | `inst[1:0]` | `00` |
 
@@ -3347,15 +3347,15 @@
 - 指令形式: `C.LD rd', offset(rs1')`
 - 所属扩展: `C`
 - 编码格式: `CL`
-- 类汇编软件表达式: `x[rd'] = M[x[rs1'] + zext(uimm << 3)][63:0]`
+- 类汇编软件表达式: `x[rd'] = M[x[rs1'] + zext(offset)][63:0]`
 - inst bit range:
 
 | Inst bit range | Field |
 |---|---|
 | `inst[15:13]` | `011` |
-| `inst[12:10]` | `uimm[5:3]` |
+| `inst[12:10]` | `offset[5:3]` |
 | `inst[9:7]` | `rs1'` |
-| `inst[6:5]` | `uimm[7:6]` |
+| `inst[6:5]` | `offset[7:6]` |
 | `inst[4:2]` | `rd'` |
 | `inst[1:0]` | `00` |
 
@@ -3367,15 +3367,15 @@
 - 指令形式: `C.FSD rs2', offset(rs1')`
 - 所属扩展: `C`
 - 编码格式: `CS`
-- 类汇编软件表达式: `M[x[rs1'] + zext(uimm << 3)][63:0] = f[rs2'][63:0]`
+- 类汇编软件表达式: `M[x[rs1'] + zext(offset)][63:0] = f[rs2'][63:0]`
 - inst bit range:
 
 | Inst bit range | Field |
 |---|---|
 | `inst[15:13]` | `101` |
-| `inst[12:10]` | `uimm[5:3]` |
+| `inst[12:10]` | `offset[5:3]` |
 | `inst[9:7]` | `rs1'` |
-| `inst[6:5]` | `uimm[7:6]` |
+| `inst[6:5]` | `offset[7:6]` |
 | `inst[4:2]` | `rs2'` |
 | `inst[1:0]` | `00` |
 
@@ -3387,16 +3387,16 @@
 - 指令形式: `C.SW rs2', offset(rs1')`
 - 所属扩展: `C`
 - 编码格式: `CS`
-- 类汇编软件表达式: `M[x[rs1'] + zext(uimm << 2)][31:0] = x[rs2'][31:0]`
+- 类汇编软件表达式: `M[x[rs1'] + zext(offset)][31:0] = x[rs2'][31:0]`
 - inst bit range:
 
 | Inst bit range | Field |
 |---|---|
 | `inst[15:13]` | `110` |
-| `inst[12:10]` | `uimm[5:3]` |
+| `inst[12:10]` | `offset[5:3]` |
 | `inst[9:7]` | `rs1'` |
-| `inst[6]` | `uimm[2]` |
-| `inst[5]` | `uimm[6]` |
+| `inst[6]` | `offset[2]` |
+| `inst[5]` | `offset[6]` |
 | `inst[4:2]` | `rs2'` |
 | `inst[1:0]` | `00` |
 
@@ -3408,15 +3408,15 @@
 - 指令形式: `C.SD rs2', offset(rs1')`
 - 所属扩展: `C`
 - 编码格式: `CS`
-- 类汇编软件表达式: `M[x[rs1'] + zext(uimm << 3)][63:0] = x[rs2']`
+- 类汇编软件表达式: `M[x[rs1'] + zext(offset)][63:0] = x[rs2']`
 - inst bit range:
 
 | Inst bit range | Field |
 |---|---|
 | `inst[15:13]` | `111` |
-| `inst[12:10]` | `uimm[5:3]` |
+| `inst[12:10]` | `offset[5:3]` |
 | `inst[9:7]` | `rs1'` |
-| `inst[6:5]` | `uimm[7:6]` |
+| `inst[6:5]` | `offset[7:6]` |
 | `inst[4:2]` | `rs2'` |
 | `inst[1:0]` | `00` |
 
@@ -3802,15 +3802,15 @@
 - 指令形式: `C.FLDSP rd, offset(sp)`
 - 所属扩展: `C`
 - 编码格式: `CI`
-- 类汇编软件表达式: `f[rd] = M[x[2] + zext(uimm << 3)][63:0]`
+- 类汇编软件表达式: `f[rd] = M[x[2] + zext(offset)][63:0]`
 - inst bit range:
 
 | Inst bit range | Field |
 |---|---|
 | `inst[15:13]` | `001` |
-| `inst[12]` | `uimm[5]` |
+| `inst[12]` | `offset[5]` |
 | `inst[11:7]` | `rd` |
-| `inst[6:2]` | `uimm[4:3|8:6]` |
+| `inst[6:2]` | `offset[4:3|8:6]` |
 | `inst[1:0]` | `10` |
 
 - 详细说明:
@@ -3821,15 +3821,15 @@
 - 指令形式: `C.LWSP rd, offset(sp)`
 - 所属扩展: `C`
 - 编码格式: `CI`
-- 类汇编软件表达式: `x[rd] = sext(M[x[2] + zext(uimm << 2)][31:0])`
+- 类汇编软件表达式: `x[rd] = sext(M[x[2] + zext(offset)][31:0])`
 - inst bit range:
 
 | Inst bit range | Field |
 |---|---|
 | `inst[15:13]` | `010` |
-| `inst[12]` | `uimm[5]` |
+| `inst[12]` | `offset[5]` |
 | `inst[11:7]` | `rd` |
-| `inst[6:2]` | `uimm[4:2|7:6]` |
+| `inst[6:2]` | `offset[4:2|7:6]` |
 | `inst[1:0]` | `10` |
 
 - 详细说明:
@@ -3840,15 +3840,15 @@
 - 指令形式: `C.LDSP rd, offset(sp)`
 - 所属扩展: `C`
 - 编码格式: `CI`
-- 类汇编软件表达式: `x[rd] = M[x[2] + zext(uimm << 3)][63:0]`
+- 类汇编软件表达式: `x[rd] = M[x[2] + zext(offset)][63:0]`
 - inst bit range:
 
 | Inst bit range | Field |
 |---|---|
 | `inst[15:13]` | `011` |
-| `inst[12]` | `uimm[5]` |
+| `inst[12]` | `offset[5]` |
 | `inst[11:7]` | `rd` |
-| `inst[6:2]` | `uimm[4:3|8:6]` |
+| `inst[6:2]` | `offset[4:3|8:6]` |
 | `inst[1:0]` | `10` |
 
 - 详细说明:
@@ -3954,13 +3954,13 @@
 - 指令形式: `C.FSDSP rs2, offset(sp)`
 - 所属扩展: `C`
 - 编码格式: `CSS`
-- 类汇编软件表达式: `M[x[2] + zext(uimm << 3)][63:0] = f[rs2][63:0]`
+- 类汇编软件表达式: `M[x[2] + zext(offset)][63:0] = f[rs2][63:0]`
 - inst bit range:
 
 | Inst bit range | Field |
 |---|---|
 | `inst[15:13]` | `101` |
-| `inst[12:7]` | `uimm[5:3|8:6]` |
+| `inst[12:7]` | `offset[5:3|8:6]` |
 | `inst[6:2]` | `rs2` |
 | `inst[1:0]` | `10` |
 
@@ -3972,13 +3972,13 @@
 - 指令形式: `C.SWSP rs2, offset(sp)`
 - 所属扩展: `C`
 - 编码格式: `CSS`
-- 类汇编软件表达式: `M[x[2] + zext(uimm << 2)][31:0] = x[rs2][31:0]`
+- 类汇编软件表达式: `M[x[2] + zext(offset)][31:0] = x[rs2][31:0]`
 - inst bit range:
 
 | Inst bit range | Field |
 |---|---|
 | `inst[15:13]` | `110` |
-| `inst[12:7]` | `uimm[5:2|7:6]` |
+| `inst[12:7]` | `offset[5:2|7:6]` |
 | `inst[6:2]` | `rs2` |
 | `inst[1:0]` | `10` |
 
@@ -3990,13 +3990,13 @@
 - 指令形式: `C.SDSP rs2, offset(sp)`
 - 所属扩展: `C`
 - 编码格式: `CSS`
-- 类汇编软件表达式: `M[x[2] + zext(uimm << 3)][63:0] = x[rs2]`
+- 类汇编软件表达式: `M[x[2] + zext(offset)][63:0] = x[rs2]`
 - inst bit range:
 
 | Inst bit range | Field |
 |---|---|
 | `inst[15:13]` | `111` |
-| `inst[12:7]` | `uimm[5:3|8:6]` |
+| `inst[12:7]` | `offset[5:3|8:6]` |
 | `inst[6:2]` | `rs2` |
 | `inst[1:0]` | `10` |
 

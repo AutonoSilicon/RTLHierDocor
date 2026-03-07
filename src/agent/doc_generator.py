@@ -193,8 +193,8 @@ class AgentDocGenerator:
                 print("[INFO] Running Pass 3.3: InStrack (Instruction Route Tracking)...")
                 await self._run_pass3_3(self.hierarchy)
 
-            print("[INFO] Running Pass 3: Chip-level Overview & Subsystem Overview...")
-            await self._run_pass3(self.hierarchy)
+            # Keep only pass3.1/3.2/3.3 outputs; skip final overview/subsystem aggregation pass.
+            print("[INFO] Skipping final Pass 3 overview generation (configured workflow: keep 3.1/3.2/3.3 only).")
 
         print(f"[INFO] Documentation generation complete.")
         print(f"[INFO]   Modules: {self.modules_dir}")

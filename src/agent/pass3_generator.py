@@ -133,6 +133,7 @@ class Pass3Generator:
         instruction: str,
         top_description: str,
         core_partition: str,
+        instruction_datasheet: str,
     ) -> str:
         payload = {
             "version": "pass3_3_instrack_cache_v1",
@@ -142,9 +143,61 @@ class Pass3Generator:
             "prompt_template": PASS3_3_PROMPT,
             "top_description_hash": self._hash_text(top_description),
             "core_partition_hash": self._hash_text(core_partition),
+            "instruction_datasheet_hash": self._hash_text(instruction_datasheet),
             "tools_schema": self._pass3_3_tools(),
         }
         return self._hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    @staticmethod
+    def _instrack_datasheet_path() -> Path:
+        return Path.cwd() / "docs" / "rv64gc_instruction_datasheet.md"
+
+    def _load_instrack_datasheet(self) -> str:
+        path = self._instrack_datasheet_path()
+        if not path.exists():
+            return "未找到 datasheet 文件：docs/rv64gc_instruction_datasheet.md"
+        try:
+            return path.read_text(encoding="utf-8")
+        except Exception as e:
+            return f"读取 datasheet 失败: {e}"
+
+    def _extract_instruction_datasheet_excerpt(self, datasheet_text: str, instruction: str) -> str:
+        text = (datasheet_text or "").strip()
+        if not text:
+            return "datasheet 为空，无法提供指令文段。"
+
+        target = self._normalize_instruction(instruction)
+        lines = text.splitlines()
+
+        heading_indices: List[int] = []
+        for i, line in enumerate(lines):
+            if line.startswith("### "):
+                heading_indices.append(i)
+
+        def _heading_to_mnemonic(heading_line: str) -> str:
+            # Example: "### ADD rd, rs1, rs2" => "ADD"
+            title = heading_line[4:].strip()
+            token = title.split(" ", 1)[0]
+            token = token.split(",", 1)[0]
+            return self._normalize_instruction(token)
+
+        chosen_start = -1
+        chosen_end = -1
+        for idx, start in enumerate(heading_indices):
+            mnemonic = _heading_to_mnemonic(lines[start])
+            if mnemonic != target:
+                continue
+            end = heading_indices[idx + 1] if idx + 1 < len(heading_indices) else len(lines)
+            chosen_start = start
+            chosen_end = end
+            break
+
+        if chosen_start < 0:
+            # Fallback: return notation + scope to keep at least stable reference context.
+            return self.owner._extract_summary(text, max_lines=60, max_chars=5000)
+
+        block = "\n".join(lines[chosen_start:chosen_end]).strip()
+        return self.owner._extract_summary(block, max_lines=120, max_chars=12000)
 
     @staticmethod
     def _instruction_profiles() -> Dict[str, List[str]]:
@@ -1116,7 +1169,7 @@ class Pass3Generator:
             return (
                 "你是指令流向分析子代理。目标是为单条指令补充当前层级的模块流向证据。\n"
                 "你只能读取本级和直接子级文档；更深层必须 forkSubAgent。\n"
-                "输出聚焦：候选路径、保留/剔除理由、最终实例路径链、证据与待确认项。\n"
+                "输出聚焦：最终实例路径链、证据与待确认项。\n"
                 "禁止臆断，证据不足时明确写待确认。"
             )
 
@@ -1159,8 +1212,6 @@ class Pass3Generator:
                 "## Direct children snapshot\n"
                 f"{child_overview}\n\n"
                 "请按以下结构输出：\n"
-                "## 候选路径\n"
-                "## 裁剪理由\n"
                 "## 最终实例路径链\n"
                 "## 证据\n"
                 "## 待确认项\n"
@@ -1955,6 +2006,7 @@ class Pass3Generator:
                 pass
 
         index_entries: List[Dict[str, Any]] = []
+        datasheet_text = self._load_instrack_datasheet()
 
         for instruction in instructions:
             slug = self._safe_slug(instruction)
@@ -1962,12 +2014,14 @@ class Pass3Generator:
             artifact_json = f"instrack/{slug}.json"
             out_md = instrack_dir / f"{slug}.md"
             out_json = instrack_dir / f"{slug}.json"
+            instruction_datasheet = self._extract_instruction_datasheet_excerpt(datasheet_text, instruction)
 
             input_hash = self._build_pass3_3_input_hash(
                 top_module=top_node.module_name,
                 instruction=instruction,
                 top_description=top_description,
                 core_partition=core_partition_text,
+                instruction_datasheet=instruction_datasheet,
             )
 
             content: Optional[str] = None
@@ -1983,6 +2037,7 @@ class Pass3Generator:
                     instruction=instruction,
                     top_description=top_description,
                     core_partition=self.owner._extract_summary(core_partition_text, max_lines=80, max_chars=12000),
+                    instruction_datasheet=instruction_datasheet,
                 )
 
                 async def _tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
