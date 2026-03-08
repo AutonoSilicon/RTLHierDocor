@@ -57,7 +57,14 @@ from .pass3_1_subsystem_partition import PASS3_1_SYSTEM, PASS3_1_PROMPT
 from .pass3_2_core_partition import PASS3_2_SYSTEM, PASS3_2_PROMPT
 
 # Pass 3.3: Instruction track (agent exploration)
-from .pass3_3_instrack import PASS3_3_SYSTEM, PASS3_3_PROMPT
+from .pass3_3_instrack import (
+    PASS3_3_1_SEARCH_SYSTEM,
+    PASS3_3_1_SEARCH_PROMPT,
+    PASS3_3_2_LIFECYCLE_SYSTEM,
+    PASS3_3_2_LIFECYCLE_PROMPT,
+    PASS3_3_SYSTEM,
+    PASS3_3_PROMPT,
+)
 
 __all__ = [
     # Block-level
@@ -112,6 +119,10 @@ __all__ = [
     "PASS3_2_SYSTEM",
     "PASS3_2_PROMPT",
     # Pass 3.3
+    "PASS3_3_1_SEARCH_SYSTEM",
+    "PASS3_3_1_SEARCH_PROMPT",
+    "PASS3_3_2_LIFECYCLE_SYSTEM",
+    "PASS3_3_2_LIFECYCLE_PROMPT",
     "PASS3_3_SYSTEM",
     "PASS3_3_PROMPT",
 ]

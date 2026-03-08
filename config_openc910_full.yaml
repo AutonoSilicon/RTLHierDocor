@@ -40,8 +40,6 @@ agent:
   pass3_enabled: true
   pass3_3_enabled: true
 
-  # Development-time instrack scope: only test three instructions
+  # Development-time instrack scope: only test ADD
   isa_instructions:
     - "ADD"
-    - "MUL"
-    - "DIV"

@@ -18,8 +18,10 @@ from .prompts import (
     PASS3_1_PROMPT,
     PASS3_2_SYSTEM,
     PASS3_2_PROMPT,
-    PASS3_3_SYSTEM,
-    PASS3_3_PROMPT,
+    PASS3_3_1_SEARCH_SYSTEM,
+    PASS3_3_1_SEARCH_PROMPT,
+    PASS3_3_2_LIFECYCLE_SYSTEM,
+    PASS3_3_2_LIFECYCLE_PROMPT,
 )
 
 
@@ -29,6 +31,7 @@ class Pass3Generator:
     def __init__(self, owner: Any):
         self.owner = owner
         self._subagent_cache: Dict[str, str] = {}
+        self._agent_log_seq: int = 0
 
     def clear_progress(self):
         self.owner.project_tracker.clear()
@@ -38,10 +41,36 @@ class Pass3Generator:
         project_debug_dir.mkdir(parents=True, exist_ok=True)
         return str(project_debug_dir / f"debug_{name}.md")
 
+    def _next_agent_log_seq(self) -> int:
+        self._agent_log_seq += 1
+        return self._agent_log_seq
+
+    def _build_pass3_3_1_agent_log_path(
+        self,
+        *,
+        instruction: str,
+        node_path: str,
+        level: int,
+        role: str,
+    ) -> str:
+        """Create a unique debug log path for one pass3.3.1 agent invocation."""
+        seq = self._next_agent_log_seq()
+        inst_slug = self._safe_slug(instruction or "unknown")
+        node_slug = self._safe_slug((node_path or "top").replace("/", "__"))
+        role_slug = self._safe_slug(role or "agent")
+        return self._project_log_path(
+            f"pass3_3_1_{role_slug}_{inst_slug}_{node_slug}_L{level}_R{seq:04d}"
+        )
+
     def _fork_trace_log_path(self) -> Path:
         log_dir = self.owner.chip_debug_dir
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir / "debug_pass3_fork_trace.jsonl"
+
+    def _fork_trace_log_path_pass3_3_1(self) -> Path:
+        log_dir = self.owner.chip_debug_dir
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir / "debug_pass3_3_1_fork_trace.jsonl"
 
     def _append_fork_trace(self, event: str, payload: Dict[str, Any]):
         """Append one fork-related trace record as JSONL."""
@@ -54,6 +83,15 @@ class Pass3Generator:
         try:
             with open(trace_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+            # Keep a dedicated pass3.3.1 trace stream for easier triage.
+            pass_name = str((payload or {}).get("pass") or "")
+            prompt_style = str((payload or {}).get("prompt_style") or "")
+            is_pass3_3_1 = pass_name == "pass3_3_1" or prompt_style == "instrack_search"
+            if is_pass3_3_1:
+                trace_331 = self._fork_trace_log_path_pass3_3_1()
+                with open(trace_331, "a", encoding="utf-8") as f331:
+                    f331.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception:
             # Debug log failure should not block the generation flow.
             pass
@@ -84,6 +122,37 @@ class Pass3Generator:
                 f.write(f"- cache_key: {cache_key}\n")
                 f.write("\n### Direct children snapshot\n")
                 f.write((child_overview or "- 无子模块") + "\n")
+        except Exception:
+            # Debug log failure should not block generation.
+            pass
+
+    def _append_agent_io_snapshot(
+        self,
+        log_path: str,
+        *,
+        stage: str,
+        system: str,
+        prompt: str,
+        output: str = "",
+        error: str = "",
+    ):
+        """Append explicit agent input/output snapshot for deterministic debugging."""
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write("\n\n" + "=" * 80 + "\n")
+                f.write(f"## Pass3.3.1 Agent {stage}\n")
+                f.write("=" * 80 + "\n\n")
+                if stage.lower() == "input":
+                    f.write("### System\n")
+                    f.write((system or "") + "\n\n")
+                    f.write("### Prompt\n")
+                    f.write((prompt or "") + "\n")
+                else:
+                    if error:
+                        f.write("### Error\n")
+                        f.write(error + "\n\n")
+                    f.write("### Output\n")
+                    f.write((output or "") + "\n")
         except Exception:
             # Debug log failure should not block generation.
             pass
@@ -127,7 +196,7 @@ class Pass3Generator:
         }
         return self._hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
-    def _build_pass3_3_input_hash(
+    def _build_pass3_3_search_input_hash(
         self,
         top_module: str,
         instruction: str,
@@ -136,15 +205,38 @@ class Pass3Generator:
         instruction_datasheet: str,
     ) -> str:
         payload = {
-            "version": "pass3_3_instrack_cache_v1",
+            "version": "pass3_3_instrack_search_cache_v3",
             "top_module": top_module,
             "instruction": instruction,
-            "system_prompt": PASS3_3_SYSTEM,
-            "prompt_template": PASS3_3_PROMPT,
+            "system_prompt": PASS3_3_1_SEARCH_SYSTEM,
+            "prompt_template": PASS3_3_1_SEARCH_PROMPT,
             "top_description_hash": self._hash_text(top_description),
             "core_partition_hash": self._hash_text(core_partition),
             "instruction_datasheet_hash": self._hash_text(instruction_datasheet),
-            "tools_schema": self._pass3_3_tools(),
+            "tools_schema": self._pass3_3_1_tools(),
+        }
+        return self._hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    def _build_pass3_3_lifecycle_input_hash(
+        self,
+        top_module: str,
+        instruction: str,
+        top_description: str,
+        instruction_datasheet: str,
+        topology_context: str,
+        search_result_json_text: str,
+    ) -> str:
+        payload = {
+            "version": "pass3_3_instrack_lifecycle_cache_v1",
+            "top_module": top_module,
+            "instruction": instruction,
+            "system_prompt": PASS3_3_2_LIFECYCLE_SYSTEM,
+            "prompt_template": PASS3_3_2_LIFECYCLE_PROMPT,
+            "top_description_hash": self._hash_text(top_description),
+            "instruction_datasheet_hash": self._hash_text(instruction_datasheet),
+            "topology_context_hash": self._hash_text(topology_context),
+            "search_result_json_hash": self._hash_text(search_result_json_text),
+            "tools_schema": self._pass3_3_2_tools(),
         }
         return self._hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
@@ -193,8 +285,14 @@ class Pass3Generator:
             break
 
         if chosen_start < 0:
-            # Fallback: return notation + scope to keep at least stable reference context.
-            return self.owner._extract_summary(text, max_lines=60, max_chars=5000)
+            print(
+                f"[WARN] InStrack datasheet section not found for instruction '{instruction}' "
+                "in docs/rv64gc_instruction_datasheet.md"
+            )
+            return (
+                "Instruction section not found in docs/rv64gc_instruction_datasheet.md. "
+                f"instruction={instruction}"
+            )
 
         block = "\n".join(lines[chosen_start:chosen_end]).strip()
         return self.owner._extract_summary(block, max_lines=120, max_chars=12000)
@@ -368,7 +466,16 @@ class Pass3Generator:
             return None
 
         header_cells = [c.strip() for c in table_lines[0].strip('|').split('|')]
+
+        def _norm_header(text: str) -> str:
+            t = (text or "").strip().lower()
+            # Normalize spaces and punctuation style for robust matching.
+            t = t.replace("（", "(").replace("）", ")")
+            t = re.sub(r"\s+", "", t)
+            return t
+
         header_map = {cell: idx for idx, cell in enumerate(header_cells)}
+        header_map_norm = {_norm_header(cell): idx for idx, cell in enumerate(header_cells)}
 
         idx_name = header_map.get("子系统", 0)
         idx_roots = header_map.get("Roots(root modules)", 1)
@@ -440,7 +547,15 @@ class Pass3Generator:
             return None
 
         header_cells = [c.strip() for c in table_lines[0].strip('|').split('|')]
+
+        def _norm_header(text: str) -> str:
+            t = (text or "").strip().lower()
+            t = t.replace("（", "(").replace("）", ")")
+            t = re.sub(r"\s+", "", t)
+            return t
+
         header_map = {cell: idx for idx, cell in enumerate(header_cells)}
+        header_map_norm = {_norm_header(cell): idx for idx, cell in enumerate(header_cells)}
 
         idx_domain = header_map.get("微架构域", 0)
         idx_roots = header_map.get("Roots(root modules)", 1)
@@ -510,59 +625,169 @@ class Pass3Generator:
     ) -> Dict[str, Any]:
         content = (markdown or "").strip()
         out: Dict[str, Any] = {
+            "schema_version": "pass3_3_instrack_v2",
             "top_module": top_node.module_name,
             "instruction": instruction,
-            "route_instances": [],
-            "route_modules": [],
+            "route_blocks": [],
+            "route_bridges": [],
+            "route_modules_approx": [],
             "evidence": "",
             "unknown": "",
-            "verification_mode": "doc_evidence",
+            "verification_mode": "topology_plus_doc_evidence",
         }
         if not content:
             return out
 
-        table_lines = [line.strip() for line in content.splitlines() if line.strip().startswith("|")]
+        mermaid_code = self._extract_mermaid_code(content)
+        if mermaid_code:
+            route_blocks, route_bridges, modules_approx = self._extract_routes_from_mermaid(mermaid_code)
+            out["route_blocks"] = route_blocks
+            out["route_bridges"] = route_bridges
+            out["route_modules_approx"] = modules_approx
+            out["raw_summary"] = self.owner._extract_summary(content, max_lines=24, max_chars=3000)
+            out["mermaid"] = mermaid_code
+            return out
+
+        lines = content.splitlines()
+
+        # Prefer parsing the table under the explicit final-route section.
+        section_markers = ["## 最终路线表格", "### 最终路线表格"]
+        start_idx = 0
+        for i, line in enumerate(lines):
+            if line.strip() in section_markers:
+                start_idx = i + 1
+                break
+
+        scoped_lines = lines[start_idx:] if start_idx < len(lines) else lines
+        table_lines = [line.strip() for line in scoped_lines if line.strip().startswith("|")]
         if len(table_lines) < 3:
             out["raw_summary"] = self.owner._extract_summary(content, max_lines=24, max_chars=3000)
             return out
 
         header_cells = [c.strip() for c in table_lines[0].strip('|').split('|')]
+
+        def _norm_header(text: str) -> str:
+            t = (text or "").strip().lower()
+            t = t.replace("（", "(").replace("）", ")")
+            t = re.sub(r"\s+", "", t)
+            return t
+
         header_map = {cell: idx for idx, cell in enumerate(header_cells)}
-        idx_inst = header_map.get("指令", 0)
-        idx_route_inst = header_map.get("路线(实例路径链)", 1)
-        idx_route_mod = header_map.get("路线(模块链)", 2)
-        idx_evidence = header_map.get("证据(readDoc 摘要)", 3)
-        idx_unknown = header_map.get("未知/待确认", 4)
+        header_map_norm = {_norm_header(cell): idx for idx, cell in enumerate(header_cells)}
+
+        idx_inst = header_map.get("指令", header_map_norm.get(_norm_header("指令"), -1))
+        idx_route_blocks = header_map.get("路线(Block路径链)")
+        if idx_route_blocks is None:
+            idx_route_blocks = header_map_norm.get(_norm_header("路线(Block路径链)"))
+        if idx_route_blocks is None:
+            idx_route_blocks = header_map.get("Block路径链")
+        if idx_route_blocks is None:
+            idx_route_blocks = header_map_norm.get(_norm_header("Block路径链"))
+        if idx_route_blocks is None:
+            idx_route_blocks = header_map.get("路线(路径链)")
+        if idx_route_blocks is None:
+            idx_route_blocks = header_map_norm.get(_norm_header("路线(路径链)"))
+
+        idx_route_bridge = header_map.get("桥接(Bridge链)")
+        if idx_route_bridge is None:
+            idx_route_bridge = header_map_norm.get(_norm_header("桥接(Bridge链)"))
+        if idx_route_bridge is None:
+            idx_route_bridge = header_map.get("Bridge链")
+        if idx_route_bridge is None:
+            idx_route_bridge = header_map_norm.get(_norm_header("Bridge链"))
+        if idx_route_bridge is None:
+            idx_route_bridge = header_map.get("桥接")
+        if idx_route_bridge is None:
+            idx_route_bridge = header_map_norm.get(_norm_header("桥接"))
+
+        idx_evidence = header_map.get("证据(readDoc 摘要)")
+        if idx_evidence is None:
+            idx_evidence = header_map_norm.get(_norm_header("证据(readDoc 摘要)"))
+        if idx_evidence is None:
+            idx_evidence = header_map.get("证据")
+        if idx_evidence is None:
+            idx_evidence = header_map_norm.get(_norm_header("证据"))
+        if idx_evidence is None:
+            idx_evidence = 3
+
+        idx_unknown = header_map.get("未知/待确认")
+        if idx_unknown is None:
+            idx_unknown = header_map_norm.get(_norm_header("未知/待确认"))
+        if idx_unknown is None:
+            idx_unknown = 4
+
+        if idx_route_blocks is None:
+            out["raw_summary"] = self.owner._extract_summary(content, max_lines=24, max_chars=3000)
+            return out
 
         target_row: Optional[List[str]] = None
         normalized_target = self._normalize_instruction(instruction)
+
+        def _is_separator_row(cells: List[str]) -> bool:
+            return all(re.match(r"^:?-{3,}:?$", c.strip()) for c in cells if c.strip())
+
+        candidate_rows: List[List[str]] = []
         for line in table_lines[2:]:
             cells = [c.strip() for c in line.strip('|').split('|')]
-            if len(cells) < 3:
+            if len(cells) < 3 or _is_separator_row(cells):
                 continue
-            inst = cells[idx_inst] if idx_inst < len(cells) else ""
-            if self._normalize_instruction(inst) == normalized_target:
-                target_row = cells
-                break
-            if target_row is None:
-                target_row = cells
+
+            candidate_rows.append(cells)
+
+            if idx_inst >= 0:
+                inst = cells[idx_inst] if idx_inst < len(cells) else ""
+                if self._normalize_instruction(inst) == normalized_target:
+                    target_row = cells
+                    break
+
+        if target_row is None and candidate_rows:
+            def _chain_score(cells: List[str]) -> int:
+                route_block = cells[idx_route_blocks] if idx_route_blocks < len(cells) else ""
+                route_bridge = cells[idx_route_bridge] if (idx_route_bridge is not None and idx_route_bridge < len(cells)) else ""
+
+                # Reject obvious placeholders/header echoes.
+                reject_tokens = {"路径链", "route", "path", "chain", "bridge", "block"}
+                low_b = route_block.lower()
+                low_g = route_bridge.lower()
+                if any(tok in low_b for tok in reject_tokens) and "->" not in route_block and "→" not in route_block:
+                    return -1
+                if route_bridge and any(tok in low_g for tok in reject_tokens) and "->" not in route_bridge and "→" not in route_bridge:
+                    return -1
+
+                return max(
+                    len(self._split_chain(route_block)),
+                    len(self._split_chain(route_bridge)),
+                )
+
+            target_row = max(candidate_rows, key=_chain_score)
 
         if not target_row:
             out["raw_summary"] = self.owner._extract_summary(content, max_lines=24, max_chars=3000)
             return out
 
-        route_inst_text = target_row[idx_route_inst] if idx_route_inst < len(target_row) else ""
-        route_mod_text = target_row[idx_route_mod] if idx_route_mod < len(target_row) else ""
+        route_block_text = target_row[idx_route_blocks] if idx_route_blocks < len(target_row) else ""
+        route_bridge_text = target_row[idx_route_bridge] if (idx_route_bridge is not None and idx_route_bridge < len(target_row)) else ""
         evidence_text = target_row[idx_evidence] if idx_evidence < len(target_row) else ""
         unknown_text = target_row[idx_unknown] if idx_unknown < len(target_row) else ""
 
-        def _split_chain(text: str) -> List[str]:
-            chain = (text or "").replace("→", "->").replace("=>", "->")
-            parts = [p.strip() for p in chain.split("->") if p.strip()]
-            return parts
+        route_blocks = self._split_chain(route_block_text)
+        route_bridges = self._split_chain(route_bridge_text)
 
-        out["route_instances"] = _split_chain(route_inst_text)
-        out["route_modules"] = _split_chain(route_mod_text)
+        # Approximate module chain from module:block tokens.
+        modules_approx: List[str] = []
+        seen_modules = set()
+        for item in route_blocks:
+            if ":" not in item:
+                continue
+            module_name = item.split(":", 1)[0].strip()
+            if not module_name or module_name in seen_modules:
+                continue
+            seen_modules.add(module_name)
+            modules_approx.append(module_name)
+
+        out["route_blocks"] = route_blocks
+        out["route_bridges"] = route_bridges
+        out["route_modules_approx"] = modules_approx
         out["evidence"] = evidence_text
         out["unknown"] = unknown_text
         out["raw_summary"] = self.owner._extract_summary(content, max_lines=24, max_chars=3000)
@@ -702,6 +927,284 @@ class Pass3Generator:
             return "muldiv"
         return "integer"
 
+    @staticmethod
+    def _split_chain(text: str) -> List[str]:
+        chain = (text or "").replace("`", "").replace("...", "").replace("…", "")
+        chain = chain.replace("→", "->").replace("=>", "->")
+        return [p.strip() for p in chain.split("->") if p.strip()]
+    
+    @staticmethod
+    def _extract_mermaid_code(markdown: str) -> str:
+        text = markdown or ""
+        m = re.search(r"```mermaid\s*(.*?)```", text, flags=re.S | re.I)
+        if m:
+            return (m.group(1) or "").strip()
+        return ""
+
+    @staticmethod
+    def _extract_json_code(markdown: str) -> str:
+        text = markdown or ""
+        m = re.search(r"```json\s*(.*?)```", text, flags=re.S | re.I)
+        if m:
+            return (m.group(1) or "").strip()
+        # Fallback: allow raw json body without fenced block.
+        return text.strip()
+    
+    def _extract_routes_from_mermaid(self, mermaid_code: str) -> Tuple[List[str], List[str], List[str]]:
+        code = mermaid_code or ""
+        if not code:
+            return [], [], []
+        
+        block_matches = re.findall(
+            r"([A-Za-z0-9_.$\\]+):((?:PROC|COMB|IN_COMB|OUT_COMB)_\d+)",
+            code,
+            flags=re.I,
+        )
+        bridge_matches = re.findall(r"BRIDGE:([A-Za-z0-9_./$\\-]+)", code)
+        
+        route_blocks: List[str] = []
+        seen_blocks = set()
+        for module_name, block_id in block_matches:
+            item = f"{module_name}:{block_id.upper()}"
+            if item in seen_blocks:
+                continue
+            seen_blocks.add(item)
+            route_blocks.append(item)
+        
+        route_bridges: List[str] = []
+        seen_bridges = set()
+        for bridge in bridge_matches:
+            item = f"BRIDGE:{bridge}"
+            if item in seen_bridges:
+                continue
+            seen_bridges.add(item)
+            route_bridges.append(item)
+        
+        modules_approx: List[str] = []
+        seen_modules = set()
+        for item in route_blocks:
+            if ":" not in item:
+                continue
+            module_name = item.split(":", 1)[0]
+            if module_name in seen_modules:
+                continue
+            seen_modules.add(module_name)
+            modules_approx.append(module_name)
+        
+        return route_blocks, route_bridges, modules_approx
+
+    def _coerce_instrack_mermaid_only(self, content: str) -> str:
+        mermaid = self._extract_mermaid_code(content or "")
+        if not mermaid:
+            return (content or "").strip()
+        return f"```mermaid\n{mermaid}\n```\n"
+
+    def _extract_pass3_3_search_json(self, content: str, top_node: Any, instruction: str) -> Dict[str, Any]:
+        out = {
+            "schema_version": "pass3_3_1_startpoint_v1",
+            "top_module": top_node.module_name,
+            "instruction": instruction,
+            "start_module": "",
+            "start_instance": "",
+            "start_block": "",
+            "key_register": "",
+            "key_register_reason": "",
+            "start_reason": "",
+            "confidence": "low",
+            "candidate_domains": [],
+            "unknown": "",
+        }
+        json_body = self._extract_json_code(content or "")
+        if not json_body:
+            return out
+        try:
+            parsed = json.loads(json_body)
+        except Exception:
+            return out
+        if not isinstance(parsed, dict):
+            return out
+
+        out["start_module"] = str(parsed.get("start_module") or "").strip()
+        out["start_instance"] = str(parsed.get("start_instance") or "").strip()
+        out["start_block"] = str(parsed.get("start_block") or "").strip()
+        out["key_register"] = str(parsed.get("key_register") or "").strip()
+        out["key_register_reason"] = str(parsed.get("key_register_reason") or "").strip()
+        out["start_reason"] = str(parsed.get("start_reason") or "").strip()
+        conf = str(parsed.get("confidence") or "low").strip().lower()
+        out["confidence"] = conf if conf in {"high", "medium", "low"} else "low"
+        out["unknown"] = str(parsed.get("unknown") or "").strip()
+
+        domains = parsed.get("candidate_domains")
+        if isinstance(domains, list):
+            normalized: List[str] = []
+            for item in domains:
+                text = str(item or "").strip()
+                if text:
+                    normalized.append(text)
+            out["candidate_domains"] = normalized
+
+        return out
+
+    def _coerce_instrack_search_json_only(self, content: str, top_node: Any, instruction: str) -> str:
+        parsed = self._extract_pass3_3_search_json(content, top_node, instruction)
+        return "```json\n" + json.dumps(parsed, ensure_ascii=False, indent=2) + "\n```\n"
+
+    def _record_path_entry(
+        self,
+        *,
+        instruction: str,
+        current_node: Any,
+        level: int,
+        relation: str,
+        start_block: str,
+        key_path: str,
+        evidence: str,
+        confidence: str,
+        handoff_to: str,
+        register_reads: Optional[List[str]] = None,
+        register_writes: Optional[List[str]] = None,
+        key_conditions: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        conf = (confidence or "medium").strip().lower()
+        if conf not in {"high", "medium", "low"}:
+            conf = "medium"
+        return {
+            "instruction": instruction,
+            "module": getattr(current_node, "module_name", ""),
+            "instance": getattr(current_node, "instance_name", ""),
+            "level": int(level),
+            "relation": (relation or "related").strip(),
+            "start_block": (start_block or "").strip(),
+            "key_path": (key_path or "").strip(),
+            "evidence": (evidence or "").strip(),
+            "confidence": conf,
+            "handoff_to": (handoff_to or "").strip(),
+            "register_reads": self._normalize_str_list(register_reads),
+            "register_writes": self._normalize_str_list(register_writes),
+            "key_conditions": self._normalize_str_list(key_conditions),
+        }
+
+    @staticmethod
+    def _normalize_str_list(values: Optional[List[str]]) -> List[str]:
+        out: List[str] = []
+        for item in values or []:
+            text = str(item or "").strip()
+            if text:
+                out.append(text)
+        return out
+
+    @staticmethod
+    def _coerce_optional_list(value: Any) -> List[str]:
+        if isinstance(value, list):
+            return [str(v) for v in value if str(v).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
+
+    def _is_register_level_record(self, item: Dict[str, Any]) -> bool:
+        reads = self._normalize_str_list(item.get("register_reads") or [])
+        writes = self._normalize_str_list(item.get("register_writes") or [])
+        conds = self._normalize_str_list(item.get("key_conditions") or [])
+        return bool(reads and writes and conds)
+
+    def _enforce_register_level_records(self, search_json: Dict[str, Any], records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        strong = [r for r in records if self._is_register_level_record(r)]
+        if strong:
+            return strong
+
+        unknown = str(search_json.get("unknown") or "").strip()
+        extra = "证据不足，当前记录未达到寄存器级粒度（缺少register_reads/register_writes/key_conditions）。"
+        search_json["unknown"] = f"{unknown} {extra}".strip()
+        search_json["confidence"] = "low"
+        return []
+
+    @staticmethod
+    def _dedupe_path_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        for item in records or []:
+            if not isinstance(item, dict):
+                continue
+            key = (
+                item.get("instruction", ""),
+                item.get("instance", ""),
+                item.get("start_block", ""),
+                item.get("key_path", ""),
+                item.get("handoff_to", ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+        return out
+
+    def _render_instrack_search_markdown(self, search_json: Dict[str, Any], records: List[Dict[str, Any]]) -> str:
+        lines: List[str] = [
+            "# Pass3.3 Search Report",
+            "",
+            f"- instruction: {search_json.get('instruction', '')}",
+            f"- start_module: {search_json.get('start_module', '')}",
+            f"- start_instance: {search_json.get('start_instance', '')}",
+            f"- start_block: {search_json.get('start_block', '')}",
+            f"- confidence: {search_json.get('confidence', 'low')}",
+            "",
+            "## Key Path Records",
+        ]
+
+        if not records:
+            lines.append("- no related module records")
+            return "\n".join(lines) + "\n"
+
+        for idx, item in enumerate(records, start=1):
+            lines.append(f"### record_{idx}")
+            lines.append(f"- module: {item.get('module', '')}")
+            lines.append(f"- instance: {item.get('instance', '')}")
+            lines.append(f"- level: {item.get('level', 0)}")
+            lines.append(f"- relation: {item.get('relation', '')}")
+            lines.append(f"- start_block: {item.get('start_block', '')}")
+            lines.append(f"- key_path: {item.get('key_path', '')}")
+            lines.append(f"- register_reads: {', '.join(item.get('register_reads') or []) or '-'}")
+            lines.append(f"- register_writes: {', '.join(item.get('register_writes') or []) or '-'}")
+            lines.append(f"- key_conditions: {', '.join(item.get('key_conditions') or []) or '-'}")
+            lines.append(f"- handoff_to: {item.get('handoff_to', '')}")
+            lines.append(f"- confidence: {item.get('confidence', 'medium')}")
+            lines.append(f"- evidence: {item.get('evidence', '')}")
+            lines.append("")
+        return "\n".join(lines)
+
+    def _build_pass2_style_topology_block(self, module_name: str) -> str:
+        """Return pass2-style topology block text for injection.
+
+        Priority:
+        1) Reuse pass2 formatter (`_format_graph_description`) on precomputed graph.
+        2) Fallback to extracting topology section from pass2.4 markdown.
+        """
+        graphs = getattr(self.owner, "_graphs", None)
+        formatter = getattr(self.owner, "_format_graph_description", None)
+        if isinstance(graphs, dict) and callable(formatter):
+            graph = graphs.get(module_name)
+            if graph is not None:
+                try:
+                    graph_description = formatter(graph, include_source=True)
+                    if graph_description and str(graph_description).strip():
+                        return (
+                            "# Circuit Topology (PROC/COMB Logic Block Connection Diagram, Topologically Sorted, with Source Code):\n"
+                            f"{graph_description}"
+                        )
+                except Exception:
+                    pass
+
+        pass2_4 = self.owner.tracker.get_pass2_4_content(module_name) or ""
+        if pass2_4:
+            section = ""
+            extractor = getattr(self.owner, "_extract_named_section", None)
+            if callable(extractor):
+                section = extractor(pass2_4, ["Circuit Topology", "电路拓扑"]) or ""
+            if section:
+                return str(section)
+
+        return "无拓扑结构信息（沿用 pass2 子文档格式时未找到对应拓扑块）"
+
     def _tool_explore_inst_route(self, top_node: Any, instruction: str, max_domains: int = 12) -> str:
         category = self._classify_instruction(instruction)
         core_json_path = self.owner.chip_dir / "core_partition.json"
@@ -774,6 +1277,28 @@ class Pass3Generator:
             {
                 "type": "function",
                 "function": {
+                    "name": "readSource",
+                    "description": "Read full RTL source code for a module on demand. By default, do not truncate.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "module": {
+                                "type": "string",
+                                "description": "RTL module name.",
+                            },
+                            "max_lines": {
+                                "type": "integer",
+                                "description": "Maximum lines to return. 0 means no truncation.",
+                                "default": 0,
+                            },
+                        },
+                        "required": ["module"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "readDoc",
                     "description": "Read generated RTL documentation for a module. Optionally extract specific markdown sections.",
                     "parameters": {
@@ -788,13 +1313,13 @@ class Pass3Generator:
                             "sections": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Heading keywords to extract (e.g. 接口/寄存器/中断/异常/配置). Empty means return full doc (truncated).",
+                                "description": "Heading keywords to extract (e.g. 接口/寄存器/中断/异常/配置). Empty means return full doc.",
                             },
                             "section": {
                                 "type": "string",
                                 "description": "Convenience alias for one section keyword (equivalent to sections=[section]).",
                             },
-                            "max_chars": {"type": "integer", "description": "Max chars to return", "default": 12000},
+                            "max_chars": {"type": "integer", "description": "Max chars to return (0 means no truncation)", "default": 0},
                         },
                         "required": ["module"],
                     },
@@ -814,8 +1339,7 @@ class Pass3Generator:
                             },
                             "task": {
                                 "type": "string",
-                                "description": "Task for child agent.",
-                                "default": "",
+                                "description": "Free-form goal defined by the parent agent for the child agent (not a preset template string).",
                             },
                         },
                         "required": ["module"],
@@ -861,13 +1385,13 @@ class Pass3Generator:
                             "sections": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Heading keywords to extract (e.g. 接口/寄存器/中断/异常/配置). Empty means return full doc (truncated).",
+                                "description": "Heading keywords to extract (e.g. 接口/寄存器/中断/异常/配置). Empty means return full doc.",
                             },
                             "section": {
                                 "type": "string",
                                 "description": "Convenience alias for one section keyword (equivalent to sections=[section]).",
                             },
-                            "max_chars": {"type": "integer", "description": "Max chars to return", "default": 12000},
+                            "max_chars": {"type": "integer", "description": "Max chars to return (0 means no truncation)", "default": 0},
                         },
                         "required": ["module"],
                     },
@@ -887,8 +1411,7 @@ class Pass3Generator:
                             },
                             "task": {
                                 "type": "string",
-                                "description": "Task for child agent.",
-                                "default": "",
+                                "description": "Free-form goal defined by the parent agent for the child agent (not a preset template string).",
                             },
                         },
                         "required": ["module"],
@@ -897,45 +1420,19 @@ class Pass3Generator:
             },
         ]
 
-    def _pass3_3_tools(self) -> List[Dict[str, Any]]:
+    def _pass3_3_1_tools(self) -> List[Dict[str, Any]]:
         return [
             {
                 "type": "function",
                 "function": {
-                    "name": "exploreCore",
-                    "description": "Agent Explore mode: find likely core roots and rank candidates by hierarchy/data evidence.",
+                    "name": "readSource",
+                    "description": "Read pass2-style topologyized source block for a module (PROC/COMB topology with source annotations).",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "max_candidates": {
-                                "type": "integer",
-                                "description": "Maximum ranked candidates to return (1-20).",
-                                "default": 10,
-                            },
+                            "module": {"type": "string", "description": "RTL module name"},
                         },
-                        "required": [],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "exploreInstRoute",
-                    "description": "Rank likely instruction-route micro-domains for one instruction using core partition evidence.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "instruction": {
-                                "type": "string",
-                                "description": "Instruction mnemonic, e.g. ADD, BEQ, LD, CSRRW.",
-                            },
-                            "max_domains": {
-                                "type": "integer",
-                                "description": "Maximum candidate domains to return (1-24).",
-                                "default": 12,
-                            },
-                        },
-                        "required": ["instruction"],
+                        "required": ["module"],
                     },
                 },
             },
@@ -962,7 +1459,7 @@ class Pass3Generator:
                                 "type": "string",
                                 "description": "Convenience alias for one section keyword.",
                             },
-                            "max_chars": {"type": "integer", "description": "Max chars to return", "default": 12000},
+                            "max_chars": {"type": "integer", "description": "Max chars to return (0 means no truncation)", "default": 0},
                         },
                         "required": ["module"],
                     },
@@ -982,8 +1479,7 @@ class Pass3Generator:
                             },
                             "task": {
                                 "type": "string",
-                                "description": "Task for child agent.",
-                                "default": "",
+                                "description": "Free-form goal defined by the parent agent for the child agent (not a preset template string).",
                             },
                         },
                         "required": ["module"],
@@ -992,8 +1488,83 @@ class Pass3Generator:
             },
         ]
 
+    def _pass3_3_2_tools(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "readDoc",
+                    "description": "Read generated RTL documentation for a module. Optionally extract specific markdown sections.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "module": {"type": "string", "description": "RTL module name"},
+                            "doc": {
+                                "type": "string",
+                                "description": "Which doc to read: auto|preview|architecture|description|interface_spec|design_highlights|functional_desc|register_desc|timing_cdc|block_docs|flowchart|metadata",
+                                "default": "auto",
+                            },
+                            "sections": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Heading keywords to extract.",
+                            },
+                            "section": {
+                                "type": "string",
+                                "description": "Convenience alias for one section keyword.",
+                            },
+                            "max_chars": {"type": "integer", "description": "Max chars to return (0 means no truncation)", "default": 0},
+                        },
+                        "required": ["module"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "forkSubAgent",
+                    "description": "Delegate deeper analysis to a child-level recursive agent. Only direct children of top are allowed.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "module": {
+                                "type": "string",
+                                "description": "Target child module selector (instance_name or module_name).",
+                            },
+                            "task": {
+                                "type": "string",
+                                "description": "Free-form goal defined by the parent agent for the child agent (not a preset template string).",
+                            },
+                        },
+                        "required": ["module"],
+                    },
+                },
+            },
+        ]
+
+    def _pass3_3_tools(self) -> List[Dict[str, Any]]:
+        # Keep the legacy name for call sites not yet migrated.
+        return self._pass3_3_2_tools()
+
     def _pass3_recursive_tools(self) -> List[Dict[str, Any]]:
         return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "readSource",
+                    "description": "Read pass2-style topologyized source block for a module. Scope-limited: current level and direct children only.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "module": {
+                                "type": "string",
+                                "description": "Module selector. Prefer instance_name or module_name in current scope.",
+                            },
+                        },
+                        "required": ["module"],
+                    },
+                },
+            },
             {
                 "type": "function",
                 "function": {
@@ -1029,8 +1600,7 @@ class Pass3Generator:
                             },
                             "task": {
                                 "type": "string",
-                                "description": "Task for child agent. If empty, defaults to architecture summary + task decomposition.",
-                                "default": "",
+                                "description": "Free-form goal defined by the parent agent for the child agent (not a preset template string).",
                             },
                         },
                         "required": ["module"],
@@ -1144,10 +1714,9 @@ class Pass3Generator:
                 "No content found (possibly not generated yet)."
             )
 
-        summary = self.owner._extract_summary(content, max_lines=80, max_chars=12000)
         return (
             f"[readDoc] module={target.instance_name}({target.module_name}), section={canonical}\n\n"
-            f"{summary}"
+            f"{content}"
         )
 
     @staticmethod
@@ -1165,11 +1734,23 @@ class Pass3Generator:
         )
 
     def _build_pass3_recursive_system(self, prompt_style: str = "architecture") -> str:
+        if prompt_style == "instrack_search":
+            return (
+                PASS3_3_1_SEARCH_SYSTEM.strip()
+                + "\n\n"
+                + "递归子代理附加约束：\n"
+                + "- 你处于递归子代理模式：先在当前层判断是否存在生命周期起点/关键寄存器证据。\n"
+                + "- 你只能直接读取本级与直接子级证据（readDoc/readSource 受限）。\n"
+                + "- 若要读取更深层，必须调用 forkSubAgent(module, task)；task 由你自由定义为下一级目标。"
+            )
+
         if prompt_style == "instrack":
             return (
-                "你是指令流向分析子代理。目标是为单条指令补充当前层级的模块流向证据。\n"
+                "你是指令流向分析子代理。目标是为单条指令补充当前层级的 block-first 路由证据。\n"
                 "你只能读取本级和直接子级文档；更深层必须 forkSubAgent。\n"
-                "输出聚焦：最终实例路径链、证据与待确认项。\n"
+                "路径节点必须使用结构化拓扑中的 PROC/COMB block，跨模块跳转用 bridge 表达。\n"
+                "若当前模块存在子模块，必须逐个 forkSubAgent 探查是否与该指令相关。\n"
+                "最终输出只能是一个 mermaid flowchart LR 代码块。\n"
                 "禁止臆断，证据不足时明确写待确认。"
             )
 
@@ -1196,10 +1777,35 @@ class Pass3Generator:
         current_node: Any,
         level: int,
         task: str,
+        instruction: str,
+        instruction_datasheet: str,
         current_description: str,
         child_overview: str,
         prompt_style: str = "architecture",
     ) -> str:
+        if prompt_style == "instrack_search":
+            base_prompt = PASS3_3_1_SEARCH_PROMPT.format(
+                instruction=instruction or "UNKNOWN",
+                instruction_datasheet=(
+                    instruction_datasheet
+                    if (instruction_datasheet or "").strip()
+                    else "Instruction unavailable"
+                ),
+                module_description=self.owner._extract_summary(current_description, max_lines=20, max_chars=2400),
+            ).strip()
+            return (
+                f"{base_prompt}\n\n"
+                "## Recursive context\n"
+                f"- Top module: {top_node.module_name}\n"
+                f"- Current level: {level}\n"
+                f"- Current node: {current_node.instance_name} ({current_node.module_name})\n"
+                f"- Parent-assigned task: {task}\n\n"
+                "## Direct children snapshot\n"
+                f"{child_overview}\n\n"
+                "若需要子模块证据，调用 forkSubAgent 并自行编写子任务；需跨兄弟模块请报告上级Agent，由上级调度。\n"
+                "输出必须遵循 PASS3.3.1 的 JSON 约束。\n"
+            )
+
         if prompt_style == "instrack":
             return (
                 f"# Recursive Pass3.3 InStrack Agent\n\n"
@@ -1211,10 +1817,8 @@ class Pass3Generator:
                 f"{self.owner._extract_summary(current_description, max_lines=20, max_chars=2400)}\n\n"
                 "## Direct children snapshot\n"
                 f"{child_overview}\n\n"
-                "请按以下结构输出：\n"
-                "## 最终实例路径链\n"
-                "## 证据\n"
-                "## 待确认项\n"
+                "要求：若有子模块，先逐个 forkSubAgent 判断相关性，再绘制最终路径。\n"
+                "最终输出只能是一个 mermaid flowchart LR 代码块，不要输出其他内容。\n"
             )
 
         if prompt_style != "partition":
@@ -1262,10 +1866,15 @@ class Pass3Generator:
         level: int = 0,
         max_depth: int = 6,
         prompt_style: str = "architecture",
+        instruction: str = "",
+        instruction_datasheet: str = "",
+        path_records: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         node_path = current_node.get_path() if hasattr(current_node, "get_path") else current_node.instance_name
         norm_task = (task or "").strip() or "生成该层级的top-down架构概览和可执行任务拆解"
         cache_key = f"{prompt_style}||{node_path}||{norm_task}||L{level}"
+        if path_records is None:
+            path_records = []
 
         self._append_fork_trace(
             "recursive_enter",
@@ -1281,7 +1890,7 @@ class Pass3Generator:
             },
         )
 
-        if cache_key in self._subagent_cache:
+        if prompt_style != "instrack_search" and cache_key in self._subagent_cache:
             self._append_fork_trace(
                 "recursive_cache_hit",
                 {
@@ -1329,12 +1938,27 @@ class Pass3Generator:
             current_node=current_node,
             level=level,
             task=norm_task,
+            instruction=instruction,
+            instruction_datasheet=instruction_datasheet,
             current_description=current_description,
             child_overview=child_overview,
             prompt_style=prompt_style,
         )
 
         async def _tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
+            if tool_name == "readSource":
+                module = str(args.get("module") or "").strip()
+                scoped_node, scope_error = self._resolve_scope_node(current_node, module, child_only=False)
+                if scoped_node is None:
+                    return (
+                        "Error: instrack readSource scope violation. "
+                        "At this level you can read only current module and direct children. "
+                        "For deeper modules, call forkSubAgent(module, task) first. "
+                        f"Details: {scope_error}"
+                    )
+                topology = self._build_pass2_style_topology_block(str(scoped_node.module_name))
+                return f"[readSource] module={scoped_node.module_name}\n\n{topology}"
+
             if tool_name == "readDoc":
                 module = str(args.get("module") or "")
                 section = str(args.get("section") or "")
@@ -1372,10 +1996,7 @@ class Pass3Generator:
                     return error
 
                 if not child_task:
-                    child_task = (
-                        f"请针对 {child_node.instance_name}({child_node.module_name}) 输出top-down架构分析和任务拆解，"
-                        "并按需继续fork下一级。"
-                    )
+                    return "Error: forkSubAgent requires a non-empty 'task'. The parent agent must define a free-form goal for the child agent."
 
                 self._append_fork_trace(
                     "fork_dispatch",
@@ -1397,6 +2018,9 @@ class Pass3Generator:
                     level=level + 1,
                     max_depth=max_depth,
                     prompt_style=prompt_style,
+                    instruction=instruction,
+                    instruction_datasheet=instruction_datasheet,
+                    path_records=path_records,
                 )
                 if len(report) > 16000:
                     report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
@@ -1421,9 +2045,17 @@ class Pass3Generator:
 
             return f"Error: unknown tool '{tool_name}'"
 
-        log_path = self._project_log_path(
-            f"pass3_recursive_{self._safe_slug(current_node.instance_name)}_L{level}"
-        )
+        if prompt_style == "instrack_search":
+            log_path = self._build_pass3_3_1_agent_log_path(
+                instruction=instruction,
+                node_path=node_path,
+                level=level,
+                role="subagent",
+            )
+        else:
+            log_path = self._project_log_path(
+                f"pass3_recursive_{self._safe_slug(current_node.instance_name)}_L{level}"
+            )
 
         self._append_recursive_context_log(
             log_path,
@@ -1448,6 +2080,14 @@ class Pass3Generator:
             },
         )
 
+        if prompt_style == "instrack_search":
+            self._append_agent_io_snapshot(
+                log_path,
+                stage="Input",
+                system=system,
+                prompt=prompt,
+            )
+
         report, _token_stats = await self.owner.llm.generate(
             system,
             prompt,
@@ -1457,6 +2097,15 @@ class Pass3Generator:
             tool_callback=_tool_callback,
             max_tool_rounds=14,
         )
+
+        if prompt_style == "instrack_search":
+            self._append_agent_io_snapshot(
+                log_path,
+                stage="Output",
+                system="",
+                prompt="",
+                output=report or "",
+            )
 
         self._append_fork_trace(
             "recursive_llm_done",
@@ -1548,7 +2197,7 @@ class Pass3Generator:
         module: str,
         doc: str = "auto",
         sections: Optional[List[str]] = None,
-        max_chars: int = 12000,
+        max_chars: int = 0,
     ) -> str:
         module_name = (module or "").strip()
         if not module_name:
@@ -1676,11 +2325,11 @@ class Pass3Generator:
                     sections = [str(section)]
                 if sections is not None and not isinstance(sections, list):
                     sections = [str(sections)]
-                max_chars = args.get("max_chars", 12000)
+                max_chars = args.get("max_chars", 0)
                 try:
                     max_chars = int(max_chars)
                 except Exception:
-                    max_chars = 12000
+                    max_chars = 0
                 return self._tool_read_doc(module=str(module), doc=str(doc), sections=sections, max_chars=max_chars)
 
             if tool_name == "forkSubAgent":
@@ -1863,11 +2512,11 @@ class Pass3Generator:
                     sections = [str(section)]
                 if sections is not None and not isinstance(sections, list):
                     sections = [str(sections)]
-                max_chars = args.get("max_chars", 12000)
+                max_chars = args.get("max_chars", 0)
                 try:
                     max_chars = int(max_chars)
                 except Exception:
-                    max_chars = 12000
+                    max_chars = 0
                 return self._tool_read_doc(module=str(module), doc=str(doc), sections=sections, max_chars=max_chars)
 
             if tool_name == "forkSubAgent":
@@ -1998,7 +2647,7 @@ class Pass3Generator:
             top_description = self.owner.tracker.get_pass1_content(top_node.module_name) or "无可用 description 文档"
 
         pass3_2_path = self.owner.chip_dir / "core_partition.md"
-        core_partition_text = "未检测到 pass3.2 输出，可结合 exploreCore/readDoc 工具补齐证据。"
+        core_partition_text = "未检测到 pass3.2 输出，可结合 readDoc 工具补齐证据。"
         if pass3_2_path.exists():
             try:
                 core_partition_text = pass3_2_path.read_text(encoding="utf-8")
@@ -2010,13 +2659,17 @@ class Pass3Generator:
 
         for instruction in instructions:
             slug = self._safe_slug(instruction)
+            artifact_search_md = f"instrack/{slug}.search.md"
+            artifact_search_json = f"instrack/{slug}.search.json"
             artifact_md = f"instrack/{slug}.md"
             artifact_json = f"instrack/{slug}.json"
+            out_search_md = instrack_dir / f"{slug}.search.md"
+            out_search_json = instrack_dir / f"{slug}.search.json"
             out_md = instrack_dir / f"{slug}.md"
             out_json = instrack_dir / f"{slug}.json"
             instruction_datasheet = self._extract_instruction_datasheet_excerpt(datasheet_text, instruction)
 
-            input_hash = self._build_pass3_3_input_hash(
+            search_input_hash = self._build_pass3_3_search_input_hash(
                 top_module=top_node.module_name,
                 instruction=instruction,
                 top_description=top_description,
@@ -2024,39 +2677,37 @@ class Pass3Generator:
                 instruction_datasheet=instruction_datasheet,
             )
 
-            content: Optional[str] = None
-            if self.owner.project_tracker.is_done(artifact_md, str(out_md), expected_input_hash=input_hash):
+            search_content: Optional[str] = None
+            if self.owner.project_tracker.is_done(artifact_search_md, str(out_search_md), expected_input_hash=search_input_hash):
                 try:
-                    content = out_md.read_text(encoding="utf-8")
+                    search_content = out_search_md.read_text(encoding="utf-8")
                 except Exception:
-                    content = None
+                    search_content = None
 
-            if content is None:
-                prompt = PASS3_3_PROMPT.format(
+            if search_content is None:
+                search_prompt = PASS3_3_1_SEARCH_PROMPT.format(
                     top_module=top_node.module_name,
                     instruction=instruction,
-                    top_description=top_description,
+                    module_description=top_description,
                     core_partition=self.owner._extract_summary(core_partition_text, max_lines=80, max_chars=12000),
                     instruction_datasheet=instruction_datasheet,
                 )
 
-                async def _tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
-                    if tool_name == "exploreCore":
-                        max_candidates = args.get("max_candidates", 10)
-                        try:
-                            max_candidates = int(max_candidates)
-                        except Exception:
-                            max_candidates = 10
-                        return self._tool_explore_core(top_node, max_candidates=max_candidates)
-
-                    if tool_name == "exploreInstRoute":
-                        tool_instruction = str(args.get("instruction") or instruction)
-                        max_domains = args.get("max_domains", 12)
-                        try:
-                            max_domains = int(max_domains)
-                        except Exception:
-                            max_domains = 12
-                        return self._tool_explore_inst_route(top_node, tool_instruction, max_domains=max_domains)
+                async def _search_tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
+                    if tool_name == "readSource":
+                        module = str(args.get("module") or "").strip()
+                        if not module:
+                            return "Error: module is required"
+                        scoped_node, scope_error = self._resolve_scope_node(top_node, module, child_only=False)
+                        if scoped_node is None:
+                            return (
+                                "Error: instrack readSource scope violation. "
+                                "At this level you can read only current module and direct children. "
+                                "For deeper modules, call forkSubAgent(module, task) first. "
+                                f"Details: {scope_error}"
+                            )
+                        topology = self._build_pass2_style_topology_block(str(scoped_node.module_name))
+                        return f"[readSource] module={scoped_node.module_name}\n\n{topology}"
 
                     if tool_name == "readDoc":
                         module = args.get("module") or args.get("module_name") or ""
@@ -2067,12 +2718,25 @@ class Pass3Generator:
                             sections = [str(section)]
                         if sections is not None and not isinstance(sections, list):
                             sections = [str(sections)]
-                        max_chars = args.get("max_chars", 12000)
+                        max_chars = args.get("max_chars", 0)
                         try:
                             max_chars = int(max_chars)
                         except Exception:
-                            max_chars = 12000
-                        return self._tool_read_doc(module=str(module), doc=str(doc), sections=sections, max_chars=max_chars)
+                            max_chars = 0
+                        scoped_node, scope_error = self._resolve_scope_node(top_node, str(module), child_only=False)
+                        if scoped_node is None:
+                            return (
+                                "Error: instrack readDoc scope violation. "
+                                "At this level you can read only current module and direct children. "
+                                "For deeper modules, call forkSubAgent(module, task) first. "
+                                f"Details: {scope_error}"
+                            )
+                        return self._tool_read_doc(
+                            module=str(scoped_node.module_name),
+                            doc=str(doc),
+                            sections=sections,
+                            max_chars=max_chars,
+                        )
 
                     if tool_name == "forkSubAgent":
                         module = str(args.get("module") or "")
@@ -2080,17 +2744,18 @@ class Pass3Generator:
                         child_node, error = self._resolve_scope_node(top_node, module, child_only=True)
                         if child_node is None:
                             return error
+
                         if not task:
-                            task = (
-                                f"请针对指令 {instruction}，分析 {child_node.instance_name}({child_node.module_name}) 层级中的模块流向证据，"
-                                "仅输出路径证据与待确认项，并按需继续 fork。"
-                            )
+                            return "Error: forkSubAgent requires a non-empty 'task'. Define a free-form child goal from the parent context."
                         report = await self._run_pass3_recursive_agent(
                             top_node=top_node,
                             current_node=child_node,
                             task=task,
                             level=1,
-                            prompt_style="instrack",
+                            prompt_style="instrack_search",
+                            instruction=instruction,
+                            instruction_datasheet=instruction_datasheet,
+                            path_records=[],
                         )
                         if len(report) > 16000:
                             report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
@@ -2101,59 +2766,113 @@ class Pass3Generator:
 
                     return f"Error: unknown tool '{tool_name}'"
 
-                log_path = self._project_log_path(f"pass3_3_instrack_{slug}")
+                search_log_path = self._build_pass3_3_1_agent_log_path(
+                    instruction=instruction,
+                    node_path=top_node.instance_name if hasattr(top_node, "instance_name") else top_node.module_name,
+                    level=0,
+                    role="search_agent",
+                )
                 self.owner.project_tracker.mark_running(
-                    artifact_md,
-                    input_hash=input_hash,
-                    meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3"},
+                    artifact_search_md,
+                    input_hash=search_input_hash,
+                    meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_1"},
+                )
+
+                self._append_agent_io_snapshot(
+                    search_log_path,
+                    stage="Input",
+                    system=PASS3_3_1_SEARCH_SYSTEM,
+                    prompt=search_prompt,
                 )
 
                 try:
-                    content, _token_stats = await self.owner.llm.generate(
-                        PASS3_3_SYSTEM,
-                        prompt,
-                        log_path=log_path,
+                    search_content, _token_stats = await self.owner.llm.generate(
+                        PASS3_3_1_SEARCH_SYSTEM,
+                        search_prompt,
+                        log_path=search_log_path,
                         tools_enabled=True,
-                        tools=self._pass3_3_tools(),
-                        tool_callback=_tool_callback,
+                        tools=self._pass3_3_1_tools(),
+                        tool_callback=_search_tool_callback,
                         max_tool_rounds=12,
                     )
                 except Exception as e:
-                    self.owner.project_tracker.mark_failed(artifact_md, str(e))
+                    self._append_agent_io_snapshot(
+                        search_log_path,
+                        stage="Output",
+                        system="",
+                        prompt="",
+                        output="",
+                        error=str(e),
+                    )
+                    self.owner.project_tracker.mark_failed(artifact_search_md, str(e))
                     index_entries.append({
                         "instruction": instruction,
                         "slug": slug,
                         "status": "failed",
+                        "stage": "search",
                         "error": str(e),
                     })
                     continue
 
-                out_md.write_text(content, encoding="utf-8")
-                self.owner.project_tracker.update(
-                    artifact_md,
-                    content,
-                    input_hash=input_hash,
-                    meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3"},
+                self._append_agent_io_snapshot(
+                    search_log_path,
+                    stage="Output",
+                    system="",
+                    prompt="",
+                    output=search_content or "",
                 )
 
-            parsed = self._extract_pass3_3_instrack_json(content or "", top_node, instruction)
-            json_text = json.dumps(parsed, ensure_ascii=False, indent=2)
+                search_content = self._coerce_instrack_search_json_only(search_content or "", top_node, instruction)
+
+                out_search_md.write_text(search_content, encoding="utf-8")
+                self.owner.project_tracker.update(
+                    artifact_search_md,
+                    search_content,
+                    input_hash=search_input_hash,
+                    meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_1"},
+                )
+
+            parsed_search = self._extract_pass3_3_search_json(search_content or "", top_node, instruction)
+            search_json_text = json.dumps(parsed_search, ensure_ascii=False, indent=2)
+            out_search_json.write_text(search_json_text, encoding="utf-8")
+            self.owner.project_tracker.update(
+                artifact_search_json,
+                search_json_text,
+                input_hash=search_input_hash,
+                meta={"source": artifact_search_md, "parser": "instrack_startpoint_v1"},
+            )
+
+            # Pass3.3.2 lifecycle mermaid generation is temporarily disabled.
+            # Keep .md as an exact JSON-codeblock mirror for easy human inspection.
+            out_md.write_text(search_content or "", encoding="utf-8")
+            self.owner.project_tracker.update(
+                artifact_md,
+                search_content or "",
+                input_hash=search_input_hash,
+                meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_search_only"},
+            )
+
+            json_text = json.dumps(parsed_search, ensure_ascii=False, indent=2)
             out_json.write_text(json_text, encoding="utf-8")
             self.owner.project_tracker.update(
                 artifact_json,
                 json_text,
-                input_hash=input_hash,
-                meta={"source": artifact_md, "parser": "instrack_table_v1"},
+                input_hash=search_input_hash,
+                meta={"source": artifact_md, "parser": "instrack_startpoint_only_v1"},
             )
 
             index_entries.append({
                 "instruction": instruction,
                 "slug": slug,
                 "status": "done",
+                "search_artifact_md": artifact_search_md,
+                "search_artifact_json": artifact_search_json,
                 "artifact_md": artifact_md,
                 "artifact_json": artifact_json,
-                "route_instance_count": len(parsed.get("route_instances") or []),
-                "route_module_count": len(parsed.get("route_modules") or []),
+                "start_module": parsed_search.get("start_module", ""),
+                "start_block": parsed_search.get("start_block", ""),
+                "key_register": parsed_search.get("key_register", ""),
+                "search_confidence": parsed_search.get("confidence", "low"),
             })
 
         index_payload = {
