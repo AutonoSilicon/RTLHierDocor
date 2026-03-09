@@ -32,12 +32,17 @@ PASS3_3_1_SEARCH_SYSTEM = """
 	- start_instance
 	- start_block
 	- key_register
+	- key_register_line_range
 	- key_register_reason
 	- start_reason
 	- confidence (high|medium|low)
 	- candidate_domains (array)
 	- unknown
 3. start_reason 必须体现起点判定逻辑；key_register_reason 必须体现寄存器级证据。
+4. key_register_line_range 表示“最终关键寄存器所在行号范围”，必须为对象：
+	- start_line: 正整数；未知时填 0
+	- end_line: 正整数；未知时填 0
+	并满足 end_line >= start_line（两者都非 0 时）。
 """
 
 PASS3_3_1_SEARCH_PROMPT = """

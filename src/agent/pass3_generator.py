@@ -1001,13 +1001,17 @@ class Pass3Generator:
 
     def _extract_pass3_3_search_json(self, content: str, top_node: Any, instruction: str) -> Dict[str, Any]:
         out = {
-            "schema_version": "pass3_3_1_startpoint_v1",
+            "schema_version": "pass3_3_1_startpoint_v2",
             "top_module": top_node.module_name,
             "instruction": instruction,
             "start_module": "",
             "start_instance": "",
             "start_block": "",
             "key_register": "",
+            "key_register_line_range": {
+                "start_line": 0,
+                "end_line": 0,
+            },
             "key_register_reason": "",
             "start_reason": "",
             "confidence": "low",
@@ -1028,6 +1032,9 @@ class Pass3Generator:
         out["start_instance"] = str(parsed.get("start_instance") or "").strip()
         out["start_block"] = str(parsed.get("start_block") or "").strip()
         out["key_register"] = str(parsed.get("key_register") or "").strip()
+        out["key_register_line_range"] = self._normalize_line_range(
+            parsed.get("key_register_line_range")
+        )
         out["key_register_reason"] = str(parsed.get("key_register_reason") or "").strip()
         out["start_reason"] = str(parsed.get("start_reason") or "").strip()
         conf = str(parsed.get("confidence") or "low").strip().lower()
@@ -1044,6 +1051,55 @@ class Pass3Generator:
             out["candidate_domains"] = normalized
 
         return out
+
+    @staticmethod
+    def _normalize_line_range(value: Any) -> Dict[str, int]:
+        """Normalize model output into a stable line-range object.
+
+        Accepted inputs:
+        - {"start_line": 10, "end_line": 20}
+        - {"start": 10, "end": 20}
+        - "10-20" / "10:20" / "10,20"
+        - [10, 20]
+        Unknown or invalid input returns {"start_line": 0, "end_line": 0}.
+        """
+
+        def _to_int(v: Any) -> int:
+            try:
+                n = int(str(v).strip())
+                return n if n > 0 else 0
+            except Exception:
+                return 0
+
+        start_line = 0
+        end_line = 0
+
+        if isinstance(value, dict):
+            start_line = _to_int(value.get("start_line", value.get("start")))
+            end_line = _to_int(value.get("end_line", value.get("end")))
+        elif isinstance(value, (list, tuple)) and len(value) >= 2:
+            start_line = _to_int(value[0])
+            end_line = _to_int(value[1])
+        elif isinstance(value, str) and value.strip():
+            nums = re.findall(r"\d+", value)
+            if len(nums) >= 2:
+                start_line = _to_int(nums[0])
+                end_line = _to_int(nums[1])
+            elif len(nums) == 1:
+                start_line = _to_int(nums[0])
+                end_line = start_line
+
+        if start_line > 0 and end_line == 0:
+            end_line = start_line
+        if end_line > 0 and start_line == 0:
+            start_line = end_line
+        if start_line > 0 and end_line > 0 and end_line < start_line:
+            start_line, end_line = end_line, start_line
+
+        return {
+            "start_line": start_line,
+            "end_line": end_line,
+        }
 
     def _coerce_instrack_search_json_only(self, content: str, top_node: Any, instruction: str) -> str:
         parsed = self._extract_pass3_3_search_json(content, top_node, instruction)
@@ -1146,6 +1202,11 @@ class Pass3Generator:
             f"- start_module: {search_json.get('start_module', '')}",
             f"- start_instance: {search_json.get('start_instance', '')}",
             f"- start_block: {search_json.get('start_block', '')}",
+            (
+                "- key_register_line_range: "
+                f"{(search_json.get('key_register_line_range') or {}).get('start_line', 0)}-"
+                f"{(search_json.get('key_register_line_range') or {}).get('end_line', 0)}"
+            ),
             f"- confidence: {search_json.get('confidence', 'low')}",
             "",
             "## Key Path Records",
@@ -2839,7 +2900,7 @@ class Pass3Generator:
                 artifact_search_json,
                 search_json_text,
                 input_hash=search_input_hash,
-                meta={"source": artifact_search_md, "parser": "instrack_startpoint_v1"},
+                meta={"source": artifact_search_md, "parser": "instrack_startpoint_v2"},
             )
 
             # Pass3.3.2 lifecycle mermaid generation is temporarily disabled.
@@ -2858,7 +2919,7 @@ class Pass3Generator:
                 artifact_json,
                 json_text,
                 input_hash=search_input_hash,
-                meta={"source": artifact_md, "parser": "instrack_startpoint_only_v1"},
+                meta={"source": artifact_md, "parser": "instrack_startpoint_only_v2"},
             )
 
             index_entries.append({
@@ -2872,6 +2933,7 @@ class Pass3Generator:
                 "start_module": parsed_search.get("start_module", ""),
                 "start_block": parsed_search.get("start_block", ""),
                 "key_register": parsed_search.get("key_register", ""),
+                "key_register_line_range": parsed_search.get("key_register_line_range", {"start_line": 0, "end_line": 0}),
                 "search_confidence": parsed_search.get("confidence", "low"),
             })
 
