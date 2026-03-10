@@ -46,10 +46,6 @@ from .pass2_6_timing import PASS2_6_TIMING_CDC_SYSTEM, PASS2_6_TIMING_CDC_PROMPT
 # Pass 2.7: Architecture design
 from .pass2_7_architecture import PASS2_7_ARCHITECTURE_SYSTEM, PASS2_7_ARCHITECTURE_PROMPT
 
-# Pass 3: Chip / Subsystem overview
-from .pass3_chip_overview import PASS3_SYSTEM, PASS3_PROMPT
-from .pass3_subsystem_overview import PASS3_SUBSYSTEM_SYSTEM, PASS3_SUBSYSTEM_PROMPT
-
 # Pass 3.1: Subsystem partition (agent exploration)
 from .pass3_1_subsystem_partition import PASS3_1_SYSTEM, PASS3_1_PROMPT
 
@@ -60,8 +56,12 @@ from .pass3_2_core_partition import PASS3_2_SYSTEM, PASS3_2_PROMPT
 from .pass3_3_instrack import (
     PASS3_3_1_SEARCH_SYSTEM,
     PASS3_3_1_SEARCH_PROMPT,
-    PASS3_3_2_LIFECYCLE_SYSTEM,
-    PASS3_3_2_LIFECYCLE_PROMPT,
+    PASS3_3_2_DRAW_SYSTEM,
+    PASS3_3_2_DRAW_PROMPT,
+    PASS3_3_2_PARENT_SYSTEM,
+    PASS3_3_2_PARENT_PROMPT,
+    PASS3_3_2_SYSTEM,
+    PASS3_3_2_PROMPT,
     PASS3_3_SYSTEM,
     PASS3_3_PROMPT,
 )
@@ -107,11 +107,6 @@ __all__ = [
     # Pass 2.7
     "PASS2_7_ARCHITECTURE_SYSTEM",
     "PASS2_7_ARCHITECTURE_PROMPT",
-    # Pass 3
-    "PASS3_SYSTEM",
-    "PASS3_PROMPT",
-    "PASS3_SUBSYSTEM_SYSTEM",
-    "PASS3_SUBSYSTEM_PROMPT",
     # Pass 3.1
     "PASS3_1_SYSTEM",
     "PASS3_1_PROMPT",
@@ -121,8 +116,12 @@ __all__ = [
     # Pass 3.3
     "PASS3_3_1_SEARCH_SYSTEM",
     "PASS3_3_1_SEARCH_PROMPT",
-    "PASS3_3_2_LIFECYCLE_SYSTEM",
-    "PASS3_3_2_LIFECYCLE_PROMPT",
+    "PASS3_3_2_DRAW_SYSTEM",
+    "PASS3_3_2_DRAW_PROMPT",
+    "PASS3_3_2_PARENT_SYSTEM",
+    "PASS3_3_2_PARENT_PROMPT",
+    "PASS3_3_2_SYSTEM",
+    "PASS3_3_2_PROMPT",
     "PASS3_3_SYSTEM",
     "PASS3_3_PROMPT",
 ]

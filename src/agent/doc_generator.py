@@ -629,8 +629,14 @@ class AgentDocGenerator:
                 boundary_edges.append((src, dst))
 
         if boundary_edges:
+            # Deduplicate repeated src->dst pairs to reduce noisy prompt context,
+            # while preserving multiplicity as xN when the same pair appears many times.
+            edge_counts: Dict[Tuple[str, str], int] = {}
+            for edge in boundary_edges:
+                edge_counts[edge] = edge_counts.get(edge, 0) + 1
+
             parts.append("\n## Boundary Connections (including direct links):")
-            for src, dst in sorted(boundary_edges):
+            for src, dst in sorted(edge_counts.keys()):
                 src_name = self._resolve_node_name_for_desc(src, graph)
                 dst_name = self._resolve_node_name_for_desc(dst, graph)
                 src_type = ""
@@ -659,7 +665,9 @@ class AgentDocGenerator:
                 elif dst in graph.comb_nodes:
                     dst_type = f"({graph.comb_nodes[dst].comb_type})"
 
-                parts.append(f"- {src_name}{src_type} -> {dst_name}{dst_type}")
+                count = edge_counts[(src, dst)]
+                count_suffix = f" x{count}" if count > 1 else ""
+                parts.append(f"- {src_name}{src_type} -> {dst_name}{dst_type}{count_suffix}")
 
         # Submodules with connectivity (alphabetical order)
         if graph.submodules:
@@ -2458,7 +2466,3 @@ class AgentDocGenerator:
     async def _run_pass3_3(self, top_node: Any) -> Optional[str]:
         """Pass 3.3: Generate per-instruction instrack artifacts."""
         return await self.pass3_generator.run_pass3_3(top_node)
-
-    async def _run_pass3(self, root: Any):
-        """Run chip-level pass3 generation (overview + subsystem pages)."""
-        await self.pass3_generator.run_pass3(root)
