@@ -1,7 +1,7 @@
 import os
 import re
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from models import SourceLocation
 
 class SourceResolver:
@@ -81,12 +81,17 @@ class SourceResolver:
                         if os.path.exists(abs_path):
                             return abs_path
                     return path
-        except:
+        except Exception:
             pass
         return None
 
     def read_source(self, module_name: str, max_lines: int = 2000) -> Optional[str]:
-        """Read source code for a module."""
+        """Read source code for a module.
+
+        Args:
+            module_name: Target RTL module name.
+            max_lines: Maximum lines to read. Set <= 0 for no truncation.
+        """
         path = self.resolve_path(module_name)
         if not path or not os.path.exists(path):
             return None
@@ -95,7 +100,7 @@ class SourceResolver:
             with open(path, 'r', encoding='utf-8', errors='ignore') as f:
                 lines = []
                 for i, line in enumerate(f):
-                    if i >= max_lines:
+                    if max_lines > 0 and i >= max_lines:
                         lines.append(f"\n... (truncated after {max_lines} lines)")
                         break
                     lines.append(line)
@@ -204,3 +209,30 @@ class SourceResolver:
                         parts.append('\n')
 
         return "".join(parts) if parts else "// Source code not found"
+
+    def get_topology_content(self, module_name: str) -> str:
+        """Compatibility API for pass3 readSource tooling.
+
+        The canonical structured data should come from pass2.x artifacts.
+        This method only provides a light fallback to raw source text.
+        """
+        key = str(module_name or "").strip()
+        if not key:
+            return ""
+        return self.read_source(key, max_lines=0) or ""
+
+    def get_proc_blocks(self, module_name: str) -> List[Dict[str, Any]]:
+        """Compatibility API retained for old call sites.
+
+        Structured PROC blocks should be parsed from pass2.x docs upstream.
+        """
+        _ = module_name
+        return []
+
+    def get_comb_blocks(self, module_name: str) -> List[Dict[str, Any]]:
+        """Compatibility API retained for old call sites.
+
+        Structured COMB blocks should be parsed from pass2.x docs upstream.
+        """
+        _ = module_name
+        return []

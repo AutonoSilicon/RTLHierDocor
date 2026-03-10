@@ -4,6 +4,7 @@ This module encapsulates core candidate discovery, topology block building,
 and instruction route exploration for pass3.
 """
 
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from .pass3_utils import contains_any
@@ -174,49 +175,68 @@ class Pass3Topology:
     def build_pass2_style_topology_block(self, module_name: str) -> str:
         """Build a pass2-style topology block for a module.
 
-        Returns PROC/COMB topology with source annotations if available.
+        Prefer raw pass2.4 topologyized source section when available.
         """
+        topology_prompt = self._load_pass2_4_topology_prompt(module_name)
+        if topology_prompt:
+            return topology_prompt.strip()
+
+        tracker = self.g.owner.tracker
+        structured_src = (
+            tracker.get_pass2_4_content(module_name)
+            or tracker.get_pass2_content(module_name)
+            or tracker.get_pass2_7_content(module_name)
+            or ""
+        )
+        if structured_src:
+            return structured_src.strip()
+
         resolver = self.g.owner.resolver
         topology_src = resolver.get_topology_content(module_name)
-
         if not topology_src:
             return f"# Topology for {module_name}\n\n无可用拓扑数据"
+        return topology_src
 
-        lines = [
-            f"# Topology: {module_name}",
-            "",
-            "## PROC Blocks",
-        ]
+    def _load_pass2_4_topology_prompt(self, module_name: str) -> str:
+        """Load topologyized source block from pass2.4 debug prompt file.
 
-        # Extract PROC blocks from topology
-        proc_blocks = resolver.get_proc_blocks(module_name)
-        if proc_blocks:
-            for proc in proc_blocks:
-                proc_id = proc.get("id", "unknown")
-                line_range = proc.get("line_range", {})
-                start = line_range.get("start", 0)
-                end = line_range.get("end", 0)
-                lines.append(f"- {proc_id}: lines {start}-{end}")
-        else:
-            lines.append("- 无PROC块")
+        Source file format: output_dir/debug/<module>/debug_pass2_4_functional.md
+        We extract exactly the original {graph_description} payload.
+        """
+        tracker = self.g.owner.tracker
+        output_dir = str(getattr(tracker, "output_dir", "") or "").strip()
+        if not output_dir:
+            return ""
 
-        lines.extend(["", "## COMB Blocks"])
+        debug_path = os.path.join(output_dir, "debug", module_name, "debug_pass2_4_functional.md")
+        if not os.path.exists(debug_path):
+            return ""
 
-        # Extract COMB blocks from topology
-        comb_blocks = resolver.get_comb_blocks(module_name)
-        if comb_blocks:
-            for comb in comb_blocks[:20]:  # Limit to avoid huge output
-                comb_id = comb.get("id", "unknown")
-                line_range = comb.get("line_range", {})
-                start = line_range.get("start", 0)
-                end = line_range.get("end", 0)
-                lines.append(f"- {comb_id}: lines {start}-{end}")
-            if len(comb_blocks) > 20:
-                lines.append(f"- ... and {len(comb_blocks) - 20} more")
-        else:
-            lines.append("- 无COMB块")
+        try:
+            with open(debug_path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+        except Exception:
+            return ""
 
-        return "\n".join(lines)
+        start_marker = "# Circuit Topology (PROC/COMB Logic Block Connection Diagram, Topologically Sorted, with Source Code):"
+        end_marker = "# Child Module Functional Descriptions:"
+
+        start = text.find(start_marker)
+        if start >= 0:
+            graph_start = start + len(start_marker)
+            end = text.find(end_marker, graph_start)
+            if end < 0:
+                end = len(text)
+            payload = text[graph_start:end].strip()
+            if payload:
+                return payload
+
+        # Fallback: legacy debug format without explicit child heading.
+        marker = "# Circuit Topology"
+        idx = text.find(marker)
+        if idx < 0:
+            return ""
+        return text[idx:].strip()
 
     def tool_explore_inst_route(
         self,

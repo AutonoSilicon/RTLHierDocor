@@ -854,6 +854,20 @@ class Pass3InStrackStages:
                 if child_node is None:
                     return error
                 child_path = child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
+                # De-duplicate by module: once any instance of a module is drawn in current draw session,
+                # reject repeated drawChild calls for the same module.
+                already_drawn_module = None
+                for _, cached in draw_cache.items():
+                    cached_module = str((cached or {}).get("module") or "").strip()
+                    if cached_module and cached_module == child_node.module_name:
+                        already_drawn_module = cached_module
+                        break
+                if already_drawn_module is not None:
+                    return (
+                        "[drawChild][reject] duplicate module draw request. "
+                        f"module={child_node.module_name} has already been drawn; "
+                        "reuse existing child draw summary instead of invoking drawChild again."
+                    )
                 cached_child = draw_cache.get(child_path)
                 if cached_child is None:
                     raw_handoffs = list(upstream_handoffs_raw or [])

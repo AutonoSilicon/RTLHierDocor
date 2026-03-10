@@ -223,7 +223,7 @@ class Pass3Tools:
                 "type": "function",
                 "function": {
                     "name": "drawChild",
-                    "description": "Trigger draw generation for one direct child module and return its Mermaid result.",
+                    "description": "Trigger draw generation for one direct child module and return its Mermaid result. Duplicate calls for an already-drawn module are rejected.",
                     "parameters": {
                         "type": "object",
                         "properties": {

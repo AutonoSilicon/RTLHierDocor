@@ -36,8 +36,8 @@ agent:
   max_modules: 0
   max_concurrent_modules: 16
 
-  # Run pass3.1/pass3.2/pass3.3 only (final pass3 overview is skipped in code flow)
-  pass3_enabled: true
+  # Debug mode: skip pass3.1/pass3.2 and run pass3.3 only
+  pass3_enabled: false
   pass3_3_enabled: true
 
   # Development-time instrack scope: only test ADD

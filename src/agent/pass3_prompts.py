@@ -86,6 +86,7 @@ class Pass3Prompts:
                 + "- 你处于 draw 递归子代理模式：仅绘制当前模块主通路，并返回 handoff_signals。\n"
                 + "- 你只能直接读取本级与直接子级拓扑证据（readSource 受限）。\n"
                 + "- 若需要子模块图，调用 drawChild(module, task)；禁止跨层调用。\n"
+                + "- drawChild 对已绘制 module 会返回 reject，需复用已有子图结论而非重复调用。\n"
                 + "- 是否调用 drawChild 由你自主决策，Python 不再预设 required_children 强制列表。"
             )
 

@@ -189,12 +189,15 @@ class AgentDocGenerator:
             print("[INFO] Running Pass 3.2: Core Microarchitecture Partition (Agent Explore)...")
             await self._run_pass3_2(self.hierarchy)
 
-            if self.pass3_3_enabled:
-                print("[INFO] Running Pass 3.3: InStrack (Instruction Route Tracking)...")
-                await self._run_pass3_3(self.hierarchy)
-
             # Keep only pass3.1/3.2/3.3 outputs; skip final overview/subsystem aggregation pass.
             print("[INFO] Skipping final Pass 3 overview generation (configured workflow: keep 3.1/3.2/3.3 only).")
+
+        # Allow pass3.3 standalone debug runs (skip 3.1/3.2).
+        if self.pass3_3_enabled:
+            if not self.pass3_enabled:
+                print("[INFO] Pass 3.1/3.2 disabled; running Pass 3.3 only (instrack debug mode)...")
+            print("[INFO] Running Pass 3.3: InStrack (Instruction Route Tracking)...")
+            await self._run_pass3_3(self.hierarchy)
 
         print(f"[INFO] Documentation generation complete.")
         print(f"[INFO]   Modules: {self.modules_dir}")
@@ -486,8 +489,16 @@ class AgentDocGenerator:
             predecessors[node] = []
             successors[node] = []
         
+        # Deduplicate edges once at source to avoid repeated connections in all sections.
+        unique_edges: List[Tuple[str, str]] = []
+        seen_edges: set = set()
         for src, dst in graph.edges:
             if src in all_nodes and dst in all_nodes:
+                key = (src, dst)
+                if key in seen_edges:
+                    continue
+                seen_edges.add(key)
+                unique_edges.append(key)
                 successors[src].append(dst)
                 predecessors[dst].append(src)
         
@@ -496,6 +507,7 @@ class AgentDocGenerator:
             if not node_ids:
                 return "None"
             names = []
+            seen_names = set()
             for node_id in node_ids:
                 name = self._resolve_node_name_for_desc(node_id, graph)
                 # Add type hint for clarity
@@ -511,6 +523,9 @@ class AgentDocGenerator:
                 elif node_id in graph.seq_cells:
                     seq_type = graph.seq_cells[node_id] or "seq"
                     name = f"{name}({seq_type})"
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
                 names.append(name)
             return ", ".join(names)
         
@@ -538,7 +553,7 @@ class AgentDocGenerator:
         for block_id in all_blocks:
             in_degree[block_id] = 0
         
-        for src, dst in graph.edges:
+        for src, dst in unique_edges:
             if src in all_blocks and dst in all_blocks:
                 adj[src].append(dst)
                 in_degree[dst] += 1
@@ -622,21 +637,15 @@ class AgentDocGenerator:
         # Add non-block connectivity section so direct port/submodule/seq links are visible
         # (e.g., port->port direct assigns in simple modules)
         boundary_edges: List[Tuple[str, str]] = []
-        for src, dst in graph.edges:
+        for src, dst in unique_edges:
             src_is_block = src in graph.proc_nodes or src in graph.comb_nodes
             dst_is_block = dst in graph.proc_nodes or dst in graph.comb_nodes
             if not (src_is_block and dst_is_block):
                 boundary_edges.append((src, dst))
 
         if boundary_edges:
-            # Deduplicate repeated src->dst pairs to reduce noisy prompt context,
-            # while preserving multiplicity as xN when the same pair appears many times.
-            edge_counts: Dict[Tuple[str, str], int] = {}
-            for edge in boundary_edges:
-                edge_counts[edge] = edge_counts.get(edge, 0) + 1
-
             parts.append("\n## Boundary Connections (including direct links):")
-            for src, dst in sorted(edge_counts.keys()):
+            for src, dst in sorted(boundary_edges):
                 src_name = self._resolve_node_name_for_desc(src, graph)
                 dst_name = self._resolve_node_name_for_desc(dst, graph)
                 src_type = ""
@@ -664,10 +673,7 @@ class AgentDocGenerator:
                     dst_type = "(PROC)"
                 elif dst in graph.comb_nodes:
                     dst_type = f"({graph.comb_nodes[dst].comb_type})"
-
-                count = edge_counts[(src, dst)]
-                count_suffix = f" x{count}" if count > 1 else ""
-                parts.append(f"- {src_name}{src_type} -> {dst_name}{dst_type}{count_suffix}")
+                parts.append(f"- {src_name}{src_type} -> {dst_name}{dst_type}")
 
         # Submodules with connectivity (alphabetical order)
         if graph.submodules:
