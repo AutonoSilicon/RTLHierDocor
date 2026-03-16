@@ -58,7 +58,7 @@ class Pass3InStrackParsing:
             out["route_blocks"] = route_blocks
             out["route_bridges"] = route_bridges
             out["route_modules_approx"] = modules_approx
-            out["raw_summary"] = self.g.owner._extract_summary(content, max_lines=24, max_chars=3000)
+            out["raw_summary"] = content
             out["mermaid"] = mermaid_code
             return out
 
@@ -75,7 +75,7 @@ class Pass3InStrackParsing:
         scoped_lines = lines[start_idx:] if start_idx < len(lines) else lines
         table_lines = [line.strip() for line in scoped_lines if line.strip().startswith("|")]
         if len(table_lines) < 3:
-            out["raw_summary"] = self.g.owner._extract_summary(content, max_lines=24, max_chars=3000)
+            out["raw_summary"] = content
             return out
 
         header_cells = [c.strip() for c in table_lines[0].strip('|').split('|')]
@@ -125,7 +125,7 @@ class Pass3InStrackParsing:
             idx_unknown = 4
 
         if idx_route_blocks is None:
-            out["raw_summary"] = self.g.owner._extract_summary(content, max_lines=24, max_chars=3000)
+            out["raw_summary"] = content
             return out
 
         target_row: Optional[List[str]] = None
@@ -167,7 +167,7 @@ class Pass3InStrackParsing:
             target_row = max(candidate_rows, key=_chain_score)
 
         if not target_row:
-            out["raw_summary"] = self.g.owner._extract_summary(content, max_lines=24, max_chars=3000)
+            out["raw_summary"] = content
             return out
 
         route_block_text = target_row[idx_route_blocks] if idx_route_blocks < len(target_row) else ""
@@ -195,7 +195,7 @@ class Pass3InStrackParsing:
         out["route_modules_approx"] = modules_approx
         out["evidence"] = evidence_text
         out["unknown"] = unknown_text
-        out["raw_summary"] = self.g.owner._extract_summary(content, max_lines=24, max_chars=3000)
+        out["raw_summary"] = content
         return out
 
     def extract_routes_from_mermaid(self, mermaid_code: str) -> Tuple[List[str], List[str], List[str]]:
@@ -256,7 +256,7 @@ class Pass3InStrackParsing:
     def extract_pass3_3_search_json(self, content: str, top_node: Any, instruction: str) -> Dict[str, Any]:
         """Extract search result JSON from content."""
         out = {
-            "schema_version": "pass3_3_1_startpoint_v2",
+            "schema_version": "pass3_3_1_startpoint_v3",
             "top_module": top_node.module_name,
             "instruction": instruction,
             "start_module": "",
@@ -283,15 +283,36 @@ class Pass3InStrackParsing:
         if not isinstance(parsed, dict):
             return out
 
-        out["start_module"] = str(parsed.get("start_module") or "").strip()
-        out["start_instance"] = str(parsed.get("start_instance") or "").strip()
-        out["start_block"] = str(parsed.get("start_block") or "").strip()
-        out["key_register"] = str(parsed.get("key_register") or "").strip()
-        out["key_register_line_range"] = self.normalize_line_range(
-            parsed.get("key_register_line_range")
-        )
-        out["key_register_reason"] = str(parsed.get("key_register_reason") or "").strip()
-        out["start_reason"] = str(parsed.get("start_reason") or "").strip()
+        start_point = parsed.get("start_point")
+        if isinstance(start_point, dict):
+            out["start_module"] = str(start_point.get("module") or "").strip()
+            out["start_instance"] = str(start_point.get("instance") or "").strip()
+            out["start_block"] = str(start_point.get("block") or "").strip()
+        else:
+            out["start_module"] = str(parsed.get("start_module") or "").strip()
+            out["start_instance"] = str(parsed.get("start_instance") or "").strip()
+            out["start_block"] = str(parsed.get("start_block") or "").strip()
+
+        key_register = parsed.get("key_register")
+        if isinstance(key_register, dict):
+            out["key_register"] = str(key_register.get("name") or "").strip()
+            out["key_register_line_range"] = self.normalize_line_range(
+                key_register.get("line_range")
+            )
+        else:
+            out["key_register"] = str(parsed.get("key_register") or "").strip()
+            out["key_register_line_range"] = self.normalize_line_range(
+                parsed.get("key_register_line_range")
+            )
+
+        evidence = str(parsed.get("evidence") or "").strip()
+        if evidence:
+            out["start_reason"] = evidence
+            out["key_register_reason"] = evidence
+        else:
+            out["key_register_reason"] = str(parsed.get("key_register_reason") or "").strip()
+            out["start_reason"] = str(parsed.get("start_reason") or "").strip()
+
         conf = str(parsed.get("confidence") or "low").strip().lower()
         out["confidence"] = conf if conf in {"high", "medium", "low"} else "low"
         out["unknown"] = str(parsed.get("unknown") or "").strip()

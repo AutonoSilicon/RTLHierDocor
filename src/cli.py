@@ -311,6 +311,29 @@ def cmd_docor(args):
     }
     llm = get_llm_backend(llm_config)
 
+    # Optional dedicated model for Pass3.3 draw
+    instrack_draw_llm = None
+    instrack_draw_enabled = any([
+        cfg.instrack_draw_model,
+        cfg.instrack_draw_thinking is not None,
+    ])
+    if instrack_draw_enabled:
+        instrack_draw_model = cfg.instrack_draw_model if cfg.instrack_draw_model else cfg.agent_model
+        instrack_draw_thinking = (
+            cfg.instrack_draw_thinking if cfg.instrack_draw_thinking is not None else cfg.agent_thinking
+        )
+        instrack_draw_llm_config = {
+            "backend": cfg.agent_backend,
+            "model": instrack_draw_model,
+            "api_key": cfg.agent_api_key,
+            "base_url": cfg.agent_base_url,
+            "thinking": instrack_draw_thinking,
+        }
+        instrack_draw_llm = get_llm_backend(instrack_draw_llm_config)
+        if cfg.verbose:
+            print(f"[config] instrack draw model:    {instrack_draw_model}")
+            print(f"[config] instrack draw thinking: {instrack_draw_thinking}")
+
     # Optional dedicated endpoint for Pass2 incremental composer
     composer_llm = None
     composer_enabled = any([
@@ -352,6 +375,7 @@ def cmd_docor(args):
     generator = AgentDocGenerator(
         hierarchy=hierarchy,
         llm=llm,
+        instrack_draw_llm=instrack_draw_llm,
         composer_llm=composer_llm,
         resolver=resolver,
         tracker=tracker,
@@ -360,6 +384,8 @@ def cmd_docor(args):
         skip_modules=cfg.skip_modules,
         schematic_gen=schematic_gen,
         block_doc_threshold=cfg.block_doc_threshold,
+        pass1_enabled=cfg.pass1_enabled,
+        pass2_enabled=cfg.pass2_enabled,
         pass3_enabled=cfg.pass3_enabled,
         pass3_3_enabled=cfg.pass3_3_enabled,
         isa_profile=cfg.isa_profile,

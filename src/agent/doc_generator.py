@@ -54,6 +54,7 @@ class AgentDocGenerator:
         self,
         hierarchy: Any,
         llm: LLMBackend,
+        instrack_draw_llm: Optional[LLMBackend],
         composer_llm: Optional[LLMBackend],
         resolver: SourceResolver,
         tracker: ProgressTracker,
@@ -62,6 +63,8 @@ class AgentDocGenerator:
         skip_modules: Optional[List[str]] = None,
         schematic_gen: Optional[Any] = None,
         block_doc_threshold: int = 64,
+        pass1_enabled: bool = True,
+        pass2_enabled: bool = True,
         pass3_enabled: bool = True,
         pass3_3_enabled: bool = True,
         isa_profile: str = "c910",
@@ -76,6 +79,7 @@ class AgentDocGenerator:
     ):
         self.hierarchy = hierarchy
         self.llm = llm
+        self.instrack_draw_llm = instrack_draw_llm or llm
         self.resolver = resolver
         self.tracker = tracker
         self.output_dir = Path(output_dir)
@@ -85,6 +89,8 @@ class AgentDocGenerator:
         self.skip_modules = skip_modules or []
         self.schematic_gen = schematic_gen
         self.block_doc_threshold = block_doc_threshold
+        self.pass1_enabled = pass1_enabled
+        self.pass2_enabled = pass2_enabled
         self.pass3_enabled = pass3_enabled
         self.pass3_3_enabled = pass3_3_enabled
         self.isa_profile = isa_profile
@@ -156,33 +162,43 @@ class AgentDocGenerator:
             self._precompute_graphs(self.hierarchy)
             print(f"[INFO] Precomputed {len(self._graphs)} simplified graphs")
 
-        # Pass 1: Top-down Preview Generation
-        print("[INFO] Running Pass 1: Top-down Preview Generation...")
-        await self._run_pass1(self.hierarchy, "该模块是设计的顶层模块。")
+        if self.pass1_enabled:
+            print("[INFO] Running Pass 1: Top-down Preview Generation...")
+            await self._run_pass1(self.hierarchy, "该模块是设计的顶层模块。")
+        else:
+            print("[INFO] Pass 1 disabled; skipping preview generation.")
 
-        # Pass 1.5: Block-level Documentation (extracted from old Pass 2)
-        print("[INFO] Running Pass 1.5: Block-level Documentation...")
-        await self._run_pass1_5(self.hierarchy)
+        if self.pass2_enabled:
+            if not self.pass1_enabled:
+                raise RuntimeError("Pass 2 requires Pass 1. Enable agent.pass1_enabled before running Pass 2.")
 
-        # Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5 + Pass 2.6 + Pass 2.7: Run in parallel (all depend only on Pass 1 + Pass 1.5)
-        print("[INFO] Running Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5 + Pass 2.6 + Pass 2.7 in parallel...")
-        import asyncio
-        await asyncio.gather(
-            self._run_pass2_1(self.hierarchy),
-            self._run_pass2_2(self.hierarchy),
-            self._run_pass2_3(self.hierarchy),
-            self._run_pass2_4(self.hierarchy),
-            self._run_pass2_5(self.hierarchy),
-            self._run_pass2_6(self.hierarchy),
-            self._run_pass2_7(self.hierarchy)
-        )
+            # Pass 1.5: Block-level Documentation (extracted from old Pass 2)
+            print("[INFO] Running Pass 1.5: Block-level Documentation...")
+            await self._run_pass1_5(self.hierarchy)
 
-        # Pass 2: Bottom-up Synthesis Documentation (depends on Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5)
-        print("[INFO] Running Pass 2: Synthesis Documentation...")
-        await self._run_pass2(self.hierarchy)
+            # Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5 + Pass 2.6 + Pass 2.7
+            print("[INFO] Running Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5 + Pass 2.6 + Pass 2.7 in parallel...")
+            import asyncio
+            await asyncio.gather(
+                self._run_pass2_1(self.hierarchy),
+                self._run_pass2_2(self.hierarchy),
+                self._run_pass2_3(self.hierarchy),
+                self._run_pass2_4(self.hierarchy),
+                self._run_pass2_5(self.hierarchy),
+                self._run_pass2_6(self.hierarchy),
+                self._run_pass2_7(self.hierarchy)
+            )
+
+            # Pass 2: Bottom-up Synthesis Documentation
+            print("[INFO] Running Pass 2: Synthesis Documentation...")
+            await self._run_pass2(self.hierarchy)
+        else:
+            print("[INFO] Pass 2 disabled; skipping Pass 1.5 and Pass 2.x.")
 
         # Pass 3: Chip-level top-down overview and subsystem index pages
         if self.pass3_enabled:
+            if not self.pass1_enabled:
+                raise RuntimeError("Pass 3 requires Pass 1. Enable agent.pass1_enabled before running Pass 3.")
             print("[INFO] Running Pass 3.1: SoC-level Subsystem Partition (Agent exploration)...")
             await self._run_pass3_1(self.hierarchy)
 
@@ -194,6 +210,8 @@ class AgentDocGenerator:
 
         # Allow pass3.3 standalone debug runs (skip 3.1/3.2).
         if self.pass3_3_enabled:
+            if not self.pass1_enabled:
+                raise RuntimeError("Pass 3.3 requires Pass 1. Enable agent.pass1_enabled before running Pass 3.3.")
             if not self.pass3_enabled:
                 print("[INFO] Pass 3.1/3.2 disabled; running Pass 3.3 only (instrack debug mode)...")
             print("[INFO] Running Pass 3.3: InStrack (Instruction Route Tracking)...")

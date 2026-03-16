@@ -5,7 +5,9 @@ including fork trace logging and agent I/O snapshots.
 """
 
 import datetime
+import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict
 
@@ -15,8 +17,11 @@ from .pass3_utils import safe_slug
 class Pass3Debug:
     """Helper object encapsulating pass3 debug logging infrastructure."""
 
+    CONTEXT_WINDOW_TOKENS = 200000
+
     def __init__(self, generator: Any):
         self.g = generator
+        self._reset_agent_logs: set = set()
 
     def project_log_path(self, name: str) -> str:
         """Get path for a debug log file."""
@@ -37,14 +42,25 @@ class Pass3Debug:
         level: int,
         role: str,
     ) -> str:
-        """Create a unique debug log path for one pass3 instrack agent invocation."""
-        seq = self.next_agent_log_seq()
+        """Create a stable debug log path for one pass3 instrack agent invocation.
+
+        The file is overwritten on the first write in each run so repeated
+        executions update the same debug artifact instead of creating R000x
+        variants.
+        """
         inst_slug = safe_slug(instruction or "unknown")
         node_slug = safe_slug((node_path or "top").replace("/", "__"))
         role_slug = safe_slug(role or "agent")
-        return self.project_log_path(
-            f"pass3_instrack_{role_slug}_{inst_slug}_{node_slug}_L{level}_R{seq:04d}"
+        log_path = self.project_log_path(
+            f"pass3_instrack_{role_slug}_{inst_slug}_{node_slug}_L{level}"
         )
+        if log_path not in self._reset_agent_logs:
+            try:
+                Path(log_path).write_text("", encoding="utf-8")
+            except Exception:
+                pass
+            self._reset_agent_logs.add(log_path)
+        return log_path
 
     def build_pass3_3_1_agent_log_path(
         self,
@@ -62,30 +78,26 @@ class Pass3Debug:
             role=role,
         )
 
-    def fork_trace_log_path(self) -> Path:
-        """Get path for the fork trace log."""
-        log_dir = self.g.owner.chip_debug_dir
-        log_dir.mkdir(parents=True, exist_ok=True)
-        return log_dir / "debug_pass3_fork_trace.jsonl"
-
     def fork_trace_log_path_pass3_3_1(self) -> Path:
         """Get path for the pass3.3.1 fork trace log."""
         log_dir = self.g.owner.chip_debug_dir
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir / "debug_pass3_3_1_fork_trace.jsonl"
 
+    def fork_trace_log_path_pass3_3_2(self) -> Path:
+        """Get path for the pass3.3.2 fork trace log."""
+        log_dir = self.g.owner.chip_debug_dir
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir / "debug_pass3_3_2_fork_trace.jsonl"
+
     def append_fork_trace(self, event: str, payload: Dict[str, Any]):
         """Append one fork-related trace record as JSONL."""
-        trace_path = self.fork_trace_log_path()
         record = {
             "ts": datetime.datetime.now().isoformat(),
             "event": event,
         }
         record.update(payload or {})
         try:
-            with open(trace_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
             # Emit concise runtime progress to terminal for pass3.3 instrack fork flows.
             prompt_style = str((payload or {}).get("prompt_style") or "")
             pass_name = str((payload or {}).get("pass") or "")
@@ -112,9 +124,11 @@ class Pass3Debug:
                     child_inst = str((payload or {}).get("child_instance") or "?")
                     child_mod = str((payload or {}).get("child_module") or "?")
                     report_chars = int((payload or {}).get("report_chars") or 0)
+                    prompt_tokens = int((payload or {}).get("prompt_tokens") or 0)
+                    context_pct = (prompt_tokens / float(self.CONTEXT_WINDOW_TOKENS)) * 100.0
                     print(
                         f"[InStrack][{stage_tag}][fork][return] {child_inst}({child_mod}) "
-                        f"report_chars={report_chars}"
+                        f"report_chars={report_chars} ctx={context_pct:.1f}%"
                     )
                 elif event in {"fork_rejected", "pass3_1_fork_rejected", "pass3_2_fork_rejected"}:
                     module_selector = str((payload or {}).get("module_selector") or "")
@@ -129,6 +143,12 @@ class Pass3Debug:
                 trace_331 = self.fork_trace_log_path_pass3_3_1()
                 with open(trace_331, "a", encoding="utf-8") as f331:
                     f331.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+            is_pass3_3_2 = pass_name == "pass3_3_2_draw" or prompt_style == "instrack_draw"
+            if is_pass3_3_2:
+                trace_332 = self.fork_trace_log_path_pass3_3_2()
+                with open(trace_332, "a", encoding="utf-8") as f332:
+                    f332.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception:
             # Debug log failure should not block the generation flow.
             pass
@@ -157,8 +177,6 @@ class Pass3Debug:
                 f.write(f"- prompt_style: {prompt_style}\n")
                 f.write(f"- task: {task}\n")
                 f.write(f"- cache_key: {cache_key}\n")
-                f.write("\n### Direct children snapshot\n")
-                f.write((child_overview or "- 无子模块") + "\n")
         except Exception:
             # Debug log failure should not block generation.
             pass
@@ -181,9 +199,9 @@ class Pass3Debug:
                 f.write("=" * 80 + "\n\n")
                 if stage.lower() == "input":
                     f.write("### System\n")
-                    f.write((system or "") + "\n\n")
+                    f.write(self._compact_system_snapshot(system or "") + "\n\n")
                     f.write("### Prompt\n")
-                    f.write((prompt or "") + "\n")
+                    f.write(self._compact_prompt_snapshot(prompt or "") + "\n")
                 else:
                     if error:
                         f.write("### Error\n")
@@ -193,3 +211,88 @@ class Pass3Debug:
         except Exception:
             # Debug log failure should not block generation.
             pass
+
+    @staticmethod
+    def _hash_text(text: str) -> str:
+        return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _truncate_text(text: str, *, max_lines: int, max_chars: int) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        lines = raw.splitlines()
+        clipped = "\n".join(lines[:max_lines]).strip()
+        if len(clipped) > max_chars:
+            clipped = clipped[: max_chars - 3].rstrip() + "..."
+        omitted_lines = max(0, len(lines) - max_lines)
+        omitted_chars = max(0, len(raw) - len(clipped))
+        if omitted_lines > 0 or omitted_chars > 0:
+            clipped += (
+                f"\n\n[debug-compact] omitted_lines={omitted_lines} "
+                f"omitted_chars~={omitted_chars}"
+            )
+        return clipped
+
+    def _compact_system_snapshot(self, system: str) -> str:
+        text = str(system or "").strip()
+        if not text:
+            return ""
+        header = (
+            f"[debug-compact] chars={len(text)} lines={len(text.splitlines())} "
+            f"sha256={self._hash_text(text)}"
+        )
+        return header + "\n\n" + self._truncate_text(text, max_lines=18, max_chars=2200)
+
+    def _compact_prompt_snapshot(self, prompt: str) -> str:
+        text = str(prompt or "").strip()
+        if not text:
+            return ""
+        header = (
+            f"[debug-compact] chars={len(text)} lines={len(text.splitlines())} "
+            f"sha256={self._hash_text(text)}"
+        )
+        sections = self._split_markdown_sections(text)
+        if not sections:
+            return header + "\n\n" + self._truncate_text(text, max_lines=40, max_chars=5000)
+
+        rendered = [header]
+        for title, body in sections:
+            rendered.append("")
+            rendered.append(f"## {title}")
+            rendered.append(self._compact_prompt_section(title, body))
+        return "\n".join(rendered).strip()
+
+    @staticmethod
+    def _split_markdown_sections(text: str) -> list:
+        pattern = re.compile(r"^##\s+(.*)$", flags=re.M)
+        matches = list(pattern.finditer(text or ""))
+        if not matches:
+            return []
+        sections = []
+        for idx, match in enumerate(matches):
+            title = (match.group(1) or "").strip()
+            start = match.end()
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+            body = text[start:end].strip("\n")
+            sections.append((title, body.strip()))
+        return sections
+
+    def _compact_prompt_section(self, title: str, body: str) -> str:
+        if title == "Existing Child Draw Summaries":
+            child_count = len(re.findall(r"^###\s+", body or "", flags=re.M))
+            mermaid_count = len(re.findall(r"```mermaid", body or "", flags=re.I))
+            compact = self._truncate_text(body, max_lines=24, max_chars=2200)
+            return (
+                f"[debug-compact] child_summaries={child_count} mermaid_blocks={mermaid_count}\n\n"
+                f"{compact}"
+            ).strip()
+        if title in {"Current Module Description", "Current Module Preview"}:
+            return self._truncate_text(body, max_lines=28, max_chars=2600)
+        if title == "Direct Child Preview List":
+            return self._truncate_text(body, max_lines=28, max_chars=2600)
+        if title == "Instruction Datasheet":
+            return self._truncate_text(body, max_lines=22, max_chars=1800)
+        if title == "Draw State":
+            return self._truncate_text(body, max_lines=8, max_chars=1800)
+        return self._truncate_text(body, max_lines=16, max_chars=1800)

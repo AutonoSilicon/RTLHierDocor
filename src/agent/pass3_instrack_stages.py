@@ -47,7 +47,7 @@ class Pass3InStrackStages:
         search_result_json_text: str,
     ) -> str:
         payload = {
-            "version": "pass3_3_instrack_draw_cache_v9",
+            "version": "pass3_3_instrack_draw_cache_v10",
             "top_module": top_module,
             "instruction": instruction,
             "system_prompt": PASS3_3_2_DRAW_SYSTEM,
@@ -110,29 +110,19 @@ class Pass3InStrackStages:
             return path_nodes[-1]
         return None
 
-    def get_module_description(self, module_name: str) -> str:
-        text = self.g.owner.tracker.get_pass2_content(module_name) or ""
+    def get_module_preview(self, module_name: str) -> str:
+        text = self.g.owner.tracker.get_pass1_content(module_name) or ""
         if not text:
-            text = self.g.owner.tracker.get_pass2_7_content(module_name) or ""
-        if not text:
-            text = self.g.owner.tracker.get_pass1_content(module_name) or "无可用 description 文档"
-        return text
-
-    def _get_functional_description(self, module_name: str) -> str:
-        text = self.g.owner.tracker.get_pass2_4_content(module_name) or ""
-        if not text:
-            text = self.g.owner.tracker.get_pass2_1_content(module_name) or ""
-        if not text:
-            text = "无可用功能描述文档"
+            text = "无可用 preview 文档"
         return text
 
     def build_child_overview(self, current_node: Any) -> str:
         lines: List[str] = []
         for child in sorted(current_node.children.values(), key=lambda c: (c.module_name, c.instance_name)):
-            child_desc = self.get_module_description(child.module_name)
+            child_desc = self.get_module_preview(child.module_name)
             lines.append(
                 f"- {child.instance_name} ({child.module_name}): "
-                f"{self.g.owner._extract_summary(child_desc, max_lines=3, max_chars=320)}"
+                f"{child_desc}"
             )
         return "\n".join(lines) if lines else "- 无子模块"
 
@@ -216,7 +206,8 @@ class Pass3InStrackStages:
             "stage": "draw",
             "module": current_node.module_name,
             "instance": current_node.instance_name,
-            "handoff_signals": [],
+            "entry_ports": [],
+            "boundary_handoffs": [],
             "lifecycle_context": "",
             "instruction_state": "",
             "confidence": "low",
@@ -237,29 +228,78 @@ class Pass3InStrackStages:
         payload["stage"] = "draw"
         payload["module"] = str(parsed.get("module") or current_node.module_name).strip()
         payload["instance"] = str(parsed.get("instance") or current_node.instance_name).strip()
-        payload["lifecycle_context"] = str(parsed.get("lifecycle_context") or "").strip()
-        payload["instruction_state"] = str(parsed.get("instruction_state") or "").strip()
+        payload["lifecycle_context"] = self._coerce_text_field(parsed.get("lifecycle_context"))
+        payload["instruction_state"] = self._coerce_text_field(parsed.get("instruction_state"))
         conf = str(parsed.get("confidence") or "low").strip().lower()
         payload["confidence"] = conf if conf in {"high", "medium", "low"} else "low"
-        payload["unknown"] = str(parsed.get("unknown") or "").strip()
+        payload["unknown"] = self._coerce_text_field(parsed.get("unknown"))
 
-        handoff = parsed.get("handoff_signals")
-        if isinstance(handoff, list):
-            norm_handoff: List[Dict[str, Any]] = []
-            for item in handoff:
+        entry_ports = parsed.get("entry_ports")
+        if isinstance(entry_ports, list):
+            norm_entry_ports: List[Dict[str, Any]] = []
+            for item in entry_ports:
                 if not isinstance(item, dict):
                     continue
-                signals = item.get("signals")
-                if not isinstance(signals, list):
-                    signals = [str(signals)] if str(signals or "").strip() else []
-                norm_handoff.append({
-                    "target_module": str(item.get("target_module") or "").strip(),
-                    "target_instance": str(item.get("target_instance") or "").strip(),
-                    "signals": [str(s).strip() for s in signals if str(s).strip()],
-                })
-            payload["handoff_signals"] = norm_handoff
+                port = str(item.get("port") or item.get("target_port") or "").strip()
+                if not port:
+                    continue
+                direction = str(item.get("direction") or "input").strip().lower()
+                if direction not in {"input", "output", "inout"}:
+                    direction = "input"
+                norm_item: Dict[str, Any] = {
+                    "port": port,
+                    "direction": direction,
+                    "value_kind": str(item.get("value_kind") or "other").strip() or "other",
+                    "semantic": self._coerce_text_field(item.get("semantic")),
+                }
+                matched_from = item.get("matched_from")
+                if isinstance(matched_from, dict):
+                    norm_item["matched_from"] = {
+                        "source_instance": str(matched_from.get("source_instance") or "").strip(),
+                        "source_module": str(matched_from.get("source_module") or "").strip(),
+                        "source_port": str(matched_from.get("source_port") or "").strip(),
+                        "parent_wire": str(matched_from.get("parent_wire") or matched_from.get("wire") or "").strip(),
+                    }
+                norm_entry_ports.append(norm_item)
+            payload["entry_ports"] = norm_entry_ports
+
+        boundary_handoffs = parsed.get("boundary_handoffs")
+        if isinstance(boundary_handoffs, list):
+            norm_handoffs: List[Dict[str, Any]] = []
+            for item in boundary_handoffs:
+                if not isinstance(item, dict):
+                    continue
+                egress_port = str(item.get("egress_port") or "").strip()
+                if not egress_port:
+                    continue
+                norm_handoffs.append(
+                    {
+                        "source_block": str(item.get("source_block") or "").strip(),
+                        "source_state": self._coerce_text_field(item.get("source_state")),
+                        "egress_port": egress_port,
+                        "value_kind": str(item.get("value_kind") or "other").strip() or "other",
+                        "semantic": self._coerce_text_field(item.get("semantic")),
+                        "behavior": self._coerce_text_field(item.get("behavior")),
+                        "resolutions": [],
+                        "status": str(item.get("status") or "").strip(),
+                        "confidence": str(item.get("confidence") or payload["confidence"]).strip().lower() or payload["confidence"],
+                        "unknown": self._coerce_text_field(item.get("unknown")),
+                    }
+                )
+            payload["boundary_handoffs"] = norm_handoffs
 
         return payload
+
+    @staticmethod
+    def _coerce_text_field(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        try:
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            return str(value).strip()
 
     @staticmethod
     def salvage_mermaid_text(content: str) -> str:
@@ -366,7 +406,7 @@ class Pass3InStrackStages:
         start_path = start_node.get_path() if hasattr(start_node, "get_path") else start_node.instance_name
         recorded_paths: Set[str] = {start_path}
         draw_cache[start_path] = start_item
-        pending_handoffs = list((start_item.get("draw_payload") or {}).get("handoff_signals") or [])
+        pending_handoffs = list((start_item.get("draw_payload") or {}).get("boundary_handoffs") or [])
         pending_payload = dict(start_item.get("draw_payload") or {})
 
         # Step 2: climb to top and draw parent-context bridges level by level.
@@ -405,7 +445,7 @@ class Pass3InStrackStages:
             results.append(parent_item)
             recorded_paths.add(parent_path)
             draw_cache[parent_path] = parent_item
-            pending_handoffs = list((parent_item.get("draw_payload") or {}).get("handoff_signals") or [])
+            pending_handoffs = list((parent_item.get("draw_payload") or {}).get("boundary_handoffs") or [])
             pending_payload = dict(parent_item.get("draw_payload") or {})
 
         return results
@@ -463,13 +503,19 @@ class Pass3InStrackStages:
         for item in handoffs or []:
             if not isinstance(item, dict):
                 continue
-            target_instance = str(item.get("target_instance") or "").strip()
-            target_module = str(item.get("target_module") or "").strip()
-            if target_instance and target_instance == child_node.instance_name:
-                out.append(item)
-                continue
-            if target_module and target_module == child_node.module_name:
-                out.append(item)
+            for resolution in list(item.get("resolutions") or []):
+                if not isinstance(resolution, dict):
+                    continue
+                if str(resolution.get("resolution_kind") or "").strip() != "sibling_child":
+                    continue
+                target_instance = str(resolution.get("target_instance") or "").strip()
+                target_module = str(resolution.get("target_module") or "").strip()
+                if target_instance and target_instance == child_node.instance_name:
+                    out.append(item)
+                    break
+                if target_module and target_module == child_node.module_name:
+                    out.append(item)
+                    break
         return out
 
     def _summarize_handoffs_for_state(self, handoffs: List[Dict[str, Any]]) -> List[str]:
@@ -477,19 +523,34 @@ class Pass3InStrackStages:
         for item in handoffs or []:
             if not isinstance(item, dict):
                 continue
-            target_instance = str(item.get("target_instance") or "").strip()
-            target_module = str(item.get("target_module") or "").strip()
-            signals = item.get("signals") or []
-            if not isinstance(signals, list):
-                signals = [signals]
-            sigs = [str(sig).strip() for sig in signals if str(sig).strip()]
-            preview = ", ".join(sigs[:3])
-            if len(sigs) > 3:
-                preview += f", +{len(sigs) - 3}"
-            head = target_instance or target_module or "unknown"
-            if target_instance and target_module:
-                head = f"{target_instance}({target_module})"
-            lines.append(f"{head}: {preview}" if preview else head)
+            egress_port = str(item.get("egress_port") or "").strip()
+            semantic = self._coerce_text_field(item.get("semantic"))
+            resolutions = list(item.get("resolutions") or [])
+            targets: List[str] = []
+            for resolution in resolutions:
+                if not isinstance(resolution, dict):
+                    continue
+                kind = str(resolution.get("resolution_kind") or "").strip()
+                if kind == "sibling_child":
+                    target_instance = str(resolution.get("target_instance") or "").strip()
+                    target_module = str(resolution.get("target_module") or "").strip()
+                    target_port = str(resolution.get("target_port") or "").strip()
+                    head = target_instance or target_module or "unknown"
+                    if target_instance and target_module:
+                        head = f"{target_instance}({target_module})"
+                    if target_port:
+                        head = f"{head}:{target_port}"
+                    targets.append(head)
+                elif kind == "exit_parent":
+                    parent_port = str(resolution.get("parent_port") or "").strip()
+                    targets.append(f"parent:{parent_port}" if parent_port else "parent_exit")
+            preview = "; ".join(targets[:3])
+            if len(targets) > 3:
+                preview += f"; +{len(targets) - 3}"
+            head = egress_port or "unknown_port"
+            if semantic:
+                head = f"{head}({semantic})"
+            lines.append(f"{head} -> {preview}" if preview else head)
         return lines[:6]
 
     @staticmethod
@@ -501,208 +562,256 @@ class Pass3InStrackStages:
         text = re.sub(r"\[[^\]]+\]$", "", text)
         return text.strip()
 
-    def _resolve_handoff_destinations(
+    def _get_module_port_directions(self, module_name: str) -> Dict[str, str]:
+        resolver = getattr(self.g.owner, "resolver", None)
+        backend = getattr(resolver, "backend", None)
+        if backend is None:
+            return {}
+        try:
+            module = backend.get_module(module_name)
+        except Exception:
+            module = None
+        if module is None:
+            return {}
+
+        directions: Dict[str, str] = {}
+        try:
+            for wire_id in module.wires_:
+                wire = module.wire(wire_id)
+                if not (getattr(wire, "port_input", False) or getattr(wire, "port_output", False)):
+                    continue
+                name = wire.name.str().lstrip("\\")
+                if getattr(wire, "port_input", False) and getattr(wire, "port_output", False):
+                    directions[name] = "inout"
+                elif getattr(wire, "port_output", False):
+                    directions[name] = "output"
+                else:
+                    directions[name] = "input"
+        except Exception:
+            return {}
+        return directions
+
+    def _find_port_direction(self, module_name: str, port_name: str) -> str:
+        norm_port = self._normalize_signal_name(port_name)
+        if not norm_port:
+            return ""
+        for name, direction in self._get_module_port_directions(module_name).items():
+            if self._normalize_signal_name(name) == norm_port:
+                return direction
+        return ""
+
+    def _lookup_port_connection(self, node: Any, port_name: str) -> str:
+        port_name = str(port_name or "").strip()
+        if not port_name:
+            return ""
+        raw = dict(getattr(node, "port_connections", {}) or {})
+        if port_name in raw:
+            return str(raw.get(port_name) or "").strip()
+        norm_port = self._normalize_signal_name(port_name)
+        for candidate, wire in raw.items():
+            if self._normalize_signal_name(candidate) == norm_port:
+                return str(wire or "").strip()
+        return ""
+
+    def _validate_boundary_handoffs_against_module(
+        self,
+        node: Any,
+        boundary_handoffs: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        port_directions = self._get_module_port_directions(node.module_name)
+        normalized_dirs = {
+            self._normalize_signal_name(name): direction
+            for name, direction in port_directions.items()
+            if self._normalize_signal_name(name)
+        }
+
+        validated: List[Dict[str, Any]] = []
+        seen_ports: Set[str] = set()
+        for raw_item in boundary_handoffs or []:
+            if not isinstance(raw_item, dict):
+                continue
+            handoff = dict(raw_item)
+            egress_port = str(handoff.get("egress_port") or "").strip()
+            norm_port = self._normalize_signal_name(egress_port)
+            if not egress_port:
+                handoff["status"] = "invalid"
+                handoff["unknown"] = self._append_reason(
+                    str(handoff.get("unknown") or ""),
+                    "missing egress_port",
+                )
+                validated.append(handoff)
+                continue
+
+            port_dir = normalized_dirs.get(norm_port, "")
+            if not port_dir:
+                handoff["status"] = "invalid"
+                handoff["unknown"] = self._append_reason(
+                    str(handoff.get("unknown") or ""),
+                    f"egress_port '{egress_port}' is not a declared port of module '{node.module_name}'",
+                )
+                validated.append(handoff)
+                continue
+
+            if port_dir != "output":
+                handoff["status"] = "invalid"
+                handoff["unknown"] = self._append_reason(
+                    str(handoff.get("unknown") or ""),
+                    f"egress_port '{egress_port}' is not an output port",
+                )
+                validated.append(handoff)
+                continue
+
+            if norm_port in seen_ports:
+                handoff["status"] = "invalid"
+                handoff["unknown"] = self._append_reason(
+                    str(handoff.get("unknown") or ""),
+                    f"duplicate boundary_handoff for egress_port '{egress_port}'",
+                )
+                validated.append(handoff)
+                continue
+
+            seen_ports.add(norm_port)
+            validated.append(handoff)
+
+        return validated
+
+    def _resolve_boundary_handoff_destinations(
         self,
         parent_node: Any,
         source_child_node: Any,
-        handoffs: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """Resolve handoff destinations using hierarchy port maps + simplified graph.
-
-        Returns three destination categories:
-        - sibling_connections: exact child-port to child-port via parent wire
-        - exits_parent: parent IO ports that carry unresolved handoff wires upward
-        - parent_logic: parent-level PROC/COMB/seq nodes connected to source child in topology
-        """
-        source_conn = dict(getattr(source_child_node, "port_connections", {}) or {})
-        wire_to_source_ports: Dict[str, Set[str]] = {}
-        for src_port, raw_wire in source_conn.items():
-            wire = str(raw_wire or "").strip()
-            if not wire or wire.startswith("["):
-                continue
-            norm_wire = self._normalize_signal_name(wire)
-            if not norm_wire:
-                continue
-            wire_to_source_ports.setdefault(norm_wire, set()).add(str(src_port or "").strip())
-
-        sibling_connections: List[Dict[str, str]] = []
-        exits_parent: List[Dict[str, str]] = []
-        parent_logic: List[Dict[str, str]] = []
-        unresolved: List[str] = []
-        seen_sibling: Set[str] = set()
-        seen_exit: Set[str] = set()
-        seen_logic: Set[str] = set()
-
-        def _handoff_signals() -> List[str]:
-            out: List[str] = []
-            for item in handoffs or []:
-                if not isinstance(item, dict):
-                    continue
-                sigs = item.get("signals") or []
-                if not isinstance(sigs, list):
-                    sigs = [sigs]
-                for sig in sigs:
-                    sig_text = str(sig or "").strip()
-                    if sig_text:
-                        out.append(sig_text)
-            return out
-
-        signals = _handoff_signals()
-        matched_wires: Set[str] = set()
-
-        for signal in signals:
-            norm_signal = self._normalize_signal_name(signal)
-            if not norm_signal:
-                continue
-            resolved_wires: Set[str] = set()
-
-            for src_port, raw_wire in source_conn.items():
-                port_name = str(src_port or "").strip()
-                norm_port = self._normalize_signal_name(port_name)
-                wire_name = str(raw_wire or "").strip()
-                norm_wire = self._normalize_signal_name(wire_name)
-                if not norm_wire or wire_name.startswith("["):
-                    continue
-                if norm_signal == norm_port or norm_signal == norm_wire:
-                    resolved_wires.add(norm_wire)
-
-            if not resolved_wires:
-                unresolved.append(signal)
-                continue
-
-            for norm_wire in sorted(resolved_wires):
-                matched_wires.add(norm_wire)
-                src_ports = sorted(wire_to_source_ports.get(norm_wire, set()))
-                src_port = src_ports[0] if src_ports else ""
-                for sibling in parent_node.children.values():
-                    sibling_path = sibling.get_path() if hasattr(sibling, "get_path") else sibling.instance_name
-                    source_path = (
-                        source_child_node.get_path()
-                        if hasattr(source_child_node, "get_path")
-                        else source_child_node.instance_name
-                    )
-                    if sibling_path == source_path:
-                        continue
-                    sibling_conn = dict(getattr(sibling, "port_connections", {}) or {})
-                    for target_port, target_wire in sibling_conn.items():
-                        target_norm_wire = self._normalize_signal_name(str(target_wire or ""))
-                        if target_norm_wire != norm_wire:
-                            continue
-                        key = f"{sibling.instance_name}|{target_port}|{norm_wire}|{signal}"
-                        if key in seen_sibling:
-                            continue
-                        seen_sibling.add(key)
-                        sibling_connections.append(
-                            {
-                                "source_signal": signal,
-                                "source_port": src_port,
-                                "parent_wire": norm_wire,
-                                "target_instance": sibling.instance_name,
-                                "target_module": sibling.module_name,
-                                "target_port": str(target_port or "").strip(),
-                            }
-                        )
-
+        boundary_handoffs: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        source_path = source_child_node.get_path() if hasattr(source_child_node, "get_path") else source_child_node.instance_name
+        source_port_dirs = self._get_module_port_directions(source_child_node.module_name)
         graphs = getattr(self.g.owner, "_graphs", None)
         graph = graphs.get(parent_node.module_name) if isinstance(graphs, dict) else None
-
+        io_norm_to_label: Dict[str, str] = {}
         if graph is not None:
-            io_norm_to_label: Dict[str, str] = {}
             for _, io_label in dict(getattr(graph, "io_ports", {}) or {}).items():
                 label = str(io_label or "").strip().lstrip("\\")
                 norm = self._normalize_signal_name(label)
                 if norm:
                     io_norm_to_label.setdefault(norm, label)
 
-            for norm_wire in sorted(matched_wires):
-                if norm_wire not in io_norm_to_label:
-                    continue
-                key = f"{norm_wire}|{io_norm_to_label[norm_wire]}"
-                if key in seen_exit:
-                    continue
-                seen_exit.add(key)
-                exits_parent.append(
-                    {
-                        "source_signal": norm_wire,
-                        "parent_wire": norm_wire,
-                        "port_name": io_norm_to_label[norm_wire],
-                    }
+        enriched: List[Dict[str, Any]] = []
+        for item in boundary_handoffs or []:
+            if not isinstance(item, dict):
+                continue
+            handoff = dict(item)
+            egress_port = str(handoff.get("egress_port") or "").strip()
+            handoff["source_instance_path"] = source_path
+            handoff["source_module"] = source_child_node.module_name
+            handoff["source_instance"] = source_child_node.instance_name
+            handoff["handoff_id"] = f"{source_path}::{egress_port}" if egress_port else f"{source_path}::unknown"
+            handoff["source_direction"] = ""
+            handoff["parent_wire"] = ""
+            handoff["resolutions"] = []
+
+            if not egress_port:
+                handoff["status"] = "invalid"
+                handoff["unknown"] = self._append_reason(str(handoff.get("unknown") or ""), "missing egress_port")
+                enriched.append(handoff)
+                continue
+
+            if str(handoff.get("status") or "").strip() == "invalid":
+                enriched.append(handoff)
+                continue
+
+            port_dir = ""
+            for name, direction in source_port_dirs.items():
+                if self._normalize_signal_name(name) == self._normalize_signal_name(egress_port):
+                    port_dir = direction
+                    break
+            handoff["source_direction"] = port_dir
+            if port_dir and port_dir != "output":
+                handoff["status"] = "invalid"
+                handoff["unknown"] = self._append_reason(
+                    str(handoff.get("unknown") or ""),
+                    f"egress_port '{egress_port}' is not an output port",
                 )
+                enriched.append(handoff)
+                continue
 
-            source_node_ids = [
-                str(node_id)
-                for node_id, inst_name in dict(getattr(graph, "submodules", {}) or {}).items()
-                if str(inst_name or "").strip() == str(source_child_node.instance_name or "").strip()
-            ]
-            proc_nodes = dict(getattr(graph, "proc_nodes", {}) or {})
-            comb_nodes = dict(getattr(graph, "comb_nodes", {}) or {})
-            seq_nodes = dict(getattr(graph, "seq_cells", {}) or {})
-            for src_id, dst_id in list(getattr(graph, "edges", []) or []):
-                relation = ""
-                neighbor = ""
-                if src_id in source_node_ids:
-                    relation = "from_child"
-                    neighbor = str(dst_id)
-                elif dst_id in source_node_ids:
-                    relation = "to_child"
-                    neighbor = str(src_id)
-                if not neighbor:
+            raw_wire = self._lookup_port_connection(source_child_node, egress_port)
+            norm_wire = self._normalize_signal_name(raw_wire)
+            if not raw_wire or raw_wire.startswith("[") or not norm_wire:
+                handoff["status"] = "unresolved"
+                handoff["unknown"] = self._append_reason(
+                    str(handoff.get("unknown") or ""),
+                    f"no resolvable parent wire for egress_port '{egress_port}'",
+                )
+                enriched.append(handoff)
+                continue
+
+            handoff["parent_wire"] = norm_wire
+            resolutions: List[Dict[str, str]] = []
+            seen_resolution: Set[str] = set()
+            for sibling in parent_node.children.values():
+                sibling_path = sibling.get_path() if hasattr(sibling, "get_path") else sibling.instance_name
+                if sibling_path == source_path:
                     continue
-                if neighbor in proc_nodes:
-                    proc = proc_nodes[neighbor]
-                    src_loc = getattr(proc, "source_location", None)
-                    summary = f"PROC {neighbor}"
-                    if src_loc is not None:
-                        summary = f"PROC {neighbor} @ {src_loc.short_display()}"
-                    key = f"proc|{neighbor}|{relation}"
-                    if key not in seen_logic:
-                        seen_logic.add(key)
-                        parent_logic.append(
-                            {
-                                "dest_type": "proc",
-                                "node_id": neighbor,
-                                "direction": relation,
-                                "summary": summary,
-                            }
-                        )
-                elif neighbor in comb_nodes:
-                    comb = comb_nodes[neighbor]
-                    comb_type = str(getattr(comb, "comb_type", "COMB"))
-                    src_locs = list(getattr(comb, "source_locations", []) or [])
-                    summary = f"{comb_type} {neighbor}"
-                    if src_locs:
-                        summary = f"{comb_type} {neighbor} @ {src_locs[0].short_display()}"
-                    key = f"comb|{neighbor}|{relation}"
-                    if key not in seen_logic:
-                        seen_logic.add(key)
-                        parent_logic.append(
-                            {
-                                "dest_type": "comb",
-                                "node_id": neighbor,
-                                "direction": relation,
-                                "summary": summary,
-                            }
-                        )
-                elif neighbor in seq_nodes:
-                    cell_type = str(seq_nodes[neighbor] or "SEQ")
-                    key = f"seq|{neighbor}|{relation}"
-                    if key not in seen_logic:
-                        seen_logic.add(key)
-                        parent_logic.append(
-                            {
-                                "dest_type": "seq_cell",
-                                "node_id": neighbor,
-                                "direction": relation,
-                                "summary": f"SEQ {neighbor} ({cell_type})",
-                            }
-                        )
+                for target_port, target_wire in dict(getattr(sibling, "port_connections", {}) or {}).items():
+                    target_norm_wire = self._normalize_signal_name(str(target_wire or ""))
+                    if target_norm_wire != norm_wire:
+                        continue
+                    target_dir = self._find_port_direction(sibling.module_name, str(target_port or "").strip())
+                    if target_dir and target_dir != "input":
+                        continue
+                    key = f"sibling|{sibling.instance_name}|{target_port}|{norm_wire}"
+                    if key in seen_resolution:
+                        continue
+                    seen_resolution.add(key)
+                    resolutions.append(
+                        {
+                            "resolution_kind": "sibling_child",
+                            "parent_wire": norm_wire,
+                            "target_instance": sibling.instance_name,
+                            "target_module": sibling.module_name,
+                            "target_port": str(target_port or "").strip(),
+                            "match_policy": "exact_port",
+                        }
+                    )
 
-        return {
-            "sibling_connections": sibling_connections,
-            "exits_parent": exits_parent,
-            "parent_logic": parent_logic,
-            "unresolved": unresolved,
-        }
+            if norm_wire in io_norm_to_label:
+                parent_port = io_norm_to_label[norm_wire]
+                key = f"parent|{parent_port}|{norm_wire}"
+                if key not in seen_resolution:
+                    resolutions.append(
+                        {
+                            "resolution_kind": "exit_parent",
+                            "parent_wire": norm_wire,
+                            "parent_port": parent_port,
+                            "match_policy": "exact_port",
+                        }
+                    )
+
+            handoff["resolutions"] = resolutions
+            if resolutions:
+                kinds = {str(r.get("resolution_kind") or "") for r in resolutions}
+                if kinds == {"exit_parent"}:
+                    handoff["status"] = "exit_parent"
+                else:
+                    handoff["status"] = "resolved"
+            else:
+                handoff["status"] = "unresolved"
+                handoff["unknown"] = self._append_reason(
+                    str(handoff.get("unknown") or ""),
+                    f"no strict boundary match for egress_port '{egress_port}' on wire '{norm_wire}'",
+                )
+            enriched.append(handoff)
+        return enriched
+
+    @staticmethod
+    def _append_reason(base: str, extra: str) -> str:
+        base = str(base or "").strip()
+        extra = str(extra or "").strip()
+        if not extra:
+            return base
+        if not base:
+            return extra
+        if extra in base:
+            return base
+        return f"{base}; {extra}"
 
     def _build_upstream_context(
         self,
@@ -713,28 +822,47 @@ class Pass3InStrackStages:
         handoffs: List[Dict[str, Any]],
         source_payload: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        resolved = self._resolve_handoff_destinations(parent_node, source_child_node, handoffs)
-        sibling_connections = list(resolved.get("sibling_connections") or [])
-        parent_logic = list(resolved.get("parent_logic") or [])
-        exits_parent = list(resolved.get("exits_parent") or [])
-        unresolved = list(resolved.get("unresolved") or [])
-
         entry_ports: List[Dict[str, str]] = []
-        for item in sibling_connections:
-            if str(item.get("target_instance") or "").strip() != str(target_child_node.instance_name or "").strip():
+        exits_parent: List[Dict[str, str]] = []
+        unresolved: List[str] = []
+        for item in handoffs or []:
+            if not isinstance(item, dict):
                 continue
-            entry_ports.append(
-                {
-                    "target_port": str(item.get("target_port") or "").strip(),
-                    "wire": str(item.get("parent_wire") or "").strip(),
-                    "source_port": str(item.get("source_port") or "").strip(),
-                }
-            )
+            egress_port = str(item.get("egress_port") or "").strip()
+            parent_wire = str(item.get("parent_wire") or "").strip()
+            for resolution in list(item.get("resolutions") or []):
+                if not isinstance(resolution, dict):
+                    continue
+                kind = str(resolution.get("resolution_kind") or "").strip()
+                if kind == "sibling_child":
+                    if str(resolution.get("target_instance") or "").strip() != str(target_child_node.instance_name or "").strip():
+                        continue
+                    entry_ports.append(
+                        {
+                            "target_port": str(resolution.get("target_port") or "").strip(),
+                            "wire": str(resolution.get("parent_wire") or parent_wire).strip(),
+                            "source_port": egress_port,
+                            "source_instance": str(item.get("source_instance") or source_child_node.instance_name).strip(),
+                            "source_module": str(item.get("source_module") or source_child_node.module_name).strip(),
+                            "semantic": self._coerce_text_field(item.get("semantic")),
+                            "value_kind": str(item.get("value_kind") or "other").strip() or "other",
+                        }
+                    )
+                elif kind == "exit_parent":
+                    exits_parent.append(
+                        {
+                            "parent_wire": str(resolution.get("parent_wire") or parent_wire).strip(),
+                            "parent_port": str(resolution.get("parent_port") or "").strip(),
+                            "source_port": egress_port,
+                        }
+                    )
+            if str(item.get("status") or "").strip() == "unresolved":
+                unresolved.append(egress_port or str(item.get("semantic") or "").strip())
 
         unique_entries: List[Dict[str, str]] = []
         seen_entries: Set[str] = set()
         for entry in entry_ports:
-            key = f"{entry.get('target_port')}|{entry.get('wire')}|{entry.get('source_port')}"
+            key = f"{entry.get('target_port')}|{entry.get('wire')}|{entry.get('source_port')}|{entry.get('source_instance')}"
             if key in seen_entries:
                 continue
             seen_entries.add(key)
@@ -747,23 +875,11 @@ class Pass3InStrackStages:
             "source_instance": str(source_child_node.instance_name or "").strip(),
             "source_module": str(source_child_node.module_name or "").strip(),
             "entry_ports": unique_entries[:8],
-            "parent_logic_on_path": [str(item.get("summary") or "").strip() for item in parent_logic[:4] if str(item.get("summary") or "").strip()],
             "exits_parent": exits_parent[:4],
             "unresolved": unresolved[:6],
             "lifecycle_context": lifecycle_context,
             "instruction_state": instruction_state,
         }
-
-    @staticmethod
-    def _build_upstream_context_section(upstream_context: Optional[Dict[str, Any]]) -> str:
-        if not isinstance(upstream_context, dict) or not upstream_context:
-            return ""
-        compact = json.dumps(upstream_context, ensure_ascii=False, separators=(",", ":"))
-        return (
-            "\n## Upstream Continuation Context（来自前序模块的精确续画上下文）\n"
-            "你当前处于按需子模块续画阶段。入口端口列表由 Python 层根据 RTL 连接精确计算，请直接据此续画，不要猜测入口信号。\n"
-            f"{compact}\n"
-        )
 
     def _build_existing_child_draws(self, parent_node: Any, draw_cache: Dict[str, Dict[str, Any]]) -> str:
         lines: List[str] = []
@@ -772,12 +888,204 @@ class Pass3InStrackStages:
             child_item = draw_cache.get(child_path)
             if not child_item:
                 continue
-            mermaid = str(child_item.get("mermaid") or "").strip()
-            if not mermaid:
+            summary = self._summarize_child_draw_for_prompt(child_item)
+            if not summary:
                 continue
-            lines.append(f"### {child.instance_name} ({child.module_name})")
-            lines.append(mermaid)
+            lines.append(summary)
         return "\n\n".join(lines) if lines else "- 无已完成子模块 draw 结果"
+
+    @staticmethod
+    def _truncate_inline_text(text: str, max_chars: int = 220) -> str:
+        raw = " ".join(str(text or "").strip().split())
+        if len(raw) <= max_chars:
+            return raw
+        return raw[: max_chars - 3].rstrip() + "..."
+
+    @staticmethod
+    def _extract_mermaid_outline(mermaid_text: str) -> List[str]:
+        outlines: List[str] = []
+        seen: Set[str] = set()
+        for line in str(mermaid_text or "").splitlines():
+            raw = line.strip()
+            if not raw or raw.startswith("flowchart"):
+                continue
+            if "-->" not in raw and "-.->" not in raw and "[" not in raw:
+                continue
+            cleaned = re.sub(r"^[A-Za-z0-9_]+\s*\[\s*", "", raw)
+            cleaned = re.sub(r"\]\s*$", "", cleaned)
+            cleaned = cleaned.strip("`\"' ")
+            cleaned = cleaned.replace("<br/>", " | ").replace("<br>", " | ")
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            if not cleaned:
+                continue
+            compact = Pass3InStrackStages._truncate_inline_text(cleaned, max_chars=160)
+            if compact in seen:
+                continue
+            seen.add(compact)
+            outlines.append(compact)
+            if len(outlines) >= 3:
+                break
+        return outlines
+
+    def _summarize_child_draw_for_prompt(self, child_item: Dict[str, Any]) -> str:
+        payload = dict(child_item.get("draw_payload") or {})
+        child_instance = str(child_item.get("instance") or payload.get("instance") or "").strip()
+        child_module = str(child_item.get("module") or payload.get("module") or "").strip()
+        if not child_instance and not child_module:
+            return ""
+
+        lines: List[str] = [f"### {child_instance} ({child_module})".strip()]
+        lifecycle_context = self._truncate_inline_text(payload.get("lifecycle_context") or "", max_chars=240)
+        instruction_state = self._truncate_inline_text(payload.get("instruction_state") or "", max_chars=240)
+        confidence = str(payload.get("confidence") or "low").strip()
+        unknown = self._truncate_inline_text(payload.get("unknown") or "", max_chars=200)
+
+        entry_ports = []
+        for item in list(payload.get("entry_ports") or []):
+            if not isinstance(item, dict):
+                continue
+            port = str(item.get("port") or item.get("target_port") or "").strip()
+            if not port:
+                continue
+            matched_from = dict(item.get("matched_from") or {})
+            source_port = str(matched_from.get("source_port") or item.get("source_port") or "").strip()
+            source_instance = str(matched_from.get("source_instance") or item.get("source_instance") or "").strip()
+            preview = port
+            if source_instance or source_port:
+                preview = f"{preview} <= {source_instance}:{source_port}".strip(":")
+            entry_ports.append(preview)
+
+        handoffs = []
+        for item in list(payload.get("boundary_handoffs") or []):
+            if not isinstance(item, dict):
+                continue
+            egress_port = str(item.get("egress_port") or "").strip()
+            semantic = self._truncate_inline_text(item.get("semantic") or "", max_chars=80)
+            targets: List[str] = []
+            for resolution in list(item.get("resolutions") or []):
+                if not isinstance(resolution, dict):
+                    continue
+                kind = str(resolution.get("resolution_kind") or "").strip()
+                if kind == "sibling_child":
+                    target_instance = str(resolution.get("target_instance") or "").strip()
+                    target_port = str(resolution.get("target_port") or "").strip()
+                    targets.append(f"{target_instance}:{target_port}".strip(":"))
+                elif kind == "exit_parent":
+                    targets.append(f"parent:{str(resolution.get('parent_port') or '').strip()}".rstrip(":"))
+            preview = "; ".join(targets[:3])
+            if len(targets) > 3:
+                preview += f"; +{len(targets) - 3}"
+            head = egress_port or "unknown_port"
+            if semantic:
+                head = f"{head}({semantic})"
+            handoffs.append(f"{head} -> {preview}" if preview else head)
+
+        if lifecycle_context:
+            lines.append(f"- lifecycle_context: {lifecycle_context}")
+        if instruction_state:
+            lines.append(f"- instruction_state: {instruction_state}")
+        if entry_ports:
+            lines.append(f"- entry_ports: {'; '.join(entry_ports[:3])}")
+        if handoffs:
+            lines.append(f"- boundary_handoffs: {'; '.join(handoffs[:3])}")
+        lines.append(f"- confidence: {confidence}")
+        if unknown:
+            lines.append(f"- unknown: {unknown}")
+        return "\n".join(lines)
+
+    def _enrich_entry_ports(
+        self,
+        entry_ports: List[Dict[str, Any]],
+        upstream_context: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        enriched: List[Dict[str, Any]] = []
+        for item in entry_ports or []:
+            if not isinstance(item, dict):
+                continue
+            enriched.append(dict(item))
+
+        upstream_entries = list((upstream_context or {}).get("entry_ports") or [])
+        if not upstream_entries:
+            return enriched
+
+        by_port: Dict[str, Dict[str, Any]] = {}
+        for entry in enriched:
+            port = self._normalize_signal_name(entry.get("port") or entry.get("target_port") or "")
+            if port and port not in by_port:
+                by_port[port] = entry
+
+        for raw in upstream_entries:
+            if not isinstance(raw, dict):
+                continue
+            target_port = str(raw.get("target_port") or raw.get("port") or "").strip()
+            if not target_port:
+                continue
+            norm_port = self._normalize_signal_name(target_port)
+            current = by_port.get(norm_port)
+            matched_from = {
+                "source_instance": str(raw.get("source_instance") or "").strip(),
+                "source_module": str(raw.get("source_module") or "").strip(),
+                "source_port": str(raw.get("source_port") or "").strip(),
+                "parent_wire": str(raw.get("wire") or raw.get("parent_wire") or "").strip(),
+            }
+            if current is None:
+                current = {
+                    "port": target_port,
+                    "direction": "input",
+                    "value_kind": str(raw.get("value_kind") or "other").strip() or "other",
+                    "semantic": self._coerce_text_field(raw.get("semantic")),
+                    "matched_from": matched_from,
+                }
+                enriched.append(current)
+                by_port[norm_port] = current
+                continue
+            current["matched_from"] = matched_from
+            if not str(current.get("semantic") or "").strip():
+                current["semantic"] = self._coerce_text_field(raw.get("semantic"))
+            if not str(current.get("value_kind") or "").strip():
+                current["value_kind"] = str(raw.get("value_kind") or "other").strip() or "other"
+        return enriched
+
+    def _enrich_draw_payload(
+        self,
+        node: Any,
+        payload: Dict[str, Any],
+        upstream_context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        out = dict(payload or {})
+        out["entry_ports"] = self._enrich_entry_ports(list(out.get("entry_ports") or []), upstream_context)
+        boundary_handoffs = self._validate_boundary_handoffs_against_module(
+            node,
+            list(out.get("boundary_handoffs") or []),
+        )
+        if getattr(node, "parent", None) is not None and boundary_handoffs:
+            out["boundary_handoffs"] = self._resolve_boundary_handoff_destinations(
+                parent_node=node.parent,
+                source_child_node=node,
+                boundary_handoffs=boundary_handoffs,
+            )
+        else:
+            out["boundary_handoffs"] = boundary_handoffs
+        return out
+
+    def _build_draw_child_tool_result(self, child_item: Dict[str, Any], child_task: str) -> str:
+        payload = dict(child_item.get("draw_payload") or {})
+        result = {
+            "child": {
+                "module": str(child_item.get("module") or payload.get("module") or "").strip(),
+                "instance": str(child_item.get("instance") or payload.get("instance") or "").strip(),
+                "path": str(child_item.get("path") or "").strip(),
+            },
+            "entry_ports": list(payload.get("entry_ports") or []),
+            "boundary_handoffs": list(payload.get("boundary_handoffs") or []),
+            "instruction_state": payload.get("instruction_state") or "",
+            "lifecycle_context": payload.get("lifecycle_context") or "",
+            "confidence": str(payload.get("confidence") or "low").strip(),
+            "unknown": payload.get("unknown") or "",
+        }
+        if child_task:
+            result["task"] = child_task
+        return f"```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```"
 
     async def _run_draw_agent_for_node(
         self,
@@ -824,14 +1132,9 @@ class Pass3InStrackStages:
                 has_children=bool(draw_state.get("has_children")),
                 upstream_context=dict(draw_state.get("upstream_context") or {}),
             ),
-            module_description=self.g.owner._extract_summary(
-                self.get_module_description(node.module_name),
-                max_lines=20,
-                max_chars=2400,
-            ),
-            child_overview=self.build_child_overview(node),
+            module_preview=self.get_module_preview(node.module_name),
+            child_preview_list=self.build_child_overview(node),
             existing_child_draws=existing_child_draws,
-            upstream_context_section=self._build_upstream_context_section(upstream_context),
         )
 
         async def _tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
@@ -844,7 +1147,7 @@ class Pass3InStrackStages:
                         "At this level you can read only current module and direct children. "
                         f"Details: {scope_error}"
                     )
-                topology = self.g._build_pass2_style_topology_block(str(scoped_node.module_name))
+                topology = self.g._build_topology_block(str(scoped_node.module_name))
                 return f"[readSource] module={scoped_node.module_name}\n\n{topology}"
 
             if tool_name == "drawChild":
@@ -854,19 +1157,11 @@ class Pass3InStrackStages:
                 if child_node is None:
                     return error
                 child_path = child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
-                # De-duplicate by module: once any instance of a module is drawn in current draw session,
-                # reject repeated drawChild calls for the same module.
-                already_drawn_module = None
-                for _, cached in draw_cache.items():
-                    cached_module = str((cached or {}).get("module") or "").strip()
-                    if cached_module and cached_module == child_node.module_name:
-                        already_drawn_module = cached_module
-                        break
-                if already_drawn_module is not None:
+                if child_path in draw_cache:
                     return (
-                        "[drawChild][reject] duplicate module draw request. "
-                        f"module={child_node.module_name} has already been drawn; "
-                        "reuse existing child draw summary instead of invoking drawChild again."
+                        "[drawChild][reject] duplicate child draw request. "
+                        f"child={child_node.instance_name}({child_node.module_name}) has already been drawn; "
+                        "reuse the cached boundary summary instead of invoking drawChild again."
                     )
                 cached_child = draw_cache.get(child_path)
                 if cached_child is None:
@@ -919,18 +1214,13 @@ class Pass3InStrackStages:
                             "child_module": child_node.module_name,
                             "child_level": node.depth + 1,
                             "report_chars": len(str(cached_child.get("raw_draw_output") or "")),
+                            "prompt_tokens": int(
+                                dict(cached_child.get("token_stats") or {}).get("input_tokens", 0) or 0
+                            ),
                             "prompt_style": "instrack_draw",
                         },
                     )
-                mermaid = str(cached_child.get("mermaid") or "").strip()
-                if not mermaid:
-                    return f"[drawChild] child={child_node.instance_name}({child_node.module_name}) no mermaid output"
-                if child_task:
-                    return (
-                        f"[drawChild] task={child_task}\n"
-                        f"[drawChild] child={child_node.instance_name}({child_node.module_name})\n\n{mermaid}"
-                    )
-                return f"[drawChild] child={child_node.instance_name}({child_node.module_name})\n\n{mermaid}"
+                return self._build_draw_child_tool_result(cached_child, child_task)
 
             return f"Error: unknown tool '{tool_name}'"
 
@@ -948,7 +1238,7 @@ class Pass3InStrackStages:
             prompt=prompt,
         )
 
-        draw_content, _ = await self.g.owner.llm.generate(
+        draw_content, token_stats = await self.g.owner.instrack_draw_llm.generate(
             system_prompt,
             prompt,
             log_path=draw_log_path,
@@ -970,6 +1260,7 @@ class Pass3InStrackStages:
         if not mermaid:
             mermaid = self.salvage_mermaid_text(draw_content or "")
         payload = self.extract_pass3_3_draw_payload(draw_content or "", node)
+        payload = self._enrich_draw_payload(node, payload, upstream_context)
         return {
             "module": node.module_name,
             "instance": node.instance_name,
@@ -978,4 +1269,5 @@ class Pass3InStrackStages:
             "draw_payload": payload,
             "orchestrator_role": stage_label,
             "raw_draw_output": draw_content or "",
+            "token_stats": dict(token_stats or {}),
         }

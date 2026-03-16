@@ -72,7 +72,7 @@ class SourceResolver:
             for attr_id in module.attributes:
                 attr_name = attr_id.str()
                 if "src" in attr_name.lower():
-                    src_value = str(module.attributes[attr_id])
+                    src_value = self._normalize_src_attr_value(str(module.attributes[attr_id]))
                     # Format: "/path/to/file.v:line.col-line.col"
                     path = src_value.split(':')[0]
                     # Yosys sometimes uses relative paths, try to resolve
@@ -84,6 +84,32 @@ class SourceResolver:
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _normalize_src_attr_value(raw_value: str) -> str:
+        """Normalize Yosys src attribute string to readable text.
+
+        Some pyosys builds stringify RTLIL string attributes as a binary bit
+        sequence (e.g. ``00101111...`` for ``/``). Detect that form and decode
+        it back to plain text before path extraction.
+        """
+        text = str(raw_value or "").strip()
+        if not text:
+            return ""
+
+        compact = re.sub(r"\s+", "", text)
+        if compact and len(compact) % 8 == 0 and re.fullmatch(r"[01]+", compact):
+            try:
+                decoded = "".join(
+                    chr(int(compact[idx:idx + 8], 2))
+                    for idx in range(0, len(compact), 8)
+                )
+                if any(sep in decoded for sep in ("/", "\\", ".v", ".sv", ":")):
+                    return decoded
+            except Exception:
+                pass
+
+        return text
 
     def read_source(self, module_name: str, max_lines: int = 2000) -> Optional[str]:
         """Read source code for a module.

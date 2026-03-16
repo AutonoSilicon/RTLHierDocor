@@ -8,6 +8,7 @@ import os
 import asyncio
 import datetime
 import json
+import traceback
 from typing import List, Optional, Any, Dict, Tuple
 
 from .llm_toolcall import ToolCallback, build_tool_round_messages
@@ -41,6 +42,7 @@ class LLMBackend:
         )
         self.model = model
         self.thinking = thinking
+        self.base_url = base_url or "https://api.openai.com/v1"
 
         # Semaphore to limit concurrent LLM API calls (prevent rate limiting)
         self._semaphore = asyncio.Semaphore(16)
@@ -159,11 +161,83 @@ class LLMBackend:
                 return (final_text if final_text else "Error: LLM returned empty response."), aggregated
 
             except Exception as e:
-                return f"Error calling LLM API: {str(e)}", {
+                detail = self._format_exception_details(
+                    e,
+                    timeout_sec=locals().get("timeout_sec"),
+                    use_thinking=locals().get("use_thinking"),
+                    tool_mode=locals().get("tool_mode"),
+                )
+                self._append_exception_to_log(log_path, detail)
+                return f"Error calling LLM API: {detail['summary']}", {
                     "input_tokens": 0,
                     "output_tokens": 0,
                     "total_tokens": 0,
                 }
+
+    def _format_exception_details(
+        self,
+        error: Exception,
+        *,
+        timeout_sec: Optional[float],
+        use_thinking: Optional[bool],
+        tool_mode: Optional[bool],
+    ) -> Dict[str, Any]:
+        """Build a structured exception summary for debug logs."""
+        summary = f"{type(error).__name__}: {str(error)}".strip()
+        request = getattr(error, "request", None)
+        response = getattr(error, "response", None)
+        cause_chain: List[str] = []
+        current = getattr(error, "__cause__", None) or getattr(error, "__context__", None)
+        hop = 0
+        while current is not None and hop < 4:
+            cause_chain.append(f"{type(current).__name__}: {current}")
+            current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+            hop += 1
+
+        traceback_text = "".join(
+            traceback.format_exception(type(error), error, error.__traceback__)
+        ).strip()
+
+        details: Dict[str, Any] = {
+            "summary": summary,
+            "exception_type": f"{type(error).__module__}.{type(error).__name__}",
+            "message": str(error),
+            "model": self.model,
+            "base_url": self.base_url,
+            "timeout_sec": timeout_sec,
+            "thinking": bool(use_thinking),
+            "tool_mode": bool(tool_mode),
+            "cause_chain": cause_chain,
+            "traceback": traceback_text,
+        }
+
+        if request is not None:
+            details["request"] = {
+                "method": getattr(request, "method", ""),
+                "url": str(getattr(request, "url", "")),
+            }
+
+        if response is not None:
+            headers = getattr(response, "headers", None)
+            safe_headers = {}
+            if headers is not None:
+                for key in ("x-request-id", "content-type", "server"):
+                    value = headers.get(key)
+                    if value:
+                        safe_headers[key] = value
+            details["response"] = {
+                "status_code": getattr(response, "status_code", None),
+                "headers": safe_headers,
+            }
+
+        body = getattr(error, "body", None)
+        if body is not None:
+            try:
+                details["body"] = json.dumps(body, ensure_ascii=False, indent=2)
+            except Exception:
+                details["body"] = str(body)
+
+        return details
 
     @staticmethod
     def _extract_mermaid_and_content(text: str) -> tuple[str, str]:
@@ -267,6 +341,53 @@ class LLMBackend:
                 f.write(text + "\n")
         except Exception as e:
             print(f"[WARN] Failed to append final response to log: {e}")
+
+    def _append_exception_to_log(self, log_path: str, detail: Dict[str, Any]):
+        """Append structured exception diagnostics to debug log."""
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write("\n\n" + "=" * 80 + "\n")
+                f.write("## LLM Exception\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(f"- summary: {detail.get('summary', '')}\n")
+                f.write(f"- exception_type: {detail.get('exception_type', '')}\n")
+                f.write(f"- model: {detail.get('model', '')}\n")
+                f.write(f"- base_url: {detail.get('base_url', '')}\n")
+                f.write(f"- timeout_sec: {detail.get('timeout_sec', '')}\n")
+                f.write(f"- thinking: {detail.get('thinking', False)}\n")
+                f.write(f"- tool_mode: {detail.get('tool_mode', False)}\n")
+
+                request = detail.get("request") or {}
+                if request:
+                    f.write(f"- request_method: {request.get('method', '')}\n")
+                    f.write(f"- request_url: {request.get('url', '')}\n")
+
+                response = detail.get("response") or {}
+                if response:
+                    f.write(f"- response_status: {response.get('status_code', '')}\n")
+                    headers = response.get("headers") or {}
+                    if headers:
+                        f.write("- response_headers:\n")
+                        for key, value in headers.items():
+                            f.write(f"  - {key}: {value}\n")
+
+                cause_chain = detail.get("cause_chain") or []
+                if cause_chain:
+                    f.write("\n### Cause Chain\n")
+                    for item in cause_chain:
+                        f.write(f"- {item}\n")
+
+                body = detail.get("body")
+                if body:
+                    f.write("\n### Response Body\n")
+                    f.write("```json\n" + body + "\n```\n")
+
+                traceback_text = detail.get("traceback")
+                if traceback_text:
+                    f.write("\n### Traceback\n")
+                    f.write("```text\n" + traceback_text + "\n```\n")
+        except Exception as e:
+            print(f"[WARN] Failed to append exception log: {e}")
 
     def _log_call(self, system: str, prompt: str, model: str, log_path: str = "debug.md"):
         """Log the LLM call to a markdown file."""

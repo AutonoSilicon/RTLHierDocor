@@ -62,18 +62,18 @@ class Pass3Hash:
         self,
         top_module: str,
         instruction: str,
-        top_description: str,
+        top_preview: str,
         core_partition: str,
         instruction_datasheet: str,
     ) -> str:
         """Build cache key for pass3.3.1 search stage."""
         payload = {
-            "version": "pass3_3_instrack_search_cache_v3",
+            "version": "pass3_3_instrack_search_cache_v5",
             "top_module": top_module,
             "instruction": instruction,
             "system_prompt": PASS3_3_1_SEARCH_SYSTEM,
             "prompt_template": PASS3_3_1_SEARCH_PROMPT,
-            "top_description_hash": hash_text(top_description),
+            "top_preview_hash": hash_text(top_preview),
             "core_partition_hash": hash_text(core_partition),
             "instruction_datasheet_hash": hash_text(instruction_datasheet),
             "tools_schema": self.g._tools.pass3_3_1_tools(),
@@ -109,7 +109,7 @@ class Pass3Hash:
     ) -> str:
         """Build cache key for pass3.3 draw stage."""
         payload = {
-            "version": "pass3_3_instrack_draw_cache_v9",
+            "version": "pass3_3_instrack_draw_cache_v10",
             "top_module": top_module,
             "instruction": instruction,
             "system_prompt": PASS3_3_2_DRAW_SYSTEM,

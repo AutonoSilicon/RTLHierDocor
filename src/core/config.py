@@ -174,6 +174,8 @@ class ProjectConfig:
     agent_api_key: Optional[str] = None
     agent_base_url: Optional[str] = None
     agent_thinking: bool = False
+    instrack_draw_model: Optional[str] = None
+    instrack_draw_thinking: Optional[bool] = None
     composer_backend: Optional[str] = None
     composer_model: Optional[str] = None
     composer_api_key: Optional[str] = None
@@ -184,6 +186,8 @@ class ProjectConfig:
     resume: bool = True
     max_modules: int = 0  # 0 for unlimited
     block_doc_threshold: int = 64  # Min lines for block-level LLM call
+    pass1_enabled: bool = True  # Enable Pass 1 preview generation
+    pass2_enabled: bool = True  # Enable Pass 1.5 + Pass 2.x generation
     pass3_enabled: bool = True  # Enable Pass 3 (chip-level overview & subsystem docs)
     pass3_3_enabled: bool = True  # Enable Pass 3.3 (instrack)
     isa_profile: str = "c910"  # Instruction profile: c910|rv64i|rv64gc
@@ -260,6 +264,10 @@ class ProjectConfig:
                 config.agent_base_url = str(agent['base_url'])
             if 'thinking' in agent:
                 config.agent_thinking = bool(agent['thinking'])
+            if 'instrack_draw_model' in agent:
+                config.instrack_draw_model = str(agent['instrack_draw_model'])
+            if 'instrack_draw_thinking' in agent:
+                config.instrack_draw_thinking = bool(agent['instrack_draw_thinking'])
             if 'composer_backend' in agent:
                 config.composer_backend = str(agent['composer_backend'])
             if 'composer_model' in agent:
@@ -282,10 +290,21 @@ class ProjectConfig:
                 config.max_modules = int(agent['max_modules'])
             if 'block_doc_threshold' in agent:
                 config.block_doc_threshold = int(agent['block_doc_threshold'])
+            if 'pass1_enabled' in agent:
+                config.pass1_enabled = bool(agent['pass1_enabled'])
+            if 'pass2_enabled' in agent:
+                config.pass2_enabled = bool(agent['pass2_enabled'])
             if 'pass3_enabled' in agent:
                 config.pass3_enabled = bool(agent['pass3_enabled'])
             if 'pass3_3_enabled' in agent:
                 config.pass3_3_enabled = bool(agent['pass3_3_enabled'])
+            if 'pass1_only' in agent:
+                pass1_only = bool(agent['pass1_only'])
+                config.pass1_enabled = True
+                config.pass2_enabled = not pass1_only
+                if pass1_only:
+                    config.pass3_enabled = False
+                    config.pass3_3_enabled = False
             if 'isa_profile' in agent:
                 config.isa_profile = str(agent['isa_profile'])
             if 'isa_instructions' in agent and isinstance(agent['isa_instructions'], list):

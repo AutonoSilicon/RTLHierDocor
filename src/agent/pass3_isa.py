@@ -146,7 +146,7 @@ class Pass3ISA:
             )
 
         block = "\n".join(lines[chosen_start:chosen_end]).strip()
-        return self.g.owner._extract_summary(block, max_lines=120, max_chars=12000)
+        return block
 
     def resolve_instrack_instructions(self) -> List[str]:
         """Resolve the list of instructions to track.

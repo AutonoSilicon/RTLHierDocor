@@ -6,7 +6,7 @@ design:
   top_module: "openC910"
 
 output:
-  dir: "./output/openC910_full"
+  dir: "./output/openC910_pass1_rebuild"
   cache_dir: ".rtl_cache"
   max_schematics: 0
 
@@ -18,12 +18,14 @@ verbose: true
 
 agent:
   backend: "openai"
-  model: "qwen3.5-plus"
+  model: "glm-5"
   base_url: "https://coding.dashscope.aliyuncs.com/v1"
   api_key: "sk-sp-0b4bfeb434d946bda2d005ac9c85026e"
   thinking: true
+  instrack_draw_model: "glm-5"
+  instrack_draw_thinking: false
 
-  composer_model: "qwen3.5-plus"
+  composer_model: "glm-5"
   composer_base_url: "https://coding.dashscope.aliyuncs.com/v1"
   composer_api_key: "sk-sp-0b4bfeb434d946bda2d005ac9c85026e"
   composer_thinking: false
@@ -35,11 +37,12 @@ agent:
   code_base_path: "$CODE_BASE_PATH"
   max_modules: 0
   max_concurrent_modules: 16
-
-  # Debug mode: skip pass3.1/pass3.2 and run pass3.3 only
+  # Preview-only recovery mode
+  pass1_enabled: true
+  pass2_enabled: false
   pass3_enabled: false
   pass3_3_enabled: true
 
-  # Development-time instrack scope: only test ADD
+  # Development-time instrack scope retained but inactive while Pass 3.3 is disabled
   isa_instructions:
     - "ADD"

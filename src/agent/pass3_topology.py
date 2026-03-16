@@ -5,6 +5,7 @@ and instruction route exploration for pass3.
 """
 
 import os
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from .pass3_utils import contains_any
@@ -167,16 +168,21 @@ class Pass3Topology:
                 self.g.owner.tracker.get_pass1_content(c["module"]) or
                 "无可用文档摘要"
             )
-            summary = self.g.owner._extract_summary(summary_src, max_lines=5, max_chars=500)
+            summary = summary_src
             lines.append(f"\n### {c['path']} ({c['module']})\n{summary}")
 
         return "\n".join(lines)
 
-    def build_pass2_style_topology_block(self, module_name: str) -> str:
-        """Build a pass2-style topology block for a module.
+    def build_topology_block(self, module_name: str) -> str:
+        """Build a topology block for a module.
 
-        Prefer raw pass2.4 topologyized source section when available.
+        Prefer core topology generation from SimplifiedGraph. Fall back to
+        legacy pass2 artifacts only when core topology is unavailable.
         """
+        core_topology = self._build_core_topology_block(module_name)
+        if core_topology:
+            return core_topology.strip()
+
         topology_prompt = self._load_pass2_4_topology_prompt(module_name)
         if topology_prompt:
             return topology_prompt.strip()
@@ -196,6 +202,219 @@ class Pass3Topology:
         if not topology_src:
             return f"# Topology for {module_name}\n\n无可用拓扑数据"
         return topology_src
+
+    def build_pass2_style_topology_block(self, module_name: str) -> str:
+        """Backward-compatible alias for legacy call sites."""
+        return self.build_topology_block(module_name)
+
+    def _build_core_topology_block(self, module_name: str) -> str:
+        """Build topology text directly from SimplifiedGraph core capability."""
+        graph = self._get_simplified_graph(module_name)
+        if graph is None:
+            return ""
+        return self._format_graph_description(graph, include_source=True)
+
+    def _get_simplified_graph(self, module_name: str) -> Any:
+        owner = getattr(self.g, "owner", None)
+        if owner is None:
+            return None
+
+        graphs = getattr(owner, "_graphs", None)
+        if isinstance(graphs, dict) and module_name in graphs:
+            return graphs[module_name]
+
+        schematic_gen = getattr(owner, "schematic_gen", None)
+        if schematic_gen is None:
+            return None
+        try:
+            graph = schematic_gen.generate_simplified_graph(module_name)
+        except Exception:
+            return None
+        if graph is not None and isinstance(graphs, dict):
+            graphs[module_name] = graph
+        return graph
+
+    def _format_graph_description(self, graph: Any, include_source: bool = True) -> str:
+        """Format SimplifiedGraph as a topology block for agent consumption."""
+        predecessors: Dict[str, List[str]] = {}
+        successors: Dict[str, List[str]] = {}
+
+        all_nodes = (
+            set(graph.proc_nodes.keys())
+            | set(graph.comb_nodes.keys())
+            | set(graph.io_ports.keys())
+            | set(graph.submodules.keys())
+            | set(graph.seq_cells.keys())
+        )
+        for node in all_nodes:
+            predecessors[node] = []
+            successors[node] = []
+
+        unique_edges: List[Tuple[str, str]] = []
+        seen_edges = set()
+        for src, dst in graph.edges:
+            if src not in all_nodes or dst not in all_nodes:
+                continue
+            key = (src, dst)
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            unique_edges.append(key)
+            successors[src].append(dst)
+            predecessors[dst].append(src)
+
+        def format_conn_list(node_ids: List[str]) -> str:
+            if not node_ids:
+                return "None"
+            names: List[str] = []
+            seen_names = set()
+            for node_id in node_ids:
+                name = self._resolve_node_name_for_desc(node_id, graph)
+                if node_id in graph.proc_nodes:
+                    name = f"{name}(PROC)"
+                elif node_id in graph.comb_nodes:
+                    name = f"{name}({graph.comb_nodes[node_id].comb_type})"
+                elif node_id in graph.submodules:
+                    name = f"{name}(submodule)"
+                elif node_id in graph.io_ports:
+                    name = f"{name}(port)"
+                elif node_id in graph.seq_cells:
+                    seq_type = graph.seq_cells[node_id] or "seq"
+                    name = f"{name}({seq_type})"
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+                names.append(name)
+            return ", ".join(names)
+
+        def get_source_for_block(block_id: str) -> str:
+            resolver = getattr(self.g.owner, "resolver", None)
+            if resolver is None:
+                return ""
+            if block_id in graph.proc_nodes:
+                proc_info = graph.proc_nodes[block_id]
+                if getattr(proc_info, "source_location", None):
+                    return resolver.read_block_source([proc_info.source_location])
+            if block_id in graph.comb_nodes:
+                comb_info = graph.comb_nodes[block_id]
+                if getattr(comb_info, "source_locations", None):
+                    return resolver.read_block_source(comb_info.source_locations)
+            return ""
+
+        all_blocks = set(graph.proc_nodes.keys()) | set(graph.comb_nodes.keys())
+        adj: Dict[str, List[str]] = defaultdict(list)
+        in_degree: Dict[str, int] = defaultdict(int)
+        for block_id in all_blocks:
+            in_degree[block_id] = 0
+        for src, dst in unique_edges:
+            if src in all_blocks and dst in all_blocks:
+                adj[src].append(dst)
+                in_degree[dst] += 1
+
+        queue = sorted([node for node in all_blocks if in_degree[node] == 0])
+        topo_order: List[str] = []
+        while queue:
+            node = queue.pop(0)
+            topo_order.append(node)
+            for neighbor in sorted(adj[node]):
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+                    queue.sort()
+        topo_order.extend(sorted(all_blocks - set(topo_order)))
+
+        parts: List[str] = [f"# Topology for {graph.module_name}"]
+        block_parts: List[str] = []
+        for block_id in topo_order:
+            block_section: List[str] = []
+            if block_id in graph.proc_nodes:
+                proc_info = graph.proc_nodes[block_id]
+                loc = getattr(proc_info, "source_location", None)
+                if loc:
+                    filename = loc.file_path.split('/')[-1] if '/' in loc.file_path else loc.file_path
+                    end_line = loc.end_line or loc.start_line
+                    block_section.append(f"- **{block_id}** [PROC] ({filename}:{loc.start_line}-{end_line})")
+                else:
+                    block_section.append(f"- **{block_id}** [PROC]")
+            elif block_id in graph.comb_nodes:
+                comb_info = graph.comb_nodes[block_id]
+                header = f"- **{block_id}** [{comb_info.comb_type}, {comb_info.node_count} nodes]"
+                loc_label = comb_info.location_info.get_display_label().replace("\\n", ", ")
+                if loc_label:
+                    header += f" ({loc_label})"
+                block_section.append(header)
+            else:
+                continue
+
+            block_section.append(f"  - Inputs from blocks: {format_conn_list(predecessors.get(block_id, []))}")
+            block_section.append(f"  - Outputs to blocks: {format_conn_list(successors.get(block_id, []))}")
+            if include_source:
+                source = get_source_for_block(block_id)
+                if source:
+                    block_section.append("  - Source:")
+                    block_section.append("    ```verilog")
+                    for line in source.strip().split("\n"):
+                        block_section.append(f"    {line}")
+                    block_section.append("    ```")
+            block_parts.append("\n".join(block_section))
+
+        if block_parts:
+            parts.append("")
+            parts.append("## Circuit Blocks (in topological order, block-to-block view):")
+            parts.append("\n\n".join(block_parts))
+
+        boundary_edges: List[Tuple[str, str]] = []
+        for src, dst in unique_edges:
+            src_is_block = src in graph.proc_nodes or src in graph.comb_nodes
+            dst_is_block = dst in graph.proc_nodes or dst in graph.comb_nodes
+            if not (src_is_block and dst_is_block):
+                boundary_edges.append((src, dst))
+
+        if boundary_edges:
+            parts.append("\n## Boundary Connections (including direct links):")
+            for src, dst in sorted(boundary_edges):
+                parts.append(
+                    f"- {self._resolve_node_name_for_desc(src, graph)}{self._node_type_suffix(src, graph)}"
+                    f" -> {self._resolve_node_name_for_desc(dst, graph)}{self._node_type_suffix(dst, graph)}"
+                )
+
+        if graph.submodules:
+            parts.append("\n## Submodule Instances:")
+            for submod_id, instance_name in sorted(graph.submodules.items()):
+                parts.append(f"- **{instance_name}**")
+                parts.append(f"  - Inputs from: {format_conn_list(predecessors.get(submod_id, []))}")
+                parts.append(f"  - Outputs to: {format_conn_list(successors.get(submod_id, []))}")
+
+        return "\n".join(parts).strip()
+
+    @staticmethod
+    def _resolve_node_name_for_desc(node_id: str, graph: Any) -> str:
+        if node_id in graph.proc_nodes:
+            return node_id
+        if node_id in graph.comb_nodes:
+            return node_id
+        if node_id in graph.io_ports:
+            return graph.io_ports[node_id].strip()[:30]
+        if node_id in graph.submodules:
+            return graph.submodules[node_id]
+        if node_id in graph.seq_cells:
+            return node_id
+        return node_id
+
+    @staticmethod
+    def _node_type_suffix(node_id: str, graph: Any) -> str:
+        if node_id in graph.io_ports:
+            return "(port)"
+        if node_id in graph.submodules:
+            return "(submodule)"
+        if node_id in graph.seq_cells:
+            seq_type = graph.seq_cells[node_id] or "seq"
+            return f"({seq_type})"
+        if node_id in graph.proc_nodes:
+            return "(PROC)"
+        if node_id in graph.comb_nodes:
+            return f"({graph.comb_nodes[node_id].comb_type})"
+        return ""
 
     def _load_pass2_4_topology_prompt(self, module_name: str) -> str:
         """Load topologyized source block from pass2.4 debug prompt file.

@@ -48,3 +48,7 @@ agent:
   resume: true                      # Resume from last checkpoint
   code_base_path: "$CODE_BASE_PATH" # Base path for source file resolution
   max_modules: 0                    # 0 = all, N = limit for debugging
+  pass1_enabled: true               # Enable Pass 1 preview generation
+  pass2_enabled: true               # Enable Pass 1.5 + Pass 2.x generation
+  pass3_enabled: true               # Enable Pass 3 (chip-level overview & subsystem docs)
+  pass3_3_enabled: true             # Enable Pass 3.3 (instrack)

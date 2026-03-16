@@ -44,6 +44,7 @@ class Pass3Generator:
     def __init__(self, owner: Any):
         self.owner = owner
         self._subagent_cache: Dict[str, str] = {}
+        self._subagent_token_stats: Dict[str, Dict[str, int]] = {}
         self._agent_log_seq: int = 0
 
         # Helper objects for delegation
@@ -96,11 +97,11 @@ class Pass3Generator:
             role=role,
         )
 
-    def _fork_trace_log_path(self) -> Path:
-        return self._debug.fork_trace_log_path()
-
     def _fork_trace_log_path_pass3_3_1(self) -> Path:
         return self._debug.fork_trace_log_path_pass3_3_1()
+
+    def _fork_trace_log_path_pass3_3_2(self) -> Path:
+        return self._debug.fork_trace_log_path_pass3_3_2()
 
     def _append_fork_trace(self, event: str, payload: Dict[str, Any]):
         self._debug.append_fork_trace(event, payload)
@@ -151,6 +152,16 @@ class Pass3Generator:
     def _hash_text(text: str) -> str:
         return hash_text(text)
 
+    @staticmethod
+    def _build_recursive_cache_key(
+        prompt_style: str,
+        node_path: str,
+        task: str,
+        level: int,
+    ) -> str:
+        """Build a stable cache key for recursive sub-agent calls."""
+        return f"{prompt_style}||{node_path}||{task}||L{level}"
+
     def _build_instance_path_index(self, top_node: Any) -> Dict[str, Any]:
         return self._topology.build_instance_path_index(top_node)
 
@@ -166,12 +177,12 @@ class Pass3Generator:
         self,
         top_module: str,
         instruction: str,
-        top_description: str,
+        top_preview: str,
         core_partition: str,
         instruction_datasheet: str,
     ) -> str:
         return self._hash.build_pass3_3_search_input_hash(
-            top_module, instruction, top_description, core_partition, instruction_datasheet
+            top_module, instruction, top_preview, core_partition, instruction_datasheet
         )
 
     @staticmethod
@@ -317,8 +328,11 @@ class Pass3Generator:
     def _render_instrack_search_markdown(self, search_json: Dict[str, Any], records: List[Dict[str, Any]]) -> str:
         return self._instrack_parsing.render_instrack_search_markdown(search_json, records)
 
+    def _build_topology_block(self, module_name: str) -> str:
+        return self._topology.build_topology_block(module_name)
+
     def _build_pass2_style_topology_block(self, module_name: str) -> str:
-        return self._topology.build_pass2_style_topology_block(module_name)
+        return self._build_topology_block(module_name)
 
     def _tool_explore_inst_route(self, top_node: Any, instruction: str, max_domains: int = 12) -> str:
         return self._topology.tool_explore_inst_route(top_node, instruction, max_domains)
@@ -498,7 +512,7 @@ class Pass3Generator:
     ) -> str:
         node_path = current_node.get_path() if hasattr(current_node, "get_path") else current_node.instance_name
         norm_task = (task or "").strip() or "生成该层级的top-down架构概览和可执行任务拆解"
-        cache_key = f"{prompt_style}||{node_path}||{norm_task}||L{level}"
+        cache_key = self._build_recursive_cache_key(prompt_style, node_path, norm_task, level)
         if path_records is None:
             path_records = []
 
@@ -546,17 +560,13 @@ class Pass3Generator:
 
         child_lines = []
         for child in sorted(current_node.children.values(), key=lambda c: (c.module_name, c.instance_name)):
-            child_arch = self.owner.tracker.get_pass2_7_content(child.module_name) or self.owner.tracker.get_pass2_content(child.module_name) or "无描述"
+            child_arch = self.owner.tracker.get_pass1_content(child.module_name) or "无可用 preview 文档"
             child_lines.append(
-                f"- {child.instance_name} ({child.module_name}): {self.owner._extract_summary(child_arch, max_lines=3, max_chars=320)}"
+                f"- {child.instance_name} ({child.module_name}): {child_arch}"
             )
         child_overview = "\n".join(child_lines) if child_lines else "- 无子模块"
 
-        current_description = self.owner.tracker.get_pass2_content(current_node.module_name) or ""
-        if not current_description:
-            current_description = self.owner.tracker.get_pass2_7_content(current_node.module_name) or ""
-        if not current_description:
-            current_description = self.owner.tracker.get_pass1_content(current_node.module_name) or "无可用 description 文档"
+        current_description = self.owner.tracker.get_pass1_content(current_node.module_name) or "无可用 preview 文档"
 
         system = self._build_pass3_recursive_system(prompt_style=prompt_style)
         prompt = self._build_pass3_recursive_prompt(
@@ -596,7 +606,7 @@ class Pass3Generator:
                         "At this level readSource can read only current module. "
                         "To inspect child modules, use forkSubAgent(module, task)."
                     )
-                topology = self._build_pass2_style_topology_block(str(scoped_node.module_name))
+                topology = self._build_topology_block(str(scoped_node.module_name))
                 return f"[readSource] module={scoped_node.module_name}\n\n{topology}"
 
             if tool_name == "readPreview":
@@ -615,10 +625,12 @@ class Pass3Generator:
                         f"Details: {scope_error}"
                     )
                 preview = self.owner.tracker.get_pass1_content(str(scoped_node.module_name)) or "无预览"
-                cap = max_chars if max_chars > 0 else 1800
+                cap = max_chars if max_chars > 0 else 0
+                if cap > 0:
+                    preview = preview[:cap]
                 return (
                     f"[readPreview] module={scoped_node.module_name}\n\n"
-                    f"{self.owner._extract_summary(preview, max_lines=20, max_chars=cap)}"
+                    f"{preview}"
                 )
 
             if tool_name == "readDoc":
@@ -682,6 +694,15 @@ class Pass3Generator:
                         "prompt_style": prompt_style,
                     },
                 )
+                child_node_path = (
+                    child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
+                )
+                child_cache_key = self._build_recursive_cache_key(
+                    prompt_style,
+                    child_node_path,
+                    child_task,
+                    level + 1,
+                )
 
                 report = await self._run_pass3_recursive_agent(
                     top_node=top_node,
@@ -696,6 +717,7 @@ class Pass3Generator:
                 )
                 if len(report) > 16000:
                     report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
+                child_token_stats = dict(self._subagent_token_stats.get(child_cache_key) or {})
 
                 self._append_fork_trace(
                     "fork_return",
@@ -706,6 +728,7 @@ class Pass3Generator:
                         "child_module": child_node.module_name,
                         "child_level": level + 1,
                         "report_chars": len(report),
+                        "prompt_tokens": int(child_token_stats.get("input_tokens", 0) or 0),
                         "prompt_style": prompt_style,
                     },
                 )
@@ -763,7 +786,7 @@ class Pass3Generator:
                 prompt=prompt,
             )
 
-        report, _token_stats = await self.owner.llm.generate(
+        report, token_stats = await self.owner.llm.generate(
             system,
             prompt,
             log_path=log_path,
@@ -791,10 +814,12 @@ class Pass3Generator:
                 "level": level,
                 "prompt_style": prompt_style,
                 "report_chars": len(report or ""),
+                "prompt_tokens": int(token_stats.get("input_tokens", 0) or 0),
             },
         )
 
         self._subagent_cache[cache_key] = report
+        self._subagent_token_stats[cache_key] = dict(token_stats or {})
         return report
 
     def _tool_tree_codebase(
@@ -954,11 +979,12 @@ class Pass3Generator:
         out_md = self.owner.chip_dir / artifact_md
         out_json = self.owner.chip_dir / artifact_json
 
-        top_description = self.owner.tracker.get_pass2_content(top_node.module_name) or ""
-        if not top_description:
-            top_description = self.owner.tracker.get_pass2_7_content(top_node.module_name) or ""
-        if not top_description:
-            top_description = self.owner.tracker.get_pass1_content(top_node.module_name) or "无可用 description 文档"
+        top_preview = self.owner.tracker.get_pass1_content(top_node.module_name) or ""
+        if not top_preview:
+            top_preview = self.owner.tracker.get_pass2_1_content(top_node.module_name) or ""
+        if not top_preview:
+            top_preview = "无可用 preview 文档"
+        top_child_preview_list = self._instrack_stages.build_child_overview(top_node)
 
         input_hash = self._build_pass3_1_input_hash(
             top_module=top_node.module_name,
@@ -1047,6 +1073,15 @@ class Pass3Generator:
                         "prompt_style": "partition",
                     },
                 )
+                child_node_path = (
+                    child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
+                )
+                child_cache_key = self._build_recursive_cache_key(
+                    "partition",
+                    child_node_path,
+                    task,
+                    1,
+                )
                 report = await self._run_pass3_recursive_agent(
                     top_node=top_node,
                     current_node=child_node,
@@ -1056,6 +1091,7 @@ class Pass3Generator:
                 )
                 if len(report) > 16000:
                     report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
+                child_token_stats = dict(self._subagent_token_stats.get(child_cache_key) or {})
                 self._append_fork_trace(
                     "pass3_1_fork_return",
                     {
@@ -1064,6 +1100,7 @@ class Pass3Generator:
                         "child_module": child_node.module_name,
                         "child_level": 1,
                         "report_chars": len(report),
+                        "prompt_tokens": int(child_token_stats.get("input_tokens", 0) or 0),
                         "prompt_style": "partition",
                     },
                 )
@@ -1123,11 +1160,8 @@ class Pass3Generator:
         out_md = self.owner.chip_dir / artifact_md
         out_json = self.owner.chip_dir / artifact_json
 
-        top_description = self.owner.tracker.get_pass2_content(top_node.module_name) or ""
-        if not top_description:
-            top_description = self.owner.tracker.get_pass2_7_content(top_node.module_name) or ""
-        if not top_description:
-            top_description = self.owner.tracker.get_pass1_content(top_node.module_name) or "无可用 description 文档"
+        top_preview = self.owner.tracker.get_pass1_content(top_node.module_name) or "无可用 preview 文档"
+        top_child_preview_list = self._instrack_stages.build_child_overview(top_node)
 
         pass3_1_path = self.owner.chip_dir / "subsystem_partition.md"
         subsystem_partition_text = "未检测到 pass3.1 输出，可基于工具证据自行定位 core。"
@@ -1166,7 +1200,7 @@ class Pass3Generator:
         prompt = PASS3_2_PROMPT.format(
             top_module=top_node.module_name,
             top_description=top_description,
-            subsystem_partition=self.owner._extract_summary(subsystem_partition_text, max_lines=80, max_chars=10000),
+            subsystem_partition=subsystem_partition_text,
         )
 
         async def _tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
@@ -1234,6 +1268,15 @@ class Pass3Generator:
                         "prompt_style": "partition",
                     },
                 )
+                child_node_path = (
+                    child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
+                )
+                child_cache_key = self._build_recursive_cache_key(
+                    "partition",
+                    child_node_path,
+                    task,
+                    1,
+                )
                 report = await self._run_pass3_recursive_agent(
                     top_node=top_node,
                     current_node=child_node,
@@ -1243,6 +1286,7 @@ class Pass3Generator:
                 )
                 if len(report) > 16000:
                     report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
+                child_token_stats = dict(self._subagent_token_stats.get(child_cache_key) or {})
                 self._append_fork_trace(
                     "pass3_2_fork_return",
                     {
@@ -1251,6 +1295,7 @@ class Pass3Generator:
                         "child_module": child_node.module_name,
                         "child_level": 1,
                         "report_chars": len(report),
+                        "prompt_tokens": int(child_token_stats.get("input_tokens", 0) or 0),
                         "prompt_style": "partition",
                     },
                 )
@@ -1315,11 +1360,8 @@ class Pass3Generator:
         if not instructions:
             return None
 
-        top_description = self.owner.tracker.get_pass2_content(top_node.module_name) or ""
-        if not top_description:
-            top_description = self.owner.tracker.get_pass2_7_content(top_node.module_name) or ""
-        if not top_description:
-            top_description = self.owner.tracker.get_pass1_content(top_node.module_name) or "无可用 description 文档"
+        top_preview = self.owner.tracker.get_pass1_content(top_node.module_name) or "无可用 preview 文档"
+        top_child_preview_list = self._instrack_stages.build_child_overview(top_node)
 
         pass3_2_path = self.owner.chip_dir / "core_partition.md"
         core_partition_text = "未检测到 pass3.2 输出，可结合 readSource 与 forkSubAgent 补齐证据。"
@@ -1353,7 +1395,7 @@ class Pass3Generator:
             search_input_hash = self._build_pass3_3_search_input_hash(
                 top_module=top_node.module_name,
                 instruction=instruction,
-                top_description=top_description,
+                top_preview=top_preview,
                 core_partition=core_partition_text,
                 instruction_datasheet=instruction_datasheet,
             )
@@ -1369,8 +1411,9 @@ class Pass3Generator:
                 search_prompt = PASS3_3_1_SEARCH_PROMPT.format(
                     top_module=top_node.module_name,
                     instruction=instruction,
-                    module_description=top_description,
-                    core_partition=self.owner._extract_summary(core_partition_text, max_lines=80, max_chars=12000),
+                    module_preview=top_preview,
+                    child_preview_list=top_child_preview_list,
+                    core_partition=core_partition_text,
                     instruction_datasheet=instruction_datasheet,
                 )
 
@@ -1393,7 +1436,7 @@ class Pass3Generator:
                                 "At this level readSource can read only current module. "
                                 "To inspect child modules, use forkSubAgent(module, task)."
                             )
-                        topology = self._build_pass2_style_topology_block(str(scoped_node.module_name))
+                        topology = self._build_topology_block(str(scoped_node.module_name))
                         return f"[readSource] module={scoped_node.module_name}\n\n{topology}"
 
                     if tool_name == "forkSubAgent":
@@ -1443,6 +1486,15 @@ class Pass3Generator:
                                 "prompt_style": "instrack_search",
                             },
                         )
+                        child_node_path = (
+                            child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
+                        )
+                        child_cache_key = self._build_recursive_cache_key(
+                            "instrack_search",
+                            child_node_path,
+                            task,
+                            1,
+                        )
 
                         report = await self._run_pass3_recursive_agent(
                             top_node=top_node,
@@ -1456,6 +1508,7 @@ class Pass3Generator:
                         )
                         if len(report) > 16000:
                             report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
+                        child_token_stats = dict(self._subagent_token_stats.get(child_cache_key) or {})
 
                         self._append_fork_trace(
                             "fork_return",
@@ -1466,6 +1519,7 @@ class Pass3Generator:
                                 "child_module": child_node.module_name,
                                 "child_level": 1,
                                 "report_chars": len(report),
+                                "prompt_tokens": int(child_token_stats.get("input_tokens", 0) or 0),
                                 "prompt_style": "instrack_search",
                             },
                         )

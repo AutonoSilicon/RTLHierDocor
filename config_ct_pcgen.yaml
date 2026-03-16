@@ -36,7 +36,10 @@ agent:
   composer_base_url: "https://coding.dashscope.aliyuncs.com/v1"
   composer_api_key: "sk-sp-0b4bfeb434d946bda2d005ac9c85026e"
   composer_thinking: false
+  pass1_enabled: true
+  pass2_enabled: true
   pass3_enabled: false
+  pass3_3_enabled: false
   skip_modules:
     - "ct_had*"
   resume: true

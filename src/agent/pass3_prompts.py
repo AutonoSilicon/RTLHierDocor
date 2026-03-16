@@ -83,10 +83,10 @@ class Pass3Prompts:
                 PASS3_3_2_DRAW_SYSTEM.strip()
                 + "\n\n"
                 + "递归子代理附加约束：\n"
-                + "- 你处于 draw 递归子代理模式：仅绘制当前模块主通路，并返回 handoff_signals。\n"
+                + "- 你处于 draw 递归子代理模式：仅绘制当前模块主通路，并返回 entry_ports 与 boundary_handoffs。\n"
                 + "- 你只能直接读取本级与直接子级拓扑证据（readSource 受限）。\n"
-                + "- 若需要子模块图，调用 drawChild(module, task)；禁止跨层调用。\n"
-                + "- drawChild 对已绘制 module 会返回 reject，需复用已有子图结论而非重复调用。\n"
+                + "- 若需要子模块边界契约，调用 drawChild(module, task)；禁止跨层调用。\n"
+                + "- drawChild 对已绘制 module 会返回 reject，需复用已有子模块边界结论而非重复调用。\n"
                 + "- 是否调用 drawChild 由你自主决策，Python 不再预设 required_children 强制列表。"
             )
 
@@ -139,7 +139,8 @@ class Pass3Prompts:
                     if (instruction_datasheet or "").strip()
                     else "Instruction unavailable"
                 ),
-                module_description=self.g.owner._extract_summary(current_description, max_lines=20, max_chars=2400),
+                module_preview=current_description,
+                child_preview_list=child_overview,
             ).strip()
             return (
                 f"{base_prompt}\n\n"
@@ -173,11 +174,9 @@ class Pass3Prompts:
                     is_top_module=current_node.parent is None,
                     has_children=bool(current_node.children),
                 ),
-                module_description=self.g.owner._extract_summary(current_description, max_lines=20, max_chars=2400),
-                functional_description="无可用功能描述文档",
-                child_overview=child_overview,
+                module_preview=current_description,
+                child_preview_list=child_overview,
                 existing_child_draws="- 无已知子模块 draw 结果",
-                upstream_context_section="",
             ).strip()
 
         if prompt_style == "instrack":
@@ -188,7 +187,7 @@ class Pass3Prompts:
                 f"- Current node: {current_node.instance_name} ({current_node.module_name})\n"
                 f"- Task: {task}\n\n"
                 "## Current module description\n"
-                f"{self.g.owner._extract_summary(current_description, max_lines=20, max_chars=2400)}\n\n"
+                f"{current_description}\n\n"
                 "## Direct children snapshot\n"
                 f"{child_overview}\n\n"
                 "要求：若有子模块，先逐个 forkSubAgent 判断相关性，再绘制最终路径。\n"
@@ -202,7 +201,7 @@ class Pass3Prompts:
                 f"- Current level: {level}\n"
                 f"- Current node: {current_node.instance_name} ({current_node.module_name})\n"
                 f"- Task: {task}\n\n"
-                f"## Current description\n{self.g.owner._extract_summary(current_description, max_lines=20, max_chars=2400)}\n\n"
+                f"## Current description\n{current_description}\n\n"
                 f"## Direct children snapshot\n{child_overview}\n\n"
                 "请输出以下结构：\n"
                 "## 架构结论\n"
