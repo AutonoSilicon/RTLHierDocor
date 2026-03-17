@@ -70,7 +70,7 @@ class Pass3Tools:
                 "type": "function",
                 "function": {
                     "name": "forkSubAgent",
-                    "description": "Delegate deeper analysis to a child-level recursive agent. Only direct children of top are allowed.",
+                    "description": "Delegate deeper analysis to a child-level recursive agent only when needed. Only direct children of top are allowed. If no child expansion is needed, output the result directly.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -143,7 +143,7 @@ class Pass3Tools:
                 "type": "function",
                 "function": {
                     "name": "forkSubAgent",
-                    "description": "Delegate deeper analysis to a child-level recursive agent. Only direct children of top are allowed.",
+                    "description": "Delegate deeper analysis to a child-level recursive agent only when needed. Only direct children of top are allowed. If no child expansion is needed, output the result directly.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -169,7 +169,7 @@ class Pass3Tools:
                 "type": "function",
                 "function": {
                     "name": "forkSubAgent",
-                    "description": "Delegate deeper analysis to a child-level recursive agent. Only direct children of top are allowed.",
+                    "description": "Delegate deeper analysis to a child-level recursive agent only when needed. Only direct children of top are allowed. If no child expansion is needed, output the result directly.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -195,7 +195,7 @@ class Pass3Tools:
                 "type": "function",
                 "function": {
                     "name": "drawChild",
-                    "description": "Trigger draw generation for one direct child module and return its structured boundary summary (entry ports, boundary handoffs, state summary). If that child was already drawn earlier in this run, return the cached orchestration result instead of redrawing it.",
+                    "description": "Trigger draw generation for one direct child module only when needed, and return its structured boundary summary (entry ports, boundary handoffs, state summary). If that child was already drawn earlier in this run, return the cached orchestration result instead of redrawing it. If no child expansion is needed, output the result directly.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -229,7 +229,7 @@ class Pass3Tools:
                 "type": "function",
                 "function": {
                     "name": "forkSubAgent",
-                    "description": "Spawn a child-level agent for deeper analysis. Only direct children can be forked.",
+                    "description": "Spawn a child-level agent for deeper analysis only when needed. Only direct children can be forked. If no child expansion is needed, output the result directly.",
                     "parameters": {
                         "type": "object",
                         "properties": {

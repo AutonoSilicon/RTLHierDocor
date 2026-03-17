@@ -13,15 +13,9 @@ from .prompts import (
     PASS3_3_2_ORCHESTRATE_SYSTEM,
     PASS3_3_2_ORCHESTRATE_PROMPT,
     PASS3_RECURSIVE_ARCHITECTURE_SYSTEM,
-    PASS3_RECURSIVE_INSTRACK_SYSTEM,
     PASS3_RECURSIVE_PARTITION_APPENDIX,
-    PASS3_RECURSIVE_INSTRACK_SEARCH_APPENDIX,
-    PASS3_RECURSIVE_INSTRACK_DRAW_APPENDIX,
     PASS3_RECURSIVE_ARCHITECTURE_PROMPT,
-    PASS3_RECURSIVE_INSTRACK_PROMPT,
     PASS3_RECURSIVE_PARTITION_PROMPT,
-    PASS3_RECURSIVE_INSTRACK_SEARCH_PROMPT,
-    PASS3_RECURSIVE_INSTRACK_DRAW_PROMPT,
     PASS3_1_RECURSIVE_OUTPUT_SCHEMA,
 )
 
@@ -65,19 +59,10 @@ class Pass3Prompts:
     def build_pass3_recursive_system(self, prompt_style: str = "architecture") -> str:
         """Build the system prompt for recursive pass3 agents."""
         if prompt_style == "instrack_search":
-            return self._join_prompt_parts(
-                PASS3_3_1_SEARCH_SYSTEM,
-                PASS3_RECURSIVE_INSTRACK_SEARCH_APPENDIX,
-            )
+            return PASS3_3_1_SEARCH_SYSTEM.strip()
 
         if prompt_style == "instrack_draw":
-            return self._join_prompt_parts(
-                PASS3_3_2_ORCHESTRATE_SYSTEM,
-                PASS3_RECURSIVE_INSTRACK_DRAW_APPENDIX,
-            )
-
-        if prompt_style == "instrack":
-            return PASS3_RECURSIVE_INSTRACK_SYSTEM.strip()
+            return PASS3_3_2_ORCHESTRATE_SYSTEM.strip()
 
         if prompt_style != "partition":
             return PASS3_RECURSIVE_ARCHITECTURE_SYSTEM.strip()
@@ -100,7 +85,7 @@ class Pass3Prompts:
         """Build the user prompt for recursive pass3 agents."""
         if prompt_style == "instrack_search":
             current_module_topology = self.build_instrack_current_module_topology(current_node.module_name)
-            base_prompt = PASS3_3_1_SEARCH_PROMPT.format(
+            return PASS3_3_1_SEARCH_PROMPT.format(
                 instruction=instruction or "UNKNOWN",
                 instruction_datasheet=(
                     instruction_datasheet
@@ -111,19 +96,10 @@ class Pass3Prompts:
                 current_module_topology=current_module_topology,
                 child_preview_list=child_overview,
             ).strip()
-            return PASS3_RECURSIVE_INSTRACK_SEARCH_PROMPT.format(
-                base_prompt=base_prompt,
-                top_module=top_node.module_name,
-                level=level,
-                current_instance=current_node.instance_name,
-                current_module=current_node.module_name,
-                task=task,
-                child_overview=child_overview,
-            )
 
         if prompt_style == "instrack_draw":
             current_module_topology = self.build_instrack_current_module_topology(current_node.module_name)
-            base_prompt = PASS3_3_2_ORCHESTRATE_PROMPT.format(
+            return PASS3_3_2_ORCHESTRATE_PROMPT.format(
                 instruction=instruction or "UNKNOWN",
                 instruction_datasheet=(
                     instruction_datasheet
@@ -139,18 +115,6 @@ class Pass3Prompts:
                 current_module_topology=current_module_topology,
                 child_preview_list=child_overview,
             ).strip()
-            return PASS3_RECURSIVE_INSTRACK_DRAW_PROMPT.format(base_prompt=base_prompt)
-
-        if prompt_style == "instrack":
-            return PASS3_RECURSIVE_INSTRACK_PROMPT.format(
-                top_module=top_node.module_name,
-                level=level,
-                current_instance=current_node.instance_name,
-                current_module=current_node.module_name,
-                task=task,
-                current_description=current_description,
-                child_overview=child_overview,
-            )
 
         if prompt_style != "partition":
             return PASS3_RECURSIVE_ARCHITECTURE_PROMPT.format(

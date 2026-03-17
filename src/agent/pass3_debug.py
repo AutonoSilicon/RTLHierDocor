@@ -115,7 +115,34 @@ class Pass3Debug:
                     stage_tag = f"pass3.3/{prompt_style}"
 
                 self._print_instrack_stage_header(stage_tag)
-                if event in {"fork_dispatch", "pass3_1_fork_dispatch", "pass3_2_fork_dispatch"}:
+                if event == "draw_enter":
+                    node_inst = str((payload or {}).get("instance") or "?")
+                    node_mod = str((payload or {}).get("module") or "?")
+                    level = int((payload or {}).get("level") or 0)
+                    role = str((payload or {}).get("stage_label") or "").strip()
+                    action = "enter"
+                    if role == "start_module":
+                        action = "start"
+                    elif role in {"parent_module", "top_module"}:
+                        action = "parent"
+                    indent = self._instrack_indent(level)
+                    print(f"{indent}{action:<8}L{level} {node_inst}({node_mod})")
+                elif event == "draw_return":
+                    node_inst = str((payload or {}).get("instance") or "?")
+                    node_mod = str((payload or {}).get("module") or "?")
+                    level = int((payload or {}).get("level") or 0)
+                    prompt_tokens = int((payload or {}).get("prompt_tokens") or 0)
+                    context_pct = (prompt_tokens / float(self.CONTEXT_WINDOW_TOKENS)) * 100.0
+                    role = str((payload or {}).get("stage_label") or "").strip()
+                    action = "return"
+                    if role in {"parent_module", "top_module"}:
+                        action = "return"
+                    indent = self._instrack_indent(level)
+                    print(
+                        f"{indent}{action:<8}L{level} {node_inst}({node_mod}) "
+                        f"prompt_tokens={prompt_tokens} ctx={context_pct:.1f}%"
+                    )
+                elif event in {"fork_dispatch", "pass3_1_fork_dispatch", "pass3_2_fork_dispatch"}:
                     child_inst = str((payload or {}).get("child_instance") or "?")
                     child_mod = str((payload or {}).get("child_module") or "?")
                     parent_level = int((payload or {}).get("parent_level") or 0)

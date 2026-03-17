@@ -7,6 +7,7 @@ navigate.
 
 import json
 import re
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Set
 
 from .prompts import (
@@ -148,14 +149,35 @@ class Pass3InStrackStages:
             text = "无可用 preview 文档"
         return text
 
+    @staticmethod
+    def _format_grouped_child_instances(instance_names: List[str], limit: int = 6) -> str:
+        names = [str(name).strip() for name in instance_names if str(name).strip()]
+        if not names:
+            return ""
+        if len(names) <= limit:
+            return ", ".join(names)
+        hidden = len(names) - limit
+        return f"{', '.join(names[:limit])} ... (+{hidden} more)"
+
     def build_child_overview(self, current_node: Any) -> str:
-        lines: List[str] = []
+        grouped: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         for child in sorted(current_node.children.values(), key=lambda c: (c.module_name, c.instance_name)):
             child_desc = self.get_module_preview(child.module_name)
-            lines.append(
-                f"- {child.instance_name} ({child.module_name}): "
-                f"{child_desc}"
-            )
+            group_key = f"{child.module_name}\0{child_desc}"
+            bucket = grouped.get(group_key)
+            if bucket is None:
+                bucket = {
+                    "module_name": child.module_name,
+                    "desc": child_desc,
+                    "instances": [],
+                }
+                grouped[group_key] = bucket
+            bucket["instances"].append(child.instance_name)
+
+        lines: List[str] = []
+        for bucket in grouped.values():
+            instance_label = self._format_grouped_child_instances(bucket["instances"])
+            lines.append(f"- {instance_label} ({bucket['module_name']}): {bucket['desc']}")
         return "\n".join(lines) if lines else "- 无子模块"
 
     @staticmethod
@@ -426,6 +448,18 @@ class Pass3InStrackStages:
         results: List[Dict[str, Any]] = []
         draw_cache: Dict[str, Dict[str, Any]] = {}
 
+        self.g._append_fork_trace(
+            "draw_enter",
+            {
+                "pass": "pass3_3_2_orchestrate",
+                "prompt_style": "instrack_draw",
+                "stage_label": "start_module",
+                "instance": start_node.instance_name,
+                "module": start_node.module_name,
+                "level": int(getattr(start_node, "depth", 0) or 0),
+                "node_path": start_node.get_path() if hasattr(start_node, "get_path") else start_node.instance_name,
+            },
+        )
         start_item = await self._run_draw_agent_for_node(
             top_node=top_node,
             node=start_node,
@@ -435,6 +469,20 @@ class Pass3InStrackStages:
             stage_label="start_module",
             draw_cache=draw_cache,
             upstream_context=None,
+        )
+        self.g._append_fork_trace(
+            "draw_return",
+            {
+                "pass": "pass3_3_2_orchestrate",
+                "prompt_style": "instrack_draw",
+                "stage_label": "start_module",
+                "instance": start_node.instance_name,
+                "module": start_node.module_name,
+                "level": int(getattr(start_node, "depth", 0) or 0),
+                "node_path": start_node.get_path() if hasattr(start_node, "get_path") else start_node.instance_name,
+                "prompt_tokens": int(dict(start_item.get("token_stats") or {}).get("input_tokens", 0) or 0),
+                "report_chars": len(str(start_item.get("raw_orchestration_output") or "")),
+            },
         )
         results.append(start_item)
         start_path = start_node.get_path() if hasattr(start_node, "get_path") else start_node.instance_name
@@ -449,18 +497,45 @@ class Pass3InStrackStages:
             source_child_node = path_nodes[idx + 1]
             parent_path = parent_node.get_path() if hasattr(parent_node, "get_path") else parent_node.instance_name
             cache_before_parent = set(draw_cache.keys())
+            stage_label = "top_module" if parent_node is path_nodes[0] else "parent_module"
+            self.g._append_fork_trace(
+                "draw_enter",
+                {
+                    "pass": "pass3_3_2_orchestrate",
+                    "prompt_style": "instrack_draw",
+                    "stage_label": stage_label,
+                    "instance": parent_node.instance_name,
+                    "module": parent_node.module_name,
+                    "level": int(getattr(parent_node, "depth", 0) or 0),
+                    "node_path": parent_path,
+                },
+            )
             parent_item = await self._run_draw_agent_for_node(
                 top_node=top_node,
                 node=parent_node,
                 instruction=instruction,
                 instruction_datasheet=instruction_datasheet,
                 upstream_signals=self._summarize_handoffs_for_state(pending_handoffs),
-                stage_label="top_module" if parent_node is path_nodes[0] else "parent_module",
+                stage_label=stage_label,
                 draw_cache=draw_cache,
                 upstream_handoffs_raw=pending_handoffs,
                 source_child_for_handoff=source_child_node,
                 source_payload_for_handoff=pending_payload,
                 upstream_context=None,
+            )
+            self.g._append_fork_trace(
+                "draw_return",
+                {
+                    "pass": "pass3_3_2_orchestrate",
+                    "prompt_style": "instrack_draw",
+                    "stage_label": stage_label,
+                    "instance": parent_node.instance_name,
+                    "module": parent_node.module_name,
+                    "level": int(getattr(parent_node, "depth", 0) or 0),
+                    "node_path": parent_path,
+                    "prompt_tokens": int(dict(parent_item.get("token_stats") or {}).get("input_tokens", 0) or 0),
+                    "report_chars": len(str(parent_item.get("raw_orchestration_output") or "")),
+                },
             )
 
             # Record newly generated on-demand child draws triggered by drawChild.
@@ -895,17 +970,12 @@ class Pass3InStrackStages:
             seen_entries.add(key)
             unique_entries.append(entry)
 
-        lifecycle_context = str((source_payload or {}).get("lifecycle_context") or "").strip()
-        instruction_state = str((source_payload or {}).get("instruction_state") or "").strip()
-
         return {
             "source_instance": str(source_child_node.instance_name or "").strip(),
             "source_module": str(source_child_node.module_name or "").strip(),
             "entry_ports": unique_entries[:8],
             "exits_parent": exits_parent[:4],
             "unresolved": unresolved[:6],
-            "lifecycle_context": lifecycle_context,
-            "instruction_state": instruction_state,
         }
 
     def _enrich_entry_ports(

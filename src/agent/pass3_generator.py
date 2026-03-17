@@ -4,6 +4,7 @@ This module isolates chip-level (pass3) orchestration from the main
 doc generator to keep responsibilities focused and files maintainable.
 """
 import json
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -546,11 +547,30 @@ class Pass3Generator:
             )
             return f"[SubAgent depth={level}] Reached max_depth={max_depth}. Stop recursion."
 
-        child_lines = []
+        grouped_children: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         for child in sorted(current_node.children.values(), key=lambda c: (c.module_name, c.instance_name)):
             child_arch = self.owner.tracker.get_pass1_content(child.module_name) or "无可用 preview 文档"
+            group_key = f"{child.module_name}\0{child_arch}"
+            bucket = grouped_children.get(group_key)
+            if bucket is None:
+                bucket = {
+                    "module_name": child.module_name,
+                    "child_arch": child_arch,
+                    "instances": [],
+                }
+                grouped_children[group_key] = bucket
+            bucket["instances"].append(child.instance_name)
+
+        child_lines = []
+        for bucket in grouped_children.values():
+            instance_names = [str(name).strip() for name in bucket["instances"] if str(name).strip()]
+            if len(instance_names) > 6:
+                hidden = len(instance_names) - 6
+                instance_label = f"{', '.join(instance_names[:6])} ... (+{hidden} more)"
+            else:
+                instance_label = ", ".join(instance_names)
             child_lines.append(
-                f"- {child.instance_name} ({child.module_name}): {child_arch}"
+                f"- {instance_label} ({bucket['module_name']}): {bucket['child_arch']}"
             )
         child_overview = "\n".join(child_lines) if child_lines else "- 无子模块"
 
