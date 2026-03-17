@@ -399,6 +399,13 @@ class Pass3Generator:
         if not selector:
             return None, "Error: module is empty"
 
+        if child_only and selector in ["self", "<self>", ".", current_node.instance_name, current_node.module_name]:
+            return None, (
+                "Error: cannot fork the current module back into itself. "
+                "Use the current-module evidence already in context (or readSource on the current module) "
+                "to verify same-module facts, and use forkSubAgent only for direct children."
+            )
+
         children = list(current_node.children.values())
         visible = children if child_only else [current_node] + children
 

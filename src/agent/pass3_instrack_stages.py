@@ -498,6 +498,30 @@ class Pass3InStrackStages:
             parent_path = parent_node.get_path() if hasattr(parent_node, "get_path") else parent_node.instance_name
             cache_before_parent = set(draw_cache.keys())
             stage_label = "top_module" if parent_node is path_nodes[0] else "parent_module"
+            parent_upstream_context = self._build_parent_bridge_upstream_context(
+                parent_node=parent_node,
+                source_child_node=source_child_node,
+                handoffs=pending_handoffs,
+                source_payload=pending_payload,
+            )
+            self.g._append_fork_trace(
+                "draw_parent_context",
+                {
+                    "pass": "pass3_3_2_orchestrate",
+                    "prompt_style": "instrack_draw",
+                    "stage_label": stage_label,
+                    "instance": parent_node.instance_name,
+                    "module": parent_node.module_name,
+                    "level": int(getattr(parent_node, "depth", 0) or 0),
+                    "node_path": parent_path,
+                    "source_instance": str(parent_upstream_context.get("source_instance") or "").strip(),
+                    "source_module": str(parent_upstream_context.get("source_module") or "").strip(),
+                    "candidate_children": list(parent_upstream_context.get("candidate_children") or []),
+                    "resolved_handoffs": list(parent_upstream_context.get("resolved_handoffs") or []),
+                    "exits_parent": list(parent_upstream_context.get("exits_parent") or []),
+                    "unresolved": list(parent_upstream_context.get("unresolved") or []),
+                },
+            )
             self.g._append_fork_trace(
                 "draw_enter",
                 {
@@ -521,7 +545,7 @@ class Pass3InStrackStages:
                 upstream_handoffs_raw=pending_handoffs,
                 source_child_for_handoff=source_child_node,
                 source_payload_for_handoff=pending_payload,
-                upstream_context=None,
+                upstream_context=parent_upstream_context,
             )
             self.g._append_fork_trace(
                 "draw_return",
@@ -984,6 +1008,153 @@ class Pass3InStrackStages:
             "instruction_state": instruction_state,
         }
 
+    def _build_parent_bridge_upstream_context(
+        self,
+        *,
+        parent_node: Any,
+        source_child_node: Any,
+        handoffs: List[Dict[str, Any]],
+        source_payload: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        source_path = (
+            source_child_node.get_path() if hasattr(source_child_node, "get_path") else source_child_node.instance_name
+        )
+        lifecycle_context = self._coerce_text_field((source_payload or {}).get("lifecycle_context"))
+        instruction_state = self._coerce_text_field((source_payload or {}).get("instruction_state"))
+
+        candidate_children: List[Dict[str, str]] = []
+        resolved_handoffs: List[Dict[str, Any]] = []
+        exits_parent: List[Dict[str, str]] = []
+        unresolved: List[str] = []
+        seen_children: Set[str] = set()
+        seen_exit_ports: Set[str] = set()
+
+        for item in handoffs or []:
+            if not isinstance(item, dict):
+                continue
+            egress_port = str(item.get("egress_port") or "").strip()
+            semantic = self._coerce_text_field(item.get("semantic"))
+            value_kind = str(item.get("value_kind") or "other").strip() or "other"
+            behavior = self._coerce_text_field(item.get("behavior"))
+            source_block = str(item.get("source_block") or "").strip()
+            source_state = self._coerce_text_field(item.get("source_state"))
+            status = str(item.get("status") or "").strip()
+            parent_wire = str(item.get("parent_wire") or "").strip()
+
+            targets: List[Dict[str, str]] = []
+            for resolution in list(item.get("resolutions") or []):
+                if not isinstance(resolution, dict):
+                    continue
+                kind = str(resolution.get("resolution_kind") or "").strip()
+                if kind == "sibling_child":
+                    target_instance = str(resolution.get("target_instance") or "").strip()
+                    target_module = str(resolution.get("target_module") or "").strip()
+                    target_port = str(resolution.get("target_port") or "").strip()
+                    if target_instance or target_module or target_port:
+                        targets.append(
+                            {
+                                "target_instance": target_instance,
+                                "target_module": target_module,
+                                "target_port": target_port,
+                                "parent_wire": str(resolution.get("parent_wire") or parent_wire).strip(),
+                            }
+                        )
+                    key = f"{target_instance}|{target_module}"
+                    if key and key not in seen_children and (target_instance or target_module):
+                        seen_children.add(key)
+                        candidate_children.append(
+                            {
+                                "target_instance": target_instance,
+                                "target_module": target_module,
+                            }
+                        )
+                elif kind == "exit_parent":
+                    parent_port = str(resolution.get("parent_port") or "").strip()
+                    if parent_port and parent_port not in seen_exit_ports:
+                        seen_exit_ports.add(parent_port)
+                        exits_parent.append(
+                            {
+                                "parent_port": parent_port,
+                                "parent_wire": str(resolution.get("parent_wire") or parent_wire).strip(),
+                                "source_port": egress_port,
+                            }
+                        )
+
+            if egress_port or semantic or source_block or source_state:
+                handoff_entry: Dict[str, Any] = {
+                    "egress_port": egress_port,
+                    "semantic": semantic,
+                    "value_kind": value_kind,
+                    "behavior": behavior,
+                    "source_block": source_block,
+                    "source_state": source_state,
+                    "status": status,
+                    "parent_wire": parent_wire,
+                }
+                if targets:
+                    handoff_entry["targets"] = targets
+                resolved_handoffs.append(handoff_entry)
+
+            if status in {"unresolved", "invalid"}:
+                label = egress_port or semantic or source_block or "unknown"
+                if label and label not in unresolved:
+                    unresolved.append(label)
+
+        return {
+            "source_instance": str(source_child_node.instance_name or "").strip(),
+            "source_module": str(source_child_node.module_name or "").strip(),
+            "source_instance_path": source_path,
+            "parent_module": str(parent_node.module_name or "").strip(),
+            "entry_ports": [],
+            "candidate_children": candidate_children[:8],
+            "resolved_handoffs": resolved_handoffs[:12],
+            "exits_parent": exits_parent[:8],
+            "unresolved": unresolved[:6],
+            "lifecycle_context": lifecycle_context,
+            "instruction_state": instruction_state,
+        }
+
+    def _build_active_continuation(
+        self,
+        *,
+        parent_node: Any,
+        source_child_node: Optional[Any],
+        handoffs: List[Dict[str, Any]],
+        source_payload: Optional[Dict[str, Any]],
+        upstream_context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        state = {
+            "source_child_node": source_child_node,
+            "handoffs": list(handoffs or []),
+            "payload": dict(source_payload or {}),
+            "upstream_context": dict(upstream_context or {}),
+        }
+        if source_child_node is not None:
+            state["upstream_context"] = self._build_parent_bridge_upstream_context(
+                parent_node=parent_node,
+                source_child_node=source_child_node,
+                handoffs=list(handoffs or []),
+                source_payload=dict(source_payload or {}),
+            )
+        return state
+
+    def _advance_active_continuation_from_child(
+        self,
+        *,
+        parent_node: Any,
+        child_node: Any,
+        child_item: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload = dict((child_item or {}).get("orchestration") or {})
+        handoffs = list(payload.get("boundary_handoffs") or [])
+        return self._build_active_continuation(
+            parent_node=parent_node,
+            source_child_node=child_node,
+            handoffs=handoffs,
+            source_payload=payload,
+            upstream_context=None,
+        )
+
     def _enrich_entry_ports(
         self,
         entry_ports: List[Dict[str, Any]],
@@ -1192,8 +1363,16 @@ class Pass3InStrackStages:
             current_module_topology=current_module_topology,
             child_preview_list=self.build_child_overview(node),
         )
+        active_continuation = self._build_active_continuation(
+            parent_node=node,
+            source_child_node=source_child_for_handoff,
+            handoffs=list(upstream_handoffs_raw or []),
+            source_payload=dict(source_payload_for_handoff or {}),
+            upstream_context=upstream_context,
+        )
 
         async def _tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
+            nonlocal active_continuation
             if tool_name == "readSource":
                 module = str(args.get("module") or "").strip()
                 scoped_node, scope_error = self.g._resolve_scope_node(node, module, child_only=False)
@@ -1215,17 +1394,19 @@ class Pass3InStrackStages:
                 child_path = child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
                 cached_child = draw_cache.get(child_path)
                 cache_hit = cached_child is not None
+                raw_handoffs = list(active_continuation.get("handoffs") or [])
+                active_source_node = active_continuation.get("source_child_node")
+                active_payload = dict(active_continuation.get("payload") or {})
                 if cached_child is None:
-                    raw_handoffs = list(upstream_handoffs_raw or [])
                     filtered_handoffs = self._filter_handoffs_for_child(raw_handoffs, child_node)
                     child_upstream_context: Optional[Dict[str, Any]] = None
-                    if source_child_for_handoff is not None and filtered_handoffs:
+                    if active_source_node is not None and filtered_handoffs:
                         child_upstream_context = self._build_upstream_context(
                             parent_node=node,
-                            source_child_node=source_child_for_handoff,
+                            source_child_node=active_source_node,
                             target_child_node=child_node,
                             handoffs=filtered_handoffs,
-                            source_payload=source_payload_for_handoff,
+                            source_payload=active_payload,
                         )
                     self.g._append_fork_trace(
                         "fork_dispatch",
@@ -1249,7 +1430,7 @@ class Pass3InStrackStages:
                         draw_cache=draw_cache,
                         upstream_handoffs_raw=filtered_handoffs,
                         source_child_for_handoff=None,
-                        source_payload_for_handoff=source_payload_for_handoff,
+                        source_payload_for_handoff=active_payload,
                         upstream_context=child_upstream_context,
                     )
                     draw_cache[child_path] = cached_child
@@ -1268,6 +1449,30 @@ class Pass3InStrackStages:
                             "prompt_style": "instrack_draw",
                         },
                     )
+                active_continuation = self._advance_active_continuation_from_child(
+                    parent_node=node,
+                    child_node=child_node,
+                    child_item=cached_child,
+                )
+                active_upstream_context = dict(active_continuation.get("upstream_context") or {})
+                self.g._append_fork_trace(
+                    "draw_continuation_update",
+                    {
+                        "pass": "pass3_3_2_orchestrate",
+                        "prompt_style": "instrack_draw",
+                        "parent_path": node_path,
+                        "parent_level": int(getattr(node, "depth", 0) or 0),
+                        "child_instance": child_node.instance_name,
+                        "child_module": child_node.module_name,
+                        "cached": cache_hit,
+                        "source_instance": str(active_upstream_context.get("source_instance") or "").strip(),
+                        "source_module": str(active_upstream_context.get("source_module") or "").strip(),
+                        "candidate_children": list(active_upstream_context.get("candidate_children") or []),
+                        "resolved_handoffs": list(active_upstream_context.get("resolved_handoffs") or []),
+                        "exits_parent": list(active_upstream_context.get("exits_parent") or []),
+                        "unresolved": list(active_upstream_context.get("unresolved") or []),
+                    },
+                )
                 return self._build_draw_child_tool_result(cached_child, child_task, cached=cache_hit)
 
             return f"Error: unknown tool '{tool_name}'"

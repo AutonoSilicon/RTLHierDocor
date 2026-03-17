@@ -99,7 +99,9 @@ class Pass3Debug:
         }
         record.update(payload or {})
         try:
-            # Emit concise runtime progress to terminal for pass3.3 instrack fork flows.
+            # Emit concise runtime progress to terminal for pass3.3 instrack flows.
+            # The terminal view is intentionally a summary; detailed fork lifecycle
+            # records stay in JSONL trace files for offline debugging.
             prompt_style = str((payload or {}).get("prompt_style") or "")
             pass_name = str((payload or {}).get("pass") or "")
             is_instrack = prompt_style.startswith("instrack") or pass_name.startswith("pass3_3")
@@ -166,7 +168,10 @@ class Pass3Debug:
                     child_level = int((payload or {}).get("child_level") or (parent_level + 1))
                     indent = self._instrack_indent(child_level)
                     print(f"{indent}dispatch L{parent_level}->L{child_level} {child_inst}({child_mod})")
-                elif event in {"fork_return", "pass3_1_fork_return", "pass3_2_fork_return"}:
+                elif (
+                    event in {"fork_return", "pass3_1_fork_return", "pass3_2_fork_return"}
+                    and prompt_style != "instrack_search"
+                ):
                     child_inst = str((payload or {}).get("child_instance") or "?")
                     child_mod = str((payload or {}).get("child_module") or "?")
                     child_level = int((payload or {}).get("child_level") or 0)

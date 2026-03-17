@@ -339,11 +339,141 @@ def test_build_upstream_context_only_keeps_exact_child_entry_ports():
                 "value_kind": "instruction_valid",
             }
         ],
+        "parent_logic_on_path": [],
         "exits_parent": [],
         "unresolved": ["dangling"],
         "lifecycle_context": "parent bridge",
         "instruction_state": "decoded valid",
     }
+
+
+def test_build_parent_bridge_upstream_context_collects_candidate_children_and_parent_exits():
+    stages = make_stages()
+    parent, source, _, _ = make_parent_tree()
+    raw_handoffs = [
+        {"egress_port": "out1", "semantic": "to decode", "value_kind": "instruction_valid"},
+        {"egress_port": "out2", "semantic": "leave parent", "value_kind": "instruction_bundle"},
+        {"egress_port": "dangling", "semantic": "stuck", "value_kind": "instruction_valid"},
+    ]
+    resolved_handoffs = stages._resolve_boundary_handoff_destinations(parent, source, raw_handoffs)
+
+    context = stages._build_parent_bridge_upstream_context(
+        parent_node=parent,
+        source_child_node=source,
+        handoffs=resolved_handoffs,
+        source_payload={
+            "lifecycle_context": "ifu bridge",
+            "instruction_state": "dispatch bundle",
+        },
+    )
+
+    assert context["source_instance"] == "x_src"
+    assert context["source_module"] == "src_mod"
+    assert context["source_instance_path"] == "top/x_src"
+    assert context["parent_module"] == "parent_mod"
+    assert context["entry_ports"] == []
+    assert context["candidate_children"] == [
+        {"target_instance": "x_dst0", "target_module": "dst_mod"},
+        {"target_instance": "x_dst1", "target_module": "dst_mod"},
+    ]
+    assert context["exits_parent"] == [
+        {
+            "parent_port": "top_out",
+            "parent_wire": "top_out",
+            "source_port": "out2",
+        }
+    ]
+    assert context["unresolved"] == ["dangling"]
+    assert context["lifecycle_context"] == "ifu bridge"
+    assert context["instruction_state"] == "dispatch bundle"
+    assert context["resolved_handoffs"][0]["egress_port"] == "out1"
+    assert context["resolved_handoffs"][0]["targets"] == [
+        {
+            "target_instance": "x_dst0",
+            "target_module": "dst_mod",
+            "target_port": "in_a",
+            "parent_wire": "shared_wire",
+        },
+        {
+            "target_instance": "x_dst1",
+            "target_module": "dst_mod",
+            "target_port": "in_b",
+            "parent_wire": "shared_wire",
+        },
+    ]
+    assert context["resolved_handoffs"][1]["egress_port"] == "out2"
+    assert context["resolved_handoffs"][1]["status"] == "exit_parent"
+
+
+def test_advance_active_continuation_from_child_promotes_child_outputs():
+    stages = make_stages()
+    parent, source, _, _ = make_parent_tree()
+    mid = FakeNode(
+        "src_mod",
+        "x_mid",
+        parent=parent,
+        port_connections={
+            "out1": "\\mid_wire",
+            "out2": "\\top_out",
+        },
+    )
+    target0 = FakeNode(
+        "dst_mod",
+        "x_mid_dst0",
+        parent=parent,
+        port_connections={"in_a": "\\mid_wire"},
+    )
+    target1 = FakeNode(
+        "dst_mod",
+        "x_mid_dst1",
+        parent=parent,
+        port_connections={"in_b": "\\mid_wire"},
+    )
+
+    initial_state = stages._build_active_continuation(
+        parent_node=parent,
+        source_child_node=source,
+        handoffs=[{"egress_port": "out1", "semantic": "old source"}],
+        source_payload={"lifecycle_context": "old", "instruction_state": "old-state"},
+        upstream_context=None,
+    )
+    assert initial_state["upstream_context"]["source_instance"] == "x_src"
+
+    child_handoffs = stages._resolve_boundary_handoff_destinations(
+        parent,
+        mid,
+        [
+            {"egress_port": "out1", "semantic": "to next child", "value_kind": "instruction_valid"},
+            {"egress_port": "out2", "semantic": "leave parent", "value_kind": "instruction_bundle"},
+        ],
+    )
+    next_state = stages._advance_active_continuation_from_child(
+        parent_node=parent,
+        child_node=mid,
+        child_item={
+            "orchestration": {
+                "boundary_handoffs": child_handoffs,
+                "lifecycle_context": "mid stage",
+                "instruction_state": "mid-state",
+            }
+        },
+    )
+
+    assert next_state["source_child_node"] is mid
+    assert next_state["payload"]["lifecycle_context"] == "mid stage"
+    assert next_state["upstream_context"]["source_instance"] == "x_mid"
+    assert next_state["upstream_context"]["lifecycle_context"] == "mid stage"
+    assert next_state["upstream_context"]["candidate_children"] == [
+        {"target_instance": target0.instance_name, "target_module": target0.module_name},
+        {"target_instance": target1.instance_name, "target_module": target1.module_name},
+    ]
+    assert next_state["upstream_context"]["exits_parent"] == [
+        {
+            "parent_port": "top_out",
+            "parent_wire": "top_out",
+            "source_port": "out2",
+        }
+    ]
 
 
 def test_enrich_draw_payload_merges_upstream_entry_port_matches():
@@ -468,7 +598,7 @@ def test_build_draw_child_tool_result_returns_structured_boundary_summary_only()
         "instance": "x_dst0",
         "path": "top/x_dst0",
         "raw_draw_output": "```mermaid\nflowchart LR\nA-->B\n```",
-        "draw_payload": {
+        "orchestration": {
             "entry_ports": [{"port": "in_a", "direction": "input"}],
             "boundary_handoffs": [{"egress_port": "out1"}],
             "instruction_state": "state",
@@ -495,5 +625,6 @@ def test_build_draw_child_tool_result_returns_structured_boundary_summary_only()
         "lifecycle_context": "ctx",
         "confidence": "medium",
         "unknown": "",
+        "cached": False,
         "task": "continue decode",
     }

@@ -11,6 +11,8 @@ PASS3_3_1_SEARCH_SYSTEM = """You are a senior CPU microarchitecture documentatio
 Goal: for a given instruction, identify the lifecycle start point and the single most important register or temporal state signal associated with that start.
 
 Working rules:
+- The current module topology/source evidence is already embedded in the prompt. Do not fork the current module back into itself just to re-check same-module facts.
+- If you need to verify a same-module claim, use the current module evidence already provided. Use `forkSubAgent` only for a direct child.
 - You may call `forkSubAgent(module, task)` to inspect child modules and gather missing evidence.
 - If deeper evidence is required, use `forkSubAgent` instead of bypassing scope.
 - The `task` passed to `forkSubAgent` should state the claim to verify and the evidence expected back.
@@ -56,6 +58,7 @@ PASS3_3_1_SEARCH_PROMPT = """
 - Return one JSON code block only.
 - Identify the earliest lifecycle entry point for this instruction under the default meaning of "instruction enters the core datapath".
 - Choose one best key register, not a list. Prefer the register or temporal state that anchors this lifecycle start.
+- Never call `forkSubAgent` on the current module itself. Use the current module evidence for same-module verification.
 - Put the start location under `start_point`, and the register payload under `key_register`.
 - Put both the start-point rationale and register-level rationale into one concise `evidence` field.
 - If evidence is ambiguous, keep the best supported answer, lower `confidence`, and explain the gap in `unknown`.
@@ -71,12 +74,14 @@ Working rules:
 - You may call `drawChild(module, task)` only for a direct child. Never jump across levels.
 - `drawChild` is deduplicated. If a child was already orchestrated and returns `reject`, reuse the existing child summary.
 - Use the minimum necessary expansion. First try to complete the main path from current-module evidence.
+- Treat `Continuation State.upstream_context` as the authoritative continuation signal when it exists. Use `upstream_handoff` only as a compact fallback summary.
 - Call `drawChild` only if at least one is true:
   - the instruction lifecycle cannot be explained without entering one direct child;
   - `boundary_handoffs` or Upstream Continuation Context explicitly identifies the next child or entry port;
   - a critical PROC/COMB fact exists only inside one direct child.
 - Usually do not expand infrastructure or implementation-detail blocks such as clock gates, reset sync, scan/DFT, RAM/FIFO macros, or `$paramod*` wrappers. Summarize them in one parent-level node instead.
 - At most one `drawChild` call per round. After using child evidence, converge back to the current level instead of cascading deeper.
+- You may use another `drawChild` in a later round if the newly returned child handoffs identify the next direct child on the same lifecycle.
 - The goal is not to finish the full end-to-end instruction lifecycle in one module. Stop at the current module boundary and hand off when the next state transition belongs to another module.
 
 Diagram rules:
@@ -85,6 +90,8 @@ Diagram rules:
 - Every lifecycle step must name the concrete register, latch, valid bit, state field, handshake, or gating condition that it reads, updates, or depends on.
 - Port names are boundary handoff points only, not computation nodes.
 - Summarize child functionality from the parent view. Do not invent child-internal detail if the parent-level evidence is sufficient.
+- If `Continuation State.upstream_context.source_instance/source_module` is present, preserve that provenance in the current-module narrative. Do not relabel a known source as `external`.
+- `boundary_handoffs` must contain only real outputs of the current module. Child-local internal signals belong in `instruction_state` or `unknown`, not as current-module exits.
 - End the current module description at the last instruction-relevant state action in this module. If the next step is outside this module, emit `boundary_handoffs` and stop.
 
 Output rules:
@@ -126,9 +133,11 @@ PASS3_3_2_ORCHESTRATE_PROMPT = """
 - Do not draw Mermaid or any other diagram syntax in this stage.
 - Do not continue beyond the current module just to make the lifecycle feel complete. Use `boundary_handoffs` for the next module instead.
 - Start from the current continuation entry of this module. If `Continuation State.upstream_context.entry_ports` exists, use it first; otherwise use `Continuation State.upstream_handoff` only as a weak fallback hint.
+- If `Continuation State.upstream_context.entry_ports` is empty but `Continuation State.upstream_context.source_instance/source_module` plus `resolved_handoffs` exist, treat that parent-bridge context as the authoritative continuation entry for this round.
 - Treat continuation handoff/context as hints. Call `drawChild` only if the next direct child is necessary and non-substitutable.
 - `drawChild` may return a cached child orchestration result when that child was already drawn earlier in this run. Reuse it directly instead of asking for the same child again.
 - `entry_ports` must list only the instruction-relevant inputs that actually continue the current trace through this module. Prefer exact ports named in `Continuation State.upstream_context.entry_ports` when provided.
+- When upstream provenance is known, preserve it in `entry_ports` / step descriptions instead of replacing it with vague `external` wording.
 - Every `boundary_handoffs` item must represent exactly one current-module output port. Do not merge multiple output ports into one item.
 - For each `boundary_handoffs` item, include:
   - `source_block`
