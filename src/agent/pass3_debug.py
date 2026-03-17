@@ -115,7 +115,24 @@ class Pass3Debug:
                     stage_tag = f"pass3.3/{prompt_style}"
 
                 self._print_instrack_stage_header(stage_tag)
-                if event == "draw_enter":
+                if event == "recursive_enter" and prompt_style == "instrack_search":
+                    node_inst = str((payload or {}).get("instance") or "?")
+                    node_mod = str((payload or {}).get("module") or "?")
+                    level = int((payload or {}).get("level") or 0)
+                    indent = self._instrack_indent(level)
+                    print(f"{indent}{'start':<8}L{level} {node_inst}({node_mod})")
+                elif event == "recursive_llm_done" and prompt_style == "instrack_search":
+                    node_inst = str((payload or {}).get("instance") or "?")
+                    node_mod = str((payload or {}).get("module") or "?")
+                    level = int((payload or {}).get("level") or 0)
+                    prompt_tokens = int((payload or {}).get("prompt_tokens") or 0)
+                    context_pct = (prompt_tokens / float(self.CONTEXT_WINDOW_TOKENS)) * 100.0
+                    indent = self._instrack_indent(level)
+                    print(
+                        f"{indent}{'return':<8}L{level} {node_inst}({node_mod}) "
+                        f"prompt_tokens={prompt_tokens} ctx={context_pct:.1f}%"
+                    )
+                elif event == "draw_enter":
                     node_inst = str((payload or {}).get("instance") or "?")
                     node_mod = str((payload or {}).get("module") or "?")
                     level = int((payload or {}).get("level") or 0)
@@ -333,5 +350,5 @@ class Pass3Debug:
         if title == "Instruction Datasheet":
             return self._truncate_text(body, max_lines=22, max_chars=1800)
         if title in {"Draw State", "Continuation State"}:
-            return self._truncate_text(body, max_lines=8, max_chars=1800)
+            return self._truncate_text(body, max_lines=20, max_chars=5200)
         return self._truncate_text(body, max_lines=16, max_chars=1800)

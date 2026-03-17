@@ -42,6 +42,7 @@ agent:
   pass2_enabled: false
   pass3_enabled: false
   pass3_3_enabled: true
+  pass3_3_1_enabled: false
 
   # Development-time instrack scope retained but inactive while Pass 3.3 is disabled
   isa_instructions:

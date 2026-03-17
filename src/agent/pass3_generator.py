@@ -1383,23 +1383,25 @@ class Pass3Generator:
         datasheet_text = self._load_instrack_datasheet()
 
         for instruction in instructions:
-            slug = self._safe_slug(instruction)
-            artifact_search_md = f"instrack/{slug}.search.md"
-            artifact_search_json = f"instrack/{slug}.search.json"
-            artifact_md = f"instrack/{slug}.md"
-            artifact_json = f"instrack/{slug}.json"
-            out_search_md = instrack_dir / f"{slug}.search.md"
-            out_search_json = instrack_dir / f"{slug}.search.json"
-            out_md = instrack_dir / f"{slug}.md"
-            out_json = instrack_dir / f"{slug}.json"
+            slug = self._safe_slug(instruction).lower()
+            artifact_search_md = f"instrack/{slug}/{slug}.search.md"
+            artifact_search_json = f"instrack/{slug}/{slug}.search.json"
+            artifact_md = f"instrack/{slug}/{slug}.md"
+            artifact_json = f"instrack/{slug}/{slug}.json"
             instruction_dir = instrack_dir / slug
             instruction_dir.mkdir(parents=True, exist_ok=True)
-            artifact_locate_json = f"instrack/{slug}/locate_context.json"
-            artifact_orchestrate_index_json = f"instrack/{slug}/orchestrate_index.json"
-            artifact_render_index_json = f"instrack/{slug}/render_index.json"
-            locate_json_path = instruction_dir / "locate_context.json"
-            orchestrate_index_path = instruction_dir / "orchestrate_index.json"
-            render_index_path = instruction_dir / "render_index.json"
+            artifacts_dir = instruction_dir / "artifacts"
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            out_search_md = instruction_dir / f"{slug}.search.md"
+            out_search_json = instruction_dir / f"{slug}.search.json"
+            out_md = instruction_dir / f"{slug}.md"
+            out_json = instruction_dir / f"{slug}.json"
+            artifact_locate_json = f"instrack/{slug}/artifacts/locate_context.json"
+            artifact_orchestrate_index_json = f"instrack/{slug}/artifacts/orchestrate_index.json"
+            artifact_render_index_json = f"instrack/{slug}/artifacts/render_index.json"
+            locate_json_path = artifacts_dir / "locate_context.json"
+            orchestrate_index_path = artifacts_dir / "orchestrate_index.json"
+            render_index_path = artifacts_dir / "render_index.json"
             instruction_datasheet = self._extract_instruction_datasheet_excerpt(datasheet_text, instruction)
 
             search_input_hash = self._build_pass3_3_search_input_hash(
@@ -1680,11 +1682,13 @@ class Pass3Generator:
                     search_result=parsed_search,
                 )
                 for item in orchestrate_items:
-                    module_slug = self._safe_slug(str(item.get("module") or "unknown"))
-                    instance_slug = self._safe_slug(str(item.get("instance") or "inst"))
-                    path_slug = self._safe_slug(str(item.get("path") or f"{module_slug}__{instance_slug}").replace("/", "__"))
-                    raw_rel = f"instrack/{slug}/{path_slug}.orchestrate.raw.md"
-                    raw_abs = instruction_dir / f"{path_slug}.orchestrate.raw.md"
+                    module_slug = self._safe_slug(str(item.get("module") or "unknown")).lower()
+                    instance_slug = self._safe_slug(str(item.get("instance") or "inst")).lower()
+                    path_slug = self._safe_slug(
+                        str(item.get("path") or f"{module_slug}__{instance_slug}").replace("/", "__")
+                    ).lower()
+                    raw_rel = f"instrack/{slug}/artifacts/{path_slug}.orchestrate.raw.md"
+                    raw_abs = artifacts_dir / f"{path_slug}.orchestrate.raw.md"
                     raw_text = str(item.get("raw_orchestration_output") or "")
                     if raw_text.strip():
                         raw_abs.write_text(raw_text, encoding="utf-8")
@@ -1736,11 +1740,13 @@ class Pass3Generator:
                     )
                     render_items = []
                     for item in orchestrate_items:
-                        module_slug = self._safe_slug(str(item.get("module") or "unknown"))
-                        instance_slug = self._safe_slug(str(item.get("instance") or "inst"))
-                        path_slug = self._safe_slug(str(item.get("path") or f"{module_slug}__{instance_slug}").replace("/", "__"))
-                        mermaid_rel = f"instrack/{slug}/{path_slug}.mmd"
-                        mermaid_abs = instruction_dir / f"{path_slug}.mmd"
+                        module_slug = self._safe_slug(str(item.get("module") or "unknown")).lower()
+                        instance_slug = self._safe_slug(str(item.get("instance") or "inst")).lower()
+                        path_slug = self._safe_slug(
+                            str(item.get("path") or f"{module_slug}__{instance_slug}").replace("/", "__")
+                        ).lower()
+                        mermaid_rel = f"instrack/{slug}/artifacts/{path_slug}.mmd"
+                        mermaid_abs = artifacts_dir / f"{path_slug}.mmd"
                         mermaid_text = self._instrack_stages.render_orchestration_item_mermaid(item)
                         mermaid_abs.write_text(mermaid_text, encoding="utf-8")
                         render_items.append({
@@ -1777,10 +1783,10 @@ class Pass3Generator:
                 "```",
                 "",
                 "## Locate Context Artifact",
-                f"- `instrack/{slug}/locate_context.json`",
+                f"- `instrack/{slug}/artifacts/locate_context.json`",
                 "",
                 "## Orchestrate Artifact",
-                f"- `instrack/{slug}/orchestrate_index.json`",
+                f"- `instrack/{slug}/artifacts/orchestrate_index.json`",
                 "",
                 "## Render Artifacts",
             ]

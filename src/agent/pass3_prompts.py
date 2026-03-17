@@ -34,16 +34,16 @@ class Pass3Prompts:
         upstream_handoff: Optional[List[str]] = None,
         upstream_context: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Build a compact continuation-state JSON string for prompts."""
+        """Build a bounded continuation-state JSON string for prompts."""
         handoff = [str(item).strip() for item in (upstream_handoff or []) if str(item).strip()]
         payload: Dict[str, Any] = {
             "module": str(current_module or "").strip(),
             "instance": str(current_instance or "").strip(),
         }
         if handoff:
-            payload["upstream_handoff"] = handoff[:4]
-            if len(handoff) > 4:
-                payload["upstream_handoff_truncated"] = len(handoff) - 4
+            payload["upstream_handoff"] = handoff[:16]
+            if len(handoff) > 16:
+                payload["upstream_handoff_truncated"] = len(handoff) - 16
         if isinstance(upstream_context, dict) and upstream_context:
             payload["upstream_context"] = upstream_context
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

@@ -970,12 +970,18 @@ class Pass3InStrackStages:
             seen_entries.add(key)
             unique_entries.append(entry)
 
+        lifecycle_context = self._coerce_text_field((source_payload or {}).get("lifecycle_context"))
+        instruction_state = self._coerce_text_field((source_payload or {}).get("instruction_state"))
+
         return {
             "source_instance": str(source_child_node.instance_name or "").strip(),
             "source_module": str(source_child_node.module_name or "").strip(),
             "entry_ports": unique_entries[:8],
+            "parent_logic_on_path": [],
             "exits_parent": exits_parent[:4],
             "unresolved": unresolved[:6],
+            "lifecycle_context": lifecycle_context,
+            "instruction_state": instruction_state,
         }
 
     def _enrich_entry_ports(
