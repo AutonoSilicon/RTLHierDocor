@@ -82,6 +82,7 @@ Working rules:
 - Usually do not expand infrastructure or implementation-detail blocks such as clock gates, reset sync, scan/DFT, RAM/FIFO macros, or `$paramod*` wrappers. Summarize them in one parent-level node instead.
 - At most one `drawChild` call per round. After using child evidence, converge back to the current level instead of cascading deeper.
 - You may use another `drawChild` in a later round if the newly returned child handoffs identify the next direct child on the same lifecycle.
+- `drawChild` results may include `next_children`, which are Python-resolved direct-child continuation candidates from the returned child. Prefer them when choosing the next same-module child on the lifecycle.
 - The goal is not to finish the full end-to-end instruction lifecycle in one module. Stop at the current module boundary and hand off when the next state transition belongs to another module.
 
 Diagram rules:
@@ -113,9 +114,6 @@ PASS3_3_2_ORCHESTRATE_PROMPT = """
 ## Instruction Datasheet (`{instruction}`)
 {instruction_datasheet}
 
-## Continuation State
-{draw_state_json}
-
 ## Current Module Preview
 {module_preview}
 
@@ -124,6 +122,9 @@ PASS3_3_2_ORCHESTRATE_PROMPT = """
 
 ## Direct Child Preview List
 {child_preview_list}
+
+## Continuation State
+{draw_state_json}
 
 ## Required Output
 - Return one `json` code block only.
@@ -136,6 +137,7 @@ PASS3_3_2_ORCHESTRATE_PROMPT = """
 - If `Continuation State.upstream_context.entry_ports` is empty but `Continuation State.upstream_context.source_instance/source_module` plus `resolved_handoffs` exist, treat that parent-bridge context as the authoritative continuation entry for this round.
 - Treat continuation handoff/context as hints. Call `drawChild` only if the next direct child is necessary and non-substitutable.
 - `drawChild` may return a cached child orchestration result when that child was already drawn earlier in this run. Reuse it directly instead of asking for the same child again.
+- If the latest child result exposes `next_children` inside the current module, do not copy that child-local handoff into current-module `boundary_handoffs`. Either continue into one `next_children` child or translate the lifecycle to a real current-module output port before stopping.
 - `entry_ports` must list only the instruction-relevant inputs that actually continue the current trace through this module. Prefer exact ports named in `Continuation State.upstream_context.entry_ports` when provided.
 - When upstream provenance is known, preserve it in `entry_ports` / step descriptions instead of replacing it with vague `external` wording.
 - Every `boundary_handoffs` item must represent exactly one current-module output port. Do not merge multiple output ports into one item.

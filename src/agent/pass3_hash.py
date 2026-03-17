@@ -82,26 +82,6 @@ class Pass3Hash:
         }
         return hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
-    def build_pass3_3_locate_input_hash(
-        self,
-        top_module: str,
-        instruction: str,
-        instruction_datasheet: str,
-        search_result_json_text: str,
-        target_path_text: str,
-    ) -> str:
-        """Build cache key for pass3.3 locate stage."""
-        payload = {
-            "version": "pass3_3_instrack_locate_cache_v3",
-            "top_module": top_module,
-            "instruction": instruction,
-            "instruction_datasheet_hash": hash_text(instruction_datasheet),
-            "search_result_json_hash": hash_text(search_result_json_text),
-            "target_path_hash": hash_text(target_path_text),
-            "tools_schema": self.g._tools.pass3_3_2_tools(),
-        }
-        return hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-
     def build_pass3_3_orchestrate_input_hash(
         self,
         top_module: str,

@@ -23,7 +23,7 @@ agent:
   api_key: "sk-sp-0b4bfeb434d946bda2d005ac9c85026e"
   thinking: true
   instrack_draw_model: "glm-5"
-  instrack_draw_thinking: false
+  instrack_draw_thinking: true
 
   composer_model: "glm-5"
   composer_base_url: "https://coding.dashscope.aliyuncs.com/v1"
@@ -42,7 +42,7 @@ agent:
   pass2_enabled: false
   pass3_enabled: false
   pass3_3_enabled: true
-  pass3_3_1_enabled: false
+  pass3_3_3_enabled: false
 
   # Development-time instrack scope retained but inactive while Pass 3.3 is disabled
   isa_instructions:

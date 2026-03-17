@@ -1403,10 +1403,8 @@ class Pass3Generator:
             out_search_json = instruction_dir / f"{slug}.search.json"
             out_md = instruction_dir / f"{slug}.md"
             out_json = instruction_dir / f"{slug}.json"
-            artifact_locate_json = f"instrack/{slug}/artifacts/locate_context.json"
             artifact_orchestrate_index_json = f"instrack/{slug}/artifacts/orchestrate_index.json"
             artifact_render_index_json = f"instrack/{slug}/artifacts/render_index.json"
-            locate_json_path = artifacts_dir / "locate_context.json"
             orchestrate_index_path = artifacts_dir / "orchestrate_index.json"
             render_index_path = artifacts_dir / "render_index.json"
             instruction_datasheet = self._extract_instruction_datasheet_excerpt(datasheet_text, instruction)
@@ -1603,57 +1601,6 @@ class Pass3Generator:
                 meta={"source": artifact_search_md, "parser": "instrack_startpoint_v2"},
             )
 
-            target_path_nodes = self._instrack_stages.find_hierarchy_path(
-                top_node,
-                str(parsed_search.get("start_module") or ""),
-                str(parsed_search.get("start_instance") or ""),
-            )
-            target_path_text = " -> ".join(
-                [f"{n.instance_name}({n.module_name})" for n in target_path_nodes]
-            )
-
-            locate_input_hash = self._instrack_stages.build_pass3_3_locate_input_hash(
-                top_module=top_node.module_name,
-                instruction=instruction,
-                instruction_datasheet=instruction_datasheet,
-                search_result_json_text=search_json_text,
-                target_path_text=target_path_text,
-            )
-
-            locate_context: List[Dict[str, Any]] = []
-            if self.owner.project_tracker.is_done(
-                artifact_locate_json,
-                str(locate_json_path),
-                expected_input_hash=locate_input_hash,
-            ):
-                try:
-                    locate_context = json.loads(locate_json_path.read_text(encoding="utf-8"))
-                    if not isinstance(locate_context, list):
-                        locate_context = []
-                except Exception:
-                    locate_context = []
-
-            if not locate_context:
-                self.owner.project_tracker.mark_running(
-                    artifact_locate_json,
-                    input_hash=locate_input_hash,
-                    meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_2_locate"},
-                )
-                locate_context = await self._instrack_stages.run_pass3_3_2_locate(
-                    top_node=top_node,
-                    instruction=instruction,
-                    instruction_datasheet=instruction_datasheet,
-                    search_result=parsed_search,
-                )
-                locate_text = json.dumps(locate_context, ensure_ascii=False, indent=2)
-                locate_json_path.write_text(locate_text, encoding="utf-8")
-                self.owner.project_tracker.update(
-                    artifact_locate_json,
-                    locate_text,
-                    input_hash=locate_input_hash,
-                    meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_2_locate"},
-                )
-
             orchestrate_input_hash = self._instrack_stages.build_pass3_3_orchestrate_input_hash(
                 top_module=top_node.module_name,
                 instruction=instruction,
@@ -1789,9 +1736,6 @@ class Pass3Generator:
                 search_json_text,
                 "```",
                 "",
-                "## Locate Context Artifact",
-                f"- `instrack/{slug}/artifacts/locate_context.json`",
-                "",
                 "## Orchestrate Artifact",
                 f"- `instrack/{slug}/artifacts/orchestrate_index.json`",
                 "",
@@ -1815,7 +1759,6 @@ class Pass3Generator:
             json_payload = {
                 **parsed_search,
                 "schema_version": "pass3_3_2_orchestrate_v1",
-                "locate_artifact_json": artifact_locate_json,
                 "orchestrate_index_artifact_json": artifact_orchestrate_index_json,
                 "render_index_artifact_json": artifact_render_index_json if render_enabled else "",
                 "lifecycle_modules": lifecycle_modules,
@@ -1842,7 +1785,6 @@ class Pass3Generator:
                 "key_register": parsed_search.get("key_register", ""),
                 "key_register_line_range": parsed_search.get("key_register_line_range", {"start_line": 0, "end_line": 0}),
                 "search_confidence": parsed_search.get("confidence", "low"),
-                "locate_artifact_json": artifact_locate_json,
                 "orchestrate_index_artifact_json": artifact_orchestrate_index_json,
                 "render_index_artifact_json": artifact_render_index_json if render_enabled else "",
                 "lifecycle_modules": lifecycle_modules,

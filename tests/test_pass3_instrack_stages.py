@@ -621,6 +621,7 @@ def test_build_draw_child_tool_result_returns_structured_boundary_summary_only()
         },
         "entry_ports": [{"port": "in_a", "direction": "input"}],
         "boundary_handoffs": [{"egress_port": "out1"}],
+        "next_children": [],
         "instruction_state": "state",
         "lifecycle_context": "ctx",
         "confidence": "medium",
@@ -628,3 +629,126 @@ def test_build_draw_child_tool_result_returns_structured_boundary_summary_only()
         "cached": False,
         "task": "continue decode",
     }
+
+
+def test_build_draw_child_tool_result_surfaces_next_children_and_compacts_large_fields():
+    stages = make_stages()
+    child_item = {
+        "module": "dst_mod",
+        "instance": "x_dst0",
+        "path": "top/x_dst0",
+        "orchestration": {
+            "entry_ports": [
+                {"port": "in0", "direction": "input", "semantic": "slot0"},
+                {"port": "in1", "direction": "input", "semantic": "slot1"},
+                {"port": "in2", "direction": "input", "semantic": "slot2"},
+                {"port": "in3", "direction": "input", "semantic": "slot3"},
+                {"port": "in4", "direction": "input", "semantic": "slot4"},
+            ],
+            "boundary_handoffs": [
+                {
+                    "egress_port": "out1",
+                    "semantic": "issue payload to RF stage",
+                    "status": "resolved",
+                    "behavior": " ".join(["payload"] * 60),
+                    "resolutions": [
+                        {
+                            "resolution_kind": "sibling_child",
+                            "target_instance": "x_rf_dp",
+                            "target_module": "ct_idu_rf_dp",
+                            "target_port": "in_issue",
+                            "parent_wire": "issue_wire",
+                        },
+                        {
+                            "resolution_kind": "sibling_child",
+                            "target_instance": "x_rf_ctrl",
+                            "target_module": "ct_idu_rf_ctrl",
+                            "target_port": "in_issue_en",
+                            "parent_wire": "issue_wire",
+                        },
+                        {
+                            "resolution_kind": "exit_parent",
+                            "parent_port": "top_out",
+                            "parent_wire": "top_out",
+                        },
+                        {
+                            "resolution_kind": "sibling_child",
+                            "target_instance": "x_extra",
+                            "target_module": "ct_extra",
+                            "target_port": "in_extra",
+                            "parent_wire": "extra_wire",
+                        },
+                    ],
+                }
+            ],
+            "instruction_state": [
+                {"step": 1, "description": "queue create", "state_update": "entry allocated"},
+                {"step": 2, "description": "ready tracking", "state_update": "sources wake up"},
+                {"step": 3, "description": "age arbitration", "state_update": "oldest ready selected"},
+                {"step": 4, "description": "issue mux", "state_update": "payload routed"},
+                {"step": 5, "description": "rf handoff", "state_update": "issue bus drives rf"},
+            ],
+            "lifecycle_context": {
+                "instruction": "ADD",
+                "execution_phase": "issue",
+                "role": "issue queue to RF bridge",
+                "pipeline_stages": ["IS", "AIQ", "RF", "IU", "RTU"],
+                "parallelism": "up to 4 issue candidates",
+            },
+            "confidence": "high",
+            "unknown": [
+                {
+                    "aspect": "rf detail",
+                    "reason": "Need deeper RF expansion to see operand read ports and bypass picks",
+                },
+                {
+                    "aspect": "iu pipe selection",
+                    "reason": "Need RF child to confirm pipe0 versus pipe1 dispatch",
+                },
+                {
+                    "aspect": "retire detail",
+                    "reason": "Need RTU expansion later",
+                },
+                {
+                    "aspect": "extra",
+                    "reason": "should be truncated",
+                },
+            ],
+        },
+    }
+
+    result = stages._build_draw_child_tool_result(child_item, "continue issue")
+    payload = json.loads(result.removeprefix("```json\n").removesuffix("\n```"))
+
+    assert len(payload["entry_ports"]) == 4
+    assert payload["next_children"] == [
+        {"target_instance": "x_rf_dp", "target_module": "ct_idu_rf_dp"},
+        {"target_instance": "x_rf_ctrl", "target_module": "ct_idu_rf_ctrl"},
+        {"target_instance": "x_extra", "target_module": "ct_extra"},
+    ]
+    assert payload["boundary_handoffs"][0]["resolutions"] == [
+        {
+            "resolution_kind": "sibling_child",
+            "target_instance": "x_rf_dp",
+            "target_module": "ct_idu_rf_dp",
+            "target_port": "in_issue",
+            "parent_wire": "issue_wire",
+        },
+        {
+            "resolution_kind": "sibling_child",
+            "target_instance": "x_rf_ctrl",
+            "target_module": "ct_idu_rf_ctrl",
+            "target_port": "in_issue_en",
+            "parent_wire": "issue_wire",
+        },
+        {
+            "resolution_kind": "exit_parent",
+            "parent_port": "top_out",
+            "parent_wire": "top_out",
+        },
+    ]
+    assert payload["boundary_handoffs"][0]["resolutions_truncated"] == 1
+    assert payload["instruction_state"][-1] == "+1 more state steps"
+    assert payload["lifecycle_context"]["execution_phase"] == "issue"
+    assert payload["lifecycle_context"]["pipeline_stages_truncated"] == 1
+    assert payload["unknown"][-1] == "+1 more unknowns"

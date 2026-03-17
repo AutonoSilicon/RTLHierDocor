@@ -24,25 +24,6 @@ class Pass3InStrackStages:
     def __init__(self, generator: Any):
         self.g = generator
 
-    def build_pass3_3_locate_input_hash(
-        self,
-        top_module: str,
-        instruction: str,
-        instruction_datasheet: str,
-        search_result_json_text: str,
-        target_path_text: str,
-    ) -> str:
-        payload = {
-            "version": "pass3_3_instrack_locate_cache_v3",
-            "top_module": top_module,
-            "instruction": instruction,
-            "instruction_datasheet_hash": self.g._hash_text(instruction_datasheet),
-            "search_result_json_hash": self.g._hash_text(search_result_json_text),
-            "target_path_hash": self.g._hash_text(target_path_text),
-            "tools_schema": self.g._pass3_3_2_tools(),
-        }
-        return self.g._hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-
     def build_pass3_3_orchestrate_input_hash(
         self,
         top_module: str,
@@ -382,53 +363,6 @@ class Pass3InStrackStages:
         if end_fence > 0:
             tail = tail[:end_fence]
         return tail.strip()
-
-    async def run_pass3_3_2_locate(
-        self,
-        top_node: Any,
-        instruction: str,
-        instruction_datasheet: str,
-        search_result: Dict[str, Any],
-    ) -> List[Dict[str, Any]]:
-        """Precreate deterministic locate path context.
-
-        Locate stage is intentionally lightweight: it only materializes the
-        hierarchy path from top to search start-point and does not invoke LLM
-        generation.
-        """
-        start_module = str(search_result.get("start_module") or "").strip()
-        start_instance = str(search_result.get("start_instance") or "").strip()
-        path_nodes = self.find_hierarchy_path(top_node, start_module, start_instance)
-        if not path_nodes:
-            return []
-
-        path_context: List[Dict[str, Any]] = []
-        path_names = [f"{n.instance_name}({n.module_name})" for n in path_nodes]
-        total = len(path_nodes)
-
-        for idx, node in enumerate(path_nodes):
-            expected_next = ""
-            if idx + 1 < len(path_nodes):
-                expected_next = path_nodes[idx + 1].instance_name
-
-            # Keep a compact locate record for path precreation only.
-            path_context.append(
-                {
-                    "stage": "locate",
-                    "instruction": instruction,
-                    "path_nodes": path_names,
-                    "path_index": idx,
-                    "path_total": total,
-                    "current_module": node.module_name,
-                    "current_instance": node.instance_name,
-                    "current_path": node.get_path() if hasattr(node, "get_path") else node.instance_name,
-                    "current_level": int(node.depth),
-                    "next_target_instance": expected_next,
-                    "precreate_only": True,
-                }
-            )
-
-        return path_context
 
     async def run_pass3_3_2_orchestrate(
         self,
@@ -1239,8 +1173,198 @@ class Pass3InStrackStages:
         """Backward-compatible alias for legacy call sites."""
         return self._enrich_orchestration_payload(node, payload, upstream_context)
 
+    def _compact_tool_text(self, value: Any, max_chars: int = 220) -> str:
+        text = self._coerce_text_field(value)
+        if not text:
+            return ""
+        text = " ".join(text.split())
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 3].rstrip() + "..."
+
+    def _summarize_tool_entry_ports(
+        self,
+        entry_ports: List[Dict[str, Any]],
+        *,
+        max_items: int = 4,
+    ) -> List[Dict[str, Any]]:
+        summarized: List[Dict[str, Any]] = []
+        for raw in list(entry_ports or [])[:max_items]:
+            if not isinstance(raw, dict):
+                continue
+            item: Dict[str, Any] = {}
+            port = str(raw.get("port") or raw.get("target_port") or "").strip()
+            if port:
+                item["port"] = port
+            direction = str(raw.get("direction") or "").strip()
+            if direction:
+                item["direction"] = direction
+            value_kind = str(raw.get("value_kind") or "").strip()
+            if value_kind:
+                item["value_kind"] = value_kind
+            semantic = self._compact_tool_text(raw.get("semantic"), max_chars=160)
+            if semantic:
+                item["semantic"] = semantic
+
+            matched_from_raw = raw.get("matched_from")
+            if isinstance(matched_from_raw, dict):
+                matched_from: Dict[str, Any] = {}
+                for key in ("source_instance", "source_module", "source_port", "parent_wire"):
+                    value = str(matched_from_raw.get(key) or "").strip()
+                    if value:
+                        matched_from[key] = value
+                if matched_from:
+                    item["matched_from"] = matched_from
+            summarized.append(item)
+        return summarized
+
+    def _summarize_tool_boundary_handoffs(
+        self,
+        boundary_handoffs: List[Dict[str, Any]],
+        *,
+        max_items: int = 6,
+        max_resolutions: int = 3,
+    ) -> List[Dict[str, Any]]:
+        summarized: List[Dict[str, Any]] = []
+        for raw in list(boundary_handoffs or [])[:max_items]:
+            if not isinstance(raw, dict):
+                continue
+            item: Dict[str, Any] = {}
+            for key in ("egress_port", "status", "value_kind"):
+                value = str(raw.get(key) or "").strip()
+                if value:
+                    item[key] = value
+            semantic = self._compact_tool_text(raw.get("semantic"), max_chars=160)
+            if semantic:
+                item["semantic"] = semantic
+            behavior = self._compact_tool_text(raw.get("behavior"), max_chars=180)
+            if behavior:
+                item["behavior"] = behavior
+
+            resolutions_out: List[Dict[str, Any]] = []
+            for resolution in list(raw.get("resolutions") or [])[:max_resolutions]:
+                if not isinstance(resolution, dict):
+                    continue
+                resolution_item: Dict[str, Any] = {}
+                kind = str(resolution.get("resolution_kind") or "").strip()
+                if kind:
+                    resolution_item["resolution_kind"] = kind
+                for key in ("target_instance", "target_module", "target_port", "parent_port", "parent_wire"):
+                    value = str(resolution.get(key) or "").strip()
+                    if value:
+                        resolution_item[key] = value
+                if resolution_item:
+                    resolutions_out.append(resolution_item)
+            if resolutions_out:
+                item["resolutions"] = resolutions_out
+            extra_resolutions = max(0, len(list(raw.get("resolutions") or [])) - len(resolutions_out))
+            if extra_resolutions:
+                item["resolutions_truncated"] = extra_resolutions
+            summarized.append(item)
+        return summarized
+
+    def _extract_next_children_from_handoffs(
+        self,
+        boundary_handoffs: List[Dict[str, Any]],
+        *,
+        max_items: int = 6,
+    ) -> List[Dict[str, str]]:
+        next_children: List[Dict[str, str]] = []
+        seen: Set[str] = set()
+        for raw in boundary_handoffs or []:
+            if not isinstance(raw, dict):
+                continue
+            for resolution in list(raw.get("resolutions") or []):
+                if not isinstance(resolution, dict):
+                    continue
+                if str(resolution.get("resolution_kind") or "").strip() != "sibling_child":
+                    continue
+                target_instance = str(resolution.get("target_instance") or "").strip()
+                target_module = str(resolution.get("target_module") or "").strip()
+                if not (target_instance or target_module):
+                    continue
+                key = f"{target_instance}|{target_module}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                next_children.append(
+                    {
+                        "target_instance": target_instance,
+                        "target_module": target_module,
+                    }
+                )
+                if len(next_children) >= max_items:
+                    return next_children
+        return next_children
+
+    def _summarize_tool_lifecycle_context(self, lifecycle_context: Any) -> Any:
+        if isinstance(lifecycle_context, dict):
+            summary: Dict[str, Any] = OrderedDict()
+            for key in ("instruction", "execution_phase", "role", "parallelism"):
+                value = self._compact_tool_text(lifecycle_context.get(key), max_chars=180)
+                if value:
+                    summary[key] = value
+            stages = lifecycle_context.get("pipeline_stages")
+            if isinstance(stages, list):
+                stage_lines = []
+                for item in stages[:4]:
+                    text = self._compact_tool_text(item, max_chars=100)
+                    if text:
+                        stage_lines.append(text)
+                if stage_lines:
+                    summary["pipeline_stages"] = stage_lines
+                if len(stages) > len(stage_lines):
+                    summary["pipeline_stages_truncated"] = len(stages) - len(stage_lines)
+            return summary if summary else self._compact_tool_text(lifecycle_context, max_chars=220)
+        return self._compact_tool_text(lifecycle_context, max_chars=220)
+
+    def _summarize_tool_instruction_state(self, instruction_state: Any, *, max_items: int = 4) -> Any:
+        if isinstance(instruction_state, list):
+            lines: List[str] = []
+            for raw in instruction_state[:max_items]:
+                if isinstance(raw, dict):
+                    parts: List[str] = []
+                    step = str(raw.get("step") or "").strip()
+                    description = self._compact_tool_text(raw.get("description"), max_chars=120)
+                    state_update = self._compact_tool_text(raw.get("state_update"), max_chars=140)
+                    if step:
+                        parts.append(f"step {step}")
+                    if description:
+                        parts.append(description)
+                    if state_update:
+                        parts.append(state_update)
+                    text = " | ".join(part for part in parts if part)
+                else:
+                    text = self._compact_tool_text(raw, max_chars=180)
+                if text:
+                    lines.append(text)
+            extra_items = max(0, len(instruction_state) - len(lines))
+            if extra_items:
+                lines.append(f"+{extra_items} more state steps")
+            return lines
+        return self._compact_tool_text(instruction_state, max_chars=240)
+
+    def _summarize_tool_unknown(self, unknown: Any, *, max_items: int = 3) -> Any:
+        if isinstance(unknown, list):
+            lines: List[str] = []
+            for raw in unknown[:max_items]:
+                if isinstance(raw, dict):
+                    aspect = self._compact_tool_text(raw.get("aspect"), max_chars=80)
+                    reason = self._compact_tool_text(raw.get("reason"), max_chars=160)
+                    text = f"{aspect}: {reason}".strip(": ")
+                else:
+                    text = self._compact_tool_text(raw, max_chars=180)
+                if text:
+                    lines.append(text)
+            extra_items = max(0, len(unknown) - len(lines))
+            if extra_items:
+                lines.append(f"+{extra_items} more unknowns")
+            return lines
+        return self._compact_tool_text(unknown, max_chars=220)
+
     def _build_draw_child_tool_result(self, child_item: Dict[str, Any], child_task: str, cached: bool = False) -> str:
         payload = dict(child_item.get("orchestration") or {})
+        boundary_handoffs = list(payload.get("boundary_handoffs") or [])
         result = {
             "child": {
                 "module": str(child_item.get("module") or payload.get("module") or "").strip(),
@@ -1248,12 +1372,13 @@ class Pass3InStrackStages:
                 "path": str(child_item.get("path") or "").strip(),
             },
             "cached": bool(cached),
-            "entry_ports": list(payload.get("entry_ports") or []),
-            "boundary_handoffs": list(payload.get("boundary_handoffs") or []),
-            "instruction_state": payload.get("instruction_state") or "",
-            "lifecycle_context": payload.get("lifecycle_context") or "",
+            "entry_ports": self._summarize_tool_entry_ports(list(payload.get("entry_ports") or [])),
+            "boundary_handoffs": self._summarize_tool_boundary_handoffs(boundary_handoffs),
+            "next_children": self._extract_next_children_from_handoffs(boundary_handoffs),
+            "instruction_state": self._summarize_tool_instruction_state(payload.get("instruction_state") or ""),
+            "lifecycle_context": self._summarize_tool_lifecycle_context(payload.get("lifecycle_context") or ""),
             "confidence": str(payload.get("confidence") or "low").strip(),
-            "unknown": payload.get("unknown") or "",
+            "unknown": self._summarize_tool_unknown(payload.get("unknown") or ""),
         }
         if child_task:
             result["task"] = child_task
