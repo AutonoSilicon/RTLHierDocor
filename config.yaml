@@ -51,6 +51,7 @@ agent:
   pass2_enabled: true               # Enable Pass 1.5 + Pass 2.x generation
   pass3_enabled: false               # Enable Pass 3 (chip-level overview & subsystem docs)
   pass3_3_enabled: false            # Enable Pass 3.3 (instrack)
+  pass3_3_3_enabled: false          # Enable Pass 3.3.3 render (.mmd generation)
   # composer 专用 endpoint（仅用于 Pass2 的 staged composer）
   composer_model: "kimi-k2.5"
   base_url: "https://coding.dashscope.aliyuncs.com/v1"

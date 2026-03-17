@@ -67,6 +67,7 @@ class AgentDocGenerator:
         pass2_enabled: bool = True,
         pass3_enabled: bool = True,
         pass3_3_enabled: bool = True,
+        pass3_3_3_enabled: bool = True,
         isa_profile: str = "c910",
         isa_instructions: Optional[List[str]] = None,
         instrack_single_instruction: Optional[str] = None,
@@ -93,6 +94,7 @@ class AgentDocGenerator:
         self.pass2_enabled = pass2_enabled
         self.pass3_enabled = pass3_enabled
         self.pass3_3_enabled = pass3_3_enabled
+        self.pass3_3_3_enabled = pass3_3_3_enabled
         self.isa_profile = isa_profile
         self.isa_instructions = isa_instructions or []
         self.instrack_single_instruction = instrack_single_instruction

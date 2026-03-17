@@ -168,20 +168,6 @@ class Pass3Tools:
             {
                 "type": "function",
                 "function": {
-                    "name": "readSource",
-                    "description": "Read pass2-style topologyized source block for a module (PROC/COMB topology with source annotations).",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "module": {"type": "string", "description": "RTL module name"},
-                        },
-                        "required": ["module"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
                     "name": "forkSubAgent",
                     "description": "Delegate deeper analysis to a child-level recursive agent. Only direct children of top are allowed.",
                     "parameters": {
@@ -208,22 +194,8 @@ class Pass3Tools:
             {
                 "type": "function",
                 "function": {
-                    "name": "readSource",
-                    "description": "Read pass2-style topologyized source block for a module (PROC/COMB topology with source annotations).",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "module": {"type": "string", "description": "RTL module name"},
-                        },
-                        "required": ["module"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
                     "name": "drawChild",
-                    "description": "Trigger draw generation for one direct child module and return its structured boundary summary (entry ports, boundary handoffs, state summary). Duplicate calls for an already-drawn module are rejected.",
+                    "description": "Trigger draw generation for one direct child module and return its structured boundary summary (entry ports, boundary handoffs, state summary). If that child was already drawn earlier in this run, return the cached orchestration result instead of redrawing it.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -256,23 +228,6 @@ class Pass3Tools:
             {
                 "type": "function",
                 "function": {
-                    "name": "readSource",
-                    "description": "Read pass2-style topologyized source block for a module. Scope-limited: current level and direct children only.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "module": {
-                                "type": "string",
-                                "description": "Module selector. Prefer instance_name or module_name in current scope.",
-                            },
-                        },
-                        "required": ["module"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
                     "name": "forkSubAgent",
                     "description": "Spawn a child-level agent for deeper analysis. Only direct children can be forked.",
                     "parameters": {
@@ -294,6 +249,26 @@ class Pass3Tools:
         ]
 
         if prompt_style not in {"instrack_search", "instrack_draw"}:
+            tools.insert(
+                0,
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "readSource",
+                        "description": "Read pass2-style topologyized source block for a module. Scope-limited: current level and direct children only.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "module": {
+                                    "type": "string",
+                                    "description": "Module selector. Prefer instance_name or module_name in current scope.",
+                                },
+                            },
+                            "required": ["module"],
+                        },
+                    },
+                },
+            )
             tools.insert(
                 1,
                 {

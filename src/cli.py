@@ -388,6 +388,7 @@ def cmd_docor(args):
         pass2_enabled=cfg.pass2_enabled,
         pass3_enabled=cfg.pass3_enabled,
         pass3_3_enabled=cfg.pass3_3_enabled,
+        pass3_3_3_enabled=cfg.pass3_3_3_enabled,
         isa_profile=cfg.isa_profile,
         isa_instructions=cfg.isa_instructions,
         instrack_single_instruction=cfg.instrack_single_instruction,

@@ -1,7 +1,8 @@
 """Pass3.3 InStrack stage helpers.
 
-This module keeps pass3.3-specific locate/draw logic out of pass3_generator.py
-so the orchestration file stays shorter and easier to navigate.
+This module keeps pass3.3-specific locate/orchestrate/render logic out of
+pass3_generator.py so the orchestration file stays shorter and easier to
+navigate.
 """
 
 import json
@@ -9,13 +10,15 @@ import re
 from typing import Any, Dict, List, Optional, Set
 
 from .prompts import (
+    PASS3_3_2_ORCHESTRATE_SYSTEM,
+    PASS3_3_2_ORCHESTRATE_PROMPT,
     PASS3_3_2_DRAW_SYSTEM,
     PASS3_3_2_DRAW_PROMPT,
 )
 
 
 class Pass3InStrackStages:
-    """Helper object that encapsulates pass3.3 locate/draw stage operations."""
+    """Helper object that encapsulates pass3.3 stage operations."""
 
     def __init__(self, generator: Any):
         self.g = generator
@@ -39,7 +42,7 @@ class Pass3InStrackStages:
         }
         return self.g._hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
-    def build_pass3_3_draw_input_hash(
+    def build_pass3_3_orchestrate_input_hash(
         self,
         top_module: str,
         instruction: str,
@@ -47,16 +50,45 @@ class Pass3InStrackStages:
         search_result_json_text: str,
     ) -> str:
         payload = {
-            "version": "pass3_3_instrack_draw_cache_v10",
+            "version": "pass3_3_instrack_orchestrate_cache_v1",
             "top_module": top_module,
             "instruction": instruction,
-            "system_prompt": PASS3_3_2_DRAW_SYSTEM,
-            "prompt_template": PASS3_3_2_DRAW_PROMPT,
+            "system_prompt": PASS3_3_2_ORCHESTRATE_SYSTEM,
+            "prompt_template": PASS3_3_2_ORCHESTRATE_PROMPT,
             "instruction_datasheet_hash": self.g._hash_text(instruction_datasheet),
             "search_result_json_hash": self.g._hash_text(search_result_json_text),
             "tools_schema": self.g._pass3_3_2_tools(),
         }
         return self.g._hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    def build_pass3_3_render_input_hash(
+        self,
+        top_module: str,
+        instruction: str,
+        orchestration_json_text: str,
+    ) -> str:
+        payload = {
+            "version": "pass3_3_instrack_render_cache_v1",
+            "top_module": top_module,
+            "instruction": instruction,
+            "orchestration_json_hash": self.g._hash_text(orchestration_json_text),
+        }
+        return self.g._hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    def build_pass3_3_draw_input_hash(
+        self,
+        top_module: str,
+        instruction: str,
+        instruction_datasheet: str,
+        search_result_json_text: str,
+    ) -> str:
+        """Backward-compatible alias for the old draw stage name."""
+        return self.build_pass3_3_orchestrate_input_hash(
+            top_module=top_module,
+            instruction=instruction,
+            instruction_datasheet=instruction_datasheet,
+            search_result_json_text=search_result_json_text,
+        )
 
     def collect_hierarchy_nodes_depth_first(self, top_node: Any) -> List[Any]:
         nodes: List[Any] = []
@@ -201,9 +233,9 @@ class Pass3InStrackStages:
 
         return out
 
-    def extract_pass3_3_draw_payload(self, content: str, current_node: Any) -> Dict[str, Any]:
+    def extract_pass3_3_orchestrate_payload(self, content: str, current_node: Any) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
-            "stage": "draw",
+            "stage": "orchestrate",
             "module": current_node.module_name,
             "instance": current_node.instance_name,
             "entry_ports": [],
@@ -225,7 +257,7 @@ class Pass3InStrackStages:
         if not isinstance(parsed, dict):
             return payload
 
-        payload["stage"] = "draw"
+        payload["stage"] = "orchestrate"
         payload["module"] = str(parsed.get("module") or current_node.module_name).strip()
         payload["instance"] = str(parsed.get("instance") or current_node.instance_name).strip()
         payload["lifecycle_context"] = self._coerce_text_field(parsed.get("lifecycle_context"))
@@ -289,6 +321,10 @@ class Pass3InStrackStages:
             payload["boundary_handoffs"] = norm_handoffs
 
         return payload
+
+    def extract_pass3_3_draw_payload(self, content: str, current_node: Any) -> Dict[str, Any]:
+        """Backward-compatible alias for legacy call sites."""
+        return self.extract_pass3_3_orchestrate_payload(content, current_node)
 
     @staticmethod
     def _coerce_text_field(value: Any) -> str:
@@ -372,7 +408,7 @@ class Pass3InStrackStages:
 
         return path_context
 
-    async def run_pass3_3_2_draw(
+    async def run_pass3_3_2_orchestrate(
         self,
         top_node: Any,
         instruction: str,
@@ -385,7 +421,7 @@ class Pass3InStrackStages:
         if not path_nodes:
             return []
 
-        # Step 1: draw leaf start module first.
+        # Step 1: orchestrate leaf start module first.
         start_node = path_nodes[-1]
         results: List[Dict[str, Any]] = []
         draw_cache: Dict[str, Dict[str, Any]] = {}
@@ -397,25 +433,22 @@ class Pass3InStrackStages:
             instruction_datasheet=instruction_datasheet,
             upstream_signals=[],
             stage_label="start_module",
-            existing_child_draws="- 无已知子模块 draw 结果",
             draw_cache=draw_cache,
-            required_children=[],
             upstream_context=None,
         )
         results.append(start_item)
         start_path = start_node.get_path() if hasattr(start_node, "get_path") else start_node.instance_name
         recorded_paths: Set[str] = {start_path}
         draw_cache[start_path] = start_item
-        pending_handoffs = list((start_item.get("draw_payload") or {}).get("boundary_handoffs") or [])
-        pending_payload = dict(start_item.get("draw_payload") or {})
+        pending_handoffs = list((start_item.get("orchestration") or {}).get("boundary_handoffs") or [])
+        pending_payload = dict(start_item.get("orchestration") or {})
 
-        # Step 2: climb to top and draw parent-context bridges level by level.
+        # Step 2: climb to top and orchestrate parent-context bridges level by level.
         for idx in range(len(path_nodes) - 2, -1, -1):
             parent_node = path_nodes[idx]
             source_child_node = path_nodes[idx + 1]
             parent_path = parent_node.get_path() if hasattr(parent_node, "get_path") else parent_node.instance_name
             cache_before_parent = set(draw_cache.keys())
-            existing_child_draws = self._build_existing_child_draws(parent_node, draw_cache)
             parent_item = await self._run_draw_agent_for_node(
                 top_node=top_node,
                 node=parent_node,
@@ -423,9 +456,7 @@ class Pass3InStrackStages:
                 instruction_datasheet=instruction_datasheet,
                 upstream_signals=self._summarize_handoffs_for_state(pending_handoffs),
                 stage_label="top_module" if parent_node is path_nodes[0] else "parent_module",
-                existing_child_draws=existing_child_draws,
                 draw_cache=draw_cache,
-                required_children=[],
                 upstream_handoffs_raw=pending_handoffs,
                 source_child_for_handoff=source_child_node,
                 source_payload_for_handoff=pending_payload,
@@ -445,10 +476,25 @@ class Pass3InStrackStages:
             results.append(parent_item)
             recorded_paths.add(parent_path)
             draw_cache[parent_path] = parent_item
-            pending_handoffs = list((parent_item.get("draw_payload") or {}).get("boundary_handoffs") or [])
-            pending_payload = dict(parent_item.get("draw_payload") or {})
+            pending_handoffs = list((parent_item.get("orchestration") or {}).get("boundary_handoffs") or [])
+            pending_payload = dict(parent_item.get("orchestration") or {})
 
         return results
+
+    async def run_pass3_3_2_draw(
+        self,
+        top_node: Any,
+        instruction: str,
+        instruction_datasheet: str,
+        search_result: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Backward-compatible alias for the old draw stage name."""
+        return await self.run_pass3_3_2_orchestrate(
+            top_node=top_node,
+            instruction=instruction,
+            instruction_datasheet=instruction_datasheet,
+            search_result=search_result,
+        )
 
     @staticmethod
     def _format_child_selector(child_node: Any) -> str:
@@ -470,25 +516,6 @@ class Pass3InStrackStages:
                     if candidate.module_name == target_module:
                         child_node = candidate
                         break
-            if child_node is None:
-                continue
-            child_path = child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
-            if child_path in seen:
-                continue
-            seen.add(child_path)
-            selected.append(child_node)
-        return selected
-
-    def _resolve_required_children_from_destinations(self, parent_node: Any, destinations: Dict[str, Any]) -> List[Any]:
-        selected: List[Any] = []
-        seen: Set[str] = set()
-        for item in list((destinations or {}).get("sibling_connections") or []):
-            if not isinstance(item, dict):
-                continue
-            target_instance = str(item.get("target_instance") or "").strip()
-            if not target_instance:
-                continue
-            child_node = parent_node.children.get(target_instance)
             if child_node is None:
                 continue
             child_path = child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
@@ -881,118 +908,6 @@ class Pass3InStrackStages:
             "instruction_state": instruction_state,
         }
 
-    def _build_existing_child_draws(self, parent_node: Any, draw_cache: Dict[str, Dict[str, Any]]) -> str:
-        lines: List[str] = []
-        for child in sorted(parent_node.children.values(), key=lambda c: (c.module_name, c.instance_name)):
-            child_path = child.get_path() if hasattr(child, "get_path") else child.instance_name
-            child_item = draw_cache.get(child_path)
-            if not child_item:
-                continue
-            summary = self._summarize_child_draw_for_prompt(child_item)
-            if not summary:
-                continue
-            lines.append(summary)
-        return "\n\n".join(lines) if lines else "- 无已完成子模块 draw 结果"
-
-    @staticmethod
-    def _truncate_inline_text(text: str, max_chars: int = 220) -> str:
-        raw = " ".join(str(text or "").strip().split())
-        if len(raw) <= max_chars:
-            return raw
-        return raw[: max_chars - 3].rstrip() + "..."
-
-    @staticmethod
-    def _extract_mermaid_outline(mermaid_text: str) -> List[str]:
-        outlines: List[str] = []
-        seen: Set[str] = set()
-        for line in str(mermaid_text or "").splitlines():
-            raw = line.strip()
-            if not raw or raw.startswith("flowchart"):
-                continue
-            if "-->" not in raw and "-.->" not in raw and "[" not in raw:
-                continue
-            cleaned = re.sub(r"^[A-Za-z0-9_]+\s*\[\s*", "", raw)
-            cleaned = re.sub(r"\]\s*$", "", cleaned)
-            cleaned = cleaned.strip("`\"' ")
-            cleaned = cleaned.replace("<br/>", " | ").replace("<br>", " | ")
-            cleaned = re.sub(r"\s+", " ", cleaned).strip()
-            if not cleaned:
-                continue
-            compact = Pass3InStrackStages._truncate_inline_text(cleaned, max_chars=160)
-            if compact in seen:
-                continue
-            seen.add(compact)
-            outlines.append(compact)
-            if len(outlines) >= 3:
-                break
-        return outlines
-
-    def _summarize_child_draw_for_prompt(self, child_item: Dict[str, Any]) -> str:
-        payload = dict(child_item.get("draw_payload") or {})
-        child_instance = str(child_item.get("instance") or payload.get("instance") or "").strip()
-        child_module = str(child_item.get("module") or payload.get("module") or "").strip()
-        if not child_instance and not child_module:
-            return ""
-
-        lines: List[str] = [f"### {child_instance} ({child_module})".strip()]
-        lifecycle_context = self._truncate_inline_text(payload.get("lifecycle_context") or "", max_chars=240)
-        instruction_state = self._truncate_inline_text(payload.get("instruction_state") or "", max_chars=240)
-        confidence = str(payload.get("confidence") or "low").strip()
-        unknown = self._truncate_inline_text(payload.get("unknown") or "", max_chars=200)
-
-        entry_ports = []
-        for item in list(payload.get("entry_ports") or []):
-            if not isinstance(item, dict):
-                continue
-            port = str(item.get("port") or item.get("target_port") or "").strip()
-            if not port:
-                continue
-            matched_from = dict(item.get("matched_from") or {})
-            source_port = str(matched_from.get("source_port") or item.get("source_port") or "").strip()
-            source_instance = str(matched_from.get("source_instance") or item.get("source_instance") or "").strip()
-            preview = port
-            if source_instance or source_port:
-                preview = f"{preview} <= {source_instance}:{source_port}".strip(":")
-            entry_ports.append(preview)
-
-        handoffs = []
-        for item in list(payload.get("boundary_handoffs") or []):
-            if not isinstance(item, dict):
-                continue
-            egress_port = str(item.get("egress_port") or "").strip()
-            semantic = self._truncate_inline_text(item.get("semantic") or "", max_chars=80)
-            targets: List[str] = []
-            for resolution in list(item.get("resolutions") or []):
-                if not isinstance(resolution, dict):
-                    continue
-                kind = str(resolution.get("resolution_kind") or "").strip()
-                if kind == "sibling_child":
-                    target_instance = str(resolution.get("target_instance") or "").strip()
-                    target_port = str(resolution.get("target_port") or "").strip()
-                    targets.append(f"{target_instance}:{target_port}".strip(":"))
-                elif kind == "exit_parent":
-                    targets.append(f"parent:{str(resolution.get('parent_port') or '').strip()}".rstrip(":"))
-            preview = "; ".join(targets[:3])
-            if len(targets) > 3:
-                preview += f"; +{len(targets) - 3}"
-            head = egress_port or "unknown_port"
-            if semantic:
-                head = f"{head}({semantic})"
-            handoffs.append(f"{head} -> {preview}" if preview else head)
-
-        if lifecycle_context:
-            lines.append(f"- lifecycle_context: {lifecycle_context}")
-        if instruction_state:
-            lines.append(f"- instruction_state: {instruction_state}")
-        if entry_ports:
-            lines.append(f"- entry_ports: {'; '.join(entry_ports[:3])}")
-        if handoffs:
-            lines.append(f"- boundary_handoffs: {'; '.join(handoffs[:3])}")
-        lines.append(f"- confidence: {confidence}")
-        if unknown:
-            lines.append(f"- unknown: {unknown}")
-        return "\n".join(lines)
-
     def _enrich_entry_ports(
         self,
         entry_ports: List[Dict[str, Any]],
@@ -1046,7 +961,7 @@ class Pass3InStrackStages:
                 current["value_kind"] = str(raw.get("value_kind") or "other").strip() or "other"
         return enriched
 
-    def _enrich_draw_payload(
+    def _enrich_orchestration_payload(
         self,
         node: Any,
         payload: Dict[str, Any],
@@ -1068,14 +983,24 @@ class Pass3InStrackStages:
             out["boundary_handoffs"] = boundary_handoffs
         return out
 
-    def _build_draw_child_tool_result(self, child_item: Dict[str, Any], child_task: str) -> str:
-        payload = dict(child_item.get("draw_payload") or {})
+    def _enrich_draw_payload(
+        self,
+        node: Any,
+        payload: Dict[str, Any],
+        upstream_context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Backward-compatible alias for legacy call sites."""
+        return self._enrich_orchestration_payload(node, payload, upstream_context)
+
+    def _build_draw_child_tool_result(self, child_item: Dict[str, Any], child_task: str, cached: bool = False) -> str:
+        payload = dict(child_item.get("orchestration") or {})
         result = {
             "child": {
                 "module": str(child_item.get("module") or payload.get("module") or "").strip(),
                 "instance": str(child_item.get("instance") or payload.get("instance") or "").strip(),
                 "path": str(child_item.get("path") or "").strip(),
             },
+            "cached": bool(cached),
             "entry_ports": list(payload.get("entry_ports") or []),
             "boundary_handoffs": list(payload.get("boundary_handoffs") or []),
             "instruction_state": payload.get("instruction_state") or "",
@@ -1087,6 +1012,79 @@ class Pass3InStrackStages:
             result["task"] = child_task
         return f"```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```"
 
+    @staticmethod
+    def _sanitize_mermaid_label(text: Any, max_chars: int = 120) -> str:
+        raw = " ".join(str(text or "").split())
+        raw = raw.replace('"', "'").replace("<", "(").replace(">", ")")
+        if len(raw) <= max_chars:
+            return raw
+        return raw[: max_chars - 3].rstrip() + "..."
+
+    def render_orchestration_item_mermaid(self, item: Dict[str, Any]) -> str:
+        """Render one module orchestration item into a Mermaid flowchart."""
+        payload = dict(item.get("orchestration") or {})
+        module_name = str(item.get("module") or payload.get("module") or "unknown").strip()
+        instance_name = str(item.get("instance") or payload.get("instance") or "inst").strip()
+        entry_ports = list(payload.get("entry_ports") or [])
+        handoffs = list(payload.get("boundary_handoffs") or [])
+        lifecycle_context = self._sanitize_mermaid_label(payload.get("lifecycle_context") or module_name)
+        instruction_state = payload.get("instruction_state")
+
+        step_lines: List[str] = []
+        if isinstance(instruction_state, list):
+            for idx, step in enumerate(instruction_state[:6], start=1):
+                if isinstance(step, dict):
+                    block = str(step.get("block") or step.get("source_block") or f"STEP_{idx}").strip()
+                    state = self._sanitize_mermaid_label(step.get("state") or step.get("source_state") or "")
+                    action = self._sanitize_mermaid_label(step.get("action") or step.get("semantic") or "")
+                    update = self._sanitize_mermaid_label(step.get("update") or step.get("behavior") or "")
+                    label = f"[{block}]"
+                    detail = " | ".join(part for part in [state, action, update] if part)
+                    if detail:
+                        label = f"{label} {detail}"
+                    step_lines.append(label)
+                else:
+                    step_lines.append(self._sanitize_mermaid_label(step))
+        elif instruction_state:
+            step_lines.append(self._sanitize_mermaid_label(instruction_state))
+
+        lines: List[str] = ["flowchart LR"]
+        prev_id = None
+
+        for idx, entry in enumerate(entry_ports[:4], start=1):
+            port = self._sanitize_mermaid_label(entry.get("port") or entry.get("target_port") or f"entry_{idx}")
+            semantic = self._sanitize_mermaid_label(entry.get("semantic") or "")
+            node_id = f"E{idx}"
+            label = f"ENTRY {port}"
+            if semantic:
+                label = f"{label} | {semantic}"
+            lines.append(f'  {node_id}["{label}"]')
+            if prev_id is None:
+                prev_id = node_id
+
+        if prev_id is None:
+            prev_id = "S0"
+            lines.append(f'  {prev_id}["{module_name}.{instance_name} | {lifecycle_context}"]')
+
+        for idx, step in enumerate(step_lines or [lifecycle_context], start=1):
+            node_id = f"N{idx}"
+            lines.append(f'  {node_id}["{step}"]')
+            lines.append(f"  {prev_id} --> {node_id}")
+            prev_id = node_id
+
+        for idx, handoff in enumerate(handoffs[:4], start=1):
+            port = self._sanitize_mermaid_label(handoff.get("egress_port") or f"egress_{idx}")
+            semantic = self._sanitize_mermaid_label(handoff.get("semantic") or handoff.get("behavior") or "")
+            node_id = f"H{idx}"
+            label = f"EXIT {port}"
+            if semantic:
+                label = f"{label} | {semantic}"
+            lines.append(f'  {node_id}["{label}"]')
+            lines.append(f"  {prev_id} --> {node_id}")
+            prev_id = node_id
+
+        return "```mermaid\n" + "\n".join(lines) + "\n```\n"
+
     async def _run_draw_agent_for_node(
         self,
         top_node: Any,
@@ -1095,46 +1093,28 @@ class Pass3InStrackStages:
         instruction_datasheet: str,
         upstream_signals: List[str],
         stage_label: str,
-        existing_child_draws: str,
         draw_cache: Dict[str, Dict[str, Any]],
-        required_children: List[str],
         upstream_handoffs_raw: Optional[List[Dict[str, Any]]] = None,
         source_child_for_handoff: Optional[Any] = None,
         source_payload_for_handoff: Optional[Dict[str, Any]] = None,
         upstream_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         node_path = node.get_path() if hasattr(node, "get_path") else node.instance_name
-        draw_state = {
-            "current_module": node.module_name,
-            "current_instance": node.instance_name,
-            "current_path": node_path,
-            "current_level": node.depth,
-            "upstream_handoff": upstream_signals,
-            "draw_phase": stage_label,
-            "is_top_module": node.parent is None,
-            "has_children": bool(node.children),
-            "upstream_context": upstream_context or {},
-        }
 
-        system_prompt = PASS3_3_2_DRAW_SYSTEM
-        prompt = PASS3_3_2_DRAW_PROMPT.format(
+        system_prompt = PASS3_3_2_ORCHESTRATE_SYSTEM
+        current_module_topology = self.g._prompts.build_instrack_current_module_topology(node.module_name)
+        prompt = PASS3_3_2_ORCHESTRATE_PROMPT.format(
             instruction=instruction,
             instruction_datasheet=instruction_datasheet,
             draw_state_json=self.g._build_instrack_draw_state_json(
-                current_module=str(draw_state.get("current_module") or ""),
-                current_instance=str(draw_state.get("current_instance") or ""),
-                current_path=str(draw_state.get("current_path") or ""),
-                current_level=int(draw_state.get("current_level") or 0),
-                upstream_handoff=list(draw_state.get("upstream_handoff") or []),
-                required_children=required_children,
-                draw_phase=str(draw_state.get("draw_phase") or "draw"),
-                is_top_module=bool(draw_state.get("is_top_module")),
-                has_children=bool(draw_state.get("has_children")),
-                upstream_context=dict(draw_state.get("upstream_context") or {}),
+                current_module=node.module_name,
+                current_instance=node.instance_name,
+                upstream_handoff=upstream_signals,
+                upstream_context=dict(upstream_context or {}),
             ),
             module_preview=self.get_module_preview(node.module_name),
+            current_module_topology=current_module_topology,
             child_preview_list=self.build_child_overview(node),
-            existing_child_draws=existing_child_draws,
         )
 
         async def _tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
@@ -1157,13 +1137,8 @@ class Pass3InStrackStages:
                 if child_node is None:
                     return error
                 child_path = child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
-                if child_path in draw_cache:
-                    return (
-                        "[drawChild][reject] duplicate child draw request. "
-                        f"child={child_node.instance_name}({child_node.module_name}) has already been drawn; "
-                        "reuse the cached boundary summary instead of invoking drawChild again."
-                    )
                 cached_child = draw_cache.get(child_path)
+                cache_hit = cached_child is not None
                 if cached_child is None:
                     raw_handoffs = list(upstream_handoffs_raw or [])
                     filtered_handoffs = self._filter_handoffs_for_child(raw_handoffs, child_node)
@@ -1188,7 +1163,6 @@ class Pass3InStrackStages:
                             "prompt_style": "instrack_draw",
                         },
                     )
-                    child_existing_draws = self._build_existing_child_draws(child_node, draw_cache)
                     cached_child = await self._run_draw_agent_for_node(
                         top_node=top_node,
                         node=child_node,
@@ -1196,9 +1170,7 @@ class Pass3InStrackStages:
                         instruction_datasheet=instruction_datasheet,
                         upstream_signals=self._summarize_handoffs_for_state(filtered_handoffs),
                         stage_label="agent_requested_child",
-                        existing_child_draws=child_existing_draws,
                         draw_cache=draw_cache,
-                        required_children=[],
                         upstream_handoffs_raw=filtered_handoffs,
                         source_child_for_handoff=None,
                         source_payload_for_handoff=source_payload_for_handoff,
@@ -1213,14 +1185,14 @@ class Pass3InStrackStages:
                             "child_instance": child_node.instance_name,
                             "child_module": child_node.module_name,
                             "child_level": node.depth + 1,
-                            "report_chars": len(str(cached_child.get("raw_draw_output") or "")),
+                            "report_chars": len(str(cached_child.get("raw_orchestration_output") or "")),
                             "prompt_tokens": int(
                                 dict(cached_child.get("token_stats") or {}).get("input_tokens", 0) or 0
                             ),
                             "prompt_style": "instrack_draw",
                         },
                     )
-                return self._build_draw_child_tool_result(cached_child, child_task)
+                return self._build_draw_child_tool_result(cached_child, child_task, cached=cache_hit)
 
             return f"Error: unknown tool '{tool_name}'"
 
@@ -1256,18 +1228,14 @@ class Pass3InStrackStages:
             output=draw_content or "",
         )
 
-        mermaid = self.g._extract_mermaid_code(draw_content or "")
-        if not mermaid:
-            mermaid = self.salvage_mermaid_text(draw_content or "")
-        payload = self.extract_pass3_3_draw_payload(draw_content or "", node)
-        payload = self._enrich_draw_payload(node, payload, upstream_context)
+        payload = self.extract_pass3_3_orchestrate_payload(draw_content or "", node)
+        payload = self._enrich_orchestration_payload(node, payload, upstream_context)
         return {
             "module": node.module_name,
             "instance": node.instance_name,
             "path": node_path,
-            "mermaid": f"```mermaid\n{mermaid}\n```\n" if mermaid else "",
-            "draw_payload": payload,
+            "orchestration": payload,
             "orchestrator_role": stage_label,
-            "raw_draw_output": draw_content or "",
+            "raw_orchestration_output": draw_content or "",
             "token_stats": dict(token_stats or {}),
         }

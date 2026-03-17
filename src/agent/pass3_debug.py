@@ -22,6 +22,7 @@ class Pass3Debug:
     def __init__(self, generator: Any):
         self.g = generator
         self._reset_agent_logs: set = set()
+        self._printed_instrack_stage_headers: set = set()
 
     def project_log_path(self, name: str) -> str:
         """Get path for a debug log file."""
@@ -106,36 +107,40 @@ class Pass3Debug:
                 stage_tag = "pass3.3"
                 if prompt_style == "instrack_search" or pass_name == "pass3_3_1":
                     stage_tag = "pass3.3.1/search"
-                elif prompt_style == "instrack_draw" or pass_name == "pass3_3_2_draw":
-                    stage_tag = "pass3.3.2/draw"
+                elif prompt_style == "instrack_draw" or pass_name in {"pass3_3_2_draw", "pass3_3_2_orchestrate"}:
+                    stage_tag = "pass3.3.2/orchestrate"
+                elif pass_name == "pass3_3_3_render":
+                    stage_tag = "pass3.3.3/render"
                 elif prompt_style.startswith("instrack"):
                     stage_tag = f"pass3.3/{prompt_style}"
 
+                self._print_instrack_stage_header(stage_tag)
                 if event in {"fork_dispatch", "pass3_1_fork_dispatch", "pass3_2_fork_dispatch"}:
                     child_inst = str((payload or {}).get("child_instance") or "?")
                     child_mod = str((payload or {}).get("child_module") or "?")
                     parent_level = int((payload or {}).get("parent_level") or 0)
                     child_level = int((payload or {}).get("child_level") or (parent_level + 1))
-                    print(
-                        f"[InStrack][{stage_tag}][fork][dispatch] L{parent_level}->L{child_level} "
-                        f"{child_inst}({child_mod})"
-                    )
+                    indent = self._instrack_indent(child_level)
+                    print(f"{indent}dispatch L{parent_level}->L{child_level} {child_inst}({child_mod})")
                 elif event in {"fork_return", "pass3_1_fork_return", "pass3_2_fork_return"}:
                     child_inst = str((payload or {}).get("child_instance") or "?")
                     child_mod = str((payload or {}).get("child_module") or "?")
-                    report_chars = int((payload or {}).get("report_chars") or 0)
+                    child_level = int((payload or {}).get("child_level") or 0)
                     prompt_tokens = int((payload or {}).get("prompt_tokens") or 0)
                     context_pct = (prompt_tokens / float(self.CONTEXT_WINDOW_TOKENS)) * 100.0
+                    indent = self._instrack_indent(child_level)
                     print(
-                        f"[InStrack][{stage_tag}][fork][return] {child_inst}({child_mod}) "
-                        f"report_chars={report_chars} ctx={context_pct:.1f}%"
+                        f"{indent}return   L{child_level} {child_inst}({child_mod}) "
+                        f"prompt_tokens={prompt_tokens} ctx={context_pct:.1f}%"
                     )
                 elif event in {"fork_rejected", "pass3_1_fork_rejected", "pass3_2_fork_rejected"}:
                     module_selector = str((payload or {}).get("module_selector") or "")
                     reason = str((payload or {}).get("reason") or "")
+                    child_level = int((payload or {}).get("child_level") or (payload or {}).get("parent_level") or 0)
                     if len(reason) > 220:
                         reason = reason[:220] + "..."
-                    print(f"[InStrack][{stage_tag}][fork][rejected] {module_selector} | {reason}")
+                    indent = self._instrack_indent(child_level)
+                    print(f"{indent}rejected L{child_level} {module_selector} | {reason}")
 
             # Keep a dedicated pass3.3.1 trace stream for easier triage.
             is_pass3_3_1 = pass_name == "pass3_3_1" or prompt_style == "instrack_search"
@@ -144,7 +149,7 @@ class Pass3Debug:
                 with open(trace_331, "a", encoding="utf-8") as f331:
                     f331.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-            is_pass3_3_2 = pass_name == "pass3_3_2_draw" or prompt_style == "instrack_draw"
+            is_pass3_3_2 = pass_name in {"pass3_3_2_draw", "pass3_3_2_orchestrate"} or prompt_style == "instrack_draw"
             if is_pass3_3_2:
                 trace_332 = self.fork_trace_log_path_pass3_3_2()
                 with open(trace_332, "a", encoding="utf-8") as f332:
@@ -152,6 +157,21 @@ class Pass3Debug:
         except Exception:
             # Debug log failure should not block the generation flow.
             pass
+
+    def _print_instrack_stage_header(self, stage_tag: str):
+        """Print each instrack stage header once for cleaner terminal logs."""
+        if stage_tag in self._printed_instrack_stage_headers:
+            return
+        self._printed_instrack_stage_headers.add(stage_tag)
+        print("")
+        print(f"[InStrack][{stage_tag}]")
+        print("-" * (len(stage_tag) + 12))
+
+    @staticmethod
+    def _instrack_indent(level: int) -> str:
+        """Return a stable indentation prefix based on hierarchy level."""
+        safe_level = max(int(level or 0), 0)
+        return "  " * safe_level + "- "
 
     def append_recursive_context_log(
         self,
@@ -279,20 +299,12 @@ class Pass3Debug:
         return sections
 
     def _compact_prompt_section(self, title: str, body: str) -> str:
-        if title == "Existing Child Draw Summaries":
-            child_count = len(re.findall(r"^###\s+", body or "", flags=re.M))
-            mermaid_count = len(re.findall(r"```mermaid", body or "", flags=re.I))
-            compact = self._truncate_text(body, max_lines=24, max_chars=2200)
-            return (
-                f"[debug-compact] child_summaries={child_count} mermaid_blocks={mermaid_count}\n\n"
-                f"{compact}"
-            ).strip()
         if title in {"Current Module Description", "Current Module Preview"}:
             return self._truncate_text(body, max_lines=28, max_chars=2600)
         if title == "Direct Child Preview List":
             return self._truncate_text(body, max_lines=28, max_chars=2600)
         if title == "Instruction Datasheet":
             return self._truncate_text(body, max_lines=22, max_chars=1800)
-        if title == "Draw State":
+        if title in {"Draw State", "Continuation State"}:
             return self._truncate_text(body, max_lines=8, max_chars=1800)
         return self._truncate_text(body, max_lines=16, max_chars=1800)

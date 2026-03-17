@@ -360,25 +360,13 @@ class Pass3Generator:
         *,
         current_module: str,
         current_instance: str,
-        current_path: str = "",
-        current_level: Optional[int] = None,
         upstream_handoff: Optional[List[str]] = None,
-        required_children: Optional[List[str]] = None,
-        draw_phase: str = "draw",
-        is_top_module: Optional[bool] = None,
-        has_children: Optional[bool] = None,
         upstream_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         return self._prompts.build_instrack_draw_state_json(
             current_module=current_module,
             current_instance=current_instance,
-            current_path=current_path,
-            current_level=current_level,
             upstream_handoff=upstream_handoff,
-            required_children=required_children,
-            draw_phase=draw_phase,
-            is_top_module=is_top_module,
-            has_children=has_children,
             upstream_context=upstream_context,
         )
 
@@ -1387,9 +1375,11 @@ class Pass3Generator:
             instruction_dir = instrack_dir / slug
             instruction_dir.mkdir(parents=True, exist_ok=True)
             artifact_locate_json = f"instrack/{slug}/locate_context.json"
-            artifact_draw_index_json = f"instrack/{slug}/draw_index.json"
+            artifact_orchestrate_index_json = f"instrack/{slug}/orchestrate_index.json"
+            artifact_render_index_json = f"instrack/{slug}/render_index.json"
             locate_json_path = instruction_dir / "locate_context.json"
-            draw_index_path = instruction_dir / "draw_index.json"
+            orchestrate_index_path = instruction_dir / "orchestrate_index.json"
+            render_index_path = instruction_dir / "render_index.json"
             instruction_datasheet = self._extract_instruction_datasheet_excerpt(datasheet_text, instruction)
 
             search_input_hash = self._build_pass3_3_search_input_hash(
@@ -1408,37 +1398,18 @@ class Pass3Generator:
                     search_content = None
 
             if search_content is None:
+                current_module_topology = self._prompts.build_instrack_current_module_topology(top_node.module_name)
                 search_prompt = PASS3_3_1_SEARCH_PROMPT.format(
                     top_module=top_node.module_name,
                     instruction=instruction,
                     module_preview=top_preview,
+                    current_module_topology=current_module_topology,
                     child_preview_list=top_child_preview_list,
                     core_partition=core_partition_text,
                     instruction_datasheet=instruction_datasheet,
                 )
 
                 async def _search_tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
-                    if tool_name == "readSource":
-                        module = str(args.get("module") or "").strip()
-                        if not module:
-                            return "Error: module is required"
-                        scoped_node, scope_error = self._resolve_scope_node(top_node, module, child_only=False)
-                        if scoped_node is None:
-                            return (
-                                "Error: instrack readSource scope violation. "
-                                "At this level readSource can read only current module. "
-                                "To inspect child modules, use forkSubAgent(module, task). "
-                                f"Details: {scope_error}"
-                            )
-                        if scoped_node is not top_node:
-                            return (
-                                "Error: instrack readSource scope violation. "
-                                "At this level readSource can read only current module. "
-                                "To inspect child modules, use forkSubAgent(module, task)."
-                            )
-                        topology = self._build_topology_block(str(scoped_node.module_name))
-                        return f"[readSource] module={scoped_node.module_name}\n\n{topology}"
-
                     if tool_name == "forkSubAgent":
                         module = str(args.get("module") or "")
                         task = str(args.get("task") or "").strip()
@@ -1654,81 +1625,128 @@ class Pass3Generator:
                     meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_2_locate"},
                 )
 
-            draw_input_hash = self._instrack_stages.build_pass3_3_draw_input_hash(
+            orchestrate_input_hash = self._instrack_stages.build_pass3_3_orchestrate_input_hash(
                 top_module=top_node.module_name,
                 instruction=instruction,
                 instruction_datasheet=instruction_datasheet,
                 search_result_json_text=search_json_text,
             )
 
-            draw_items: List[Dict[str, Any]] = []
+            orchestrate_items: List[Dict[str, Any]] = []
             if self.owner.project_tracker.is_done(
-                artifact_draw_index_json,
-                str(draw_index_path),
-                expected_input_hash=draw_input_hash,
+                artifact_orchestrate_index_json,
+                str(orchestrate_index_path),
+                expected_input_hash=orchestrate_input_hash,
             ):
                 try:
-                    draw_payload = json.loads(draw_index_path.read_text(encoding="utf-8"))
-                    if isinstance(draw_payload, dict):
-                        loaded_items = draw_payload.get("items")
+                    orchestrate_payload = json.loads(orchestrate_index_path.read_text(encoding="utf-8"))
+                    if isinstance(orchestrate_payload, dict):
+                        loaded_items = orchestrate_payload.get("items")
                         if isinstance(loaded_items, list):
-                            draw_items = loaded_items
+                            orchestrate_items = loaded_items
                 except Exception:
-                    draw_items = []
+                    orchestrate_items = []
 
-            if not draw_items:
+            if not orchestrate_items:
                 self.owner.project_tracker.mark_running(
-                    artifact_draw_index_json,
-                    input_hash=draw_input_hash,
-                    meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_2_draw"},
+                    artifact_orchestrate_index_json,
+                    input_hash=orchestrate_input_hash,
+                    meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_2_orchestrate"},
                 )
-                draw_items = await self._instrack_stages.run_pass3_3_2_draw(
+                orchestrate_items = await self._instrack_stages.run_pass3_3_2_orchestrate(
                     top_node=top_node,
                     instruction=instruction,
                     instruction_datasheet=instruction_datasheet,
                     search_result=parsed_search,
                 )
-                for item in draw_items:
+                for item in orchestrate_items:
                     module_slug = self._safe_slug(str(item.get("module") or "unknown"))
                     instance_slug = self._safe_slug(str(item.get("instance") or "inst"))
                     path_slug = self._safe_slug(str(item.get("path") or f"{module_slug}__{instance_slug}").replace("/", "__"))
-                    mermaid_rel = f"instrack/{slug}/{path_slug}.mmd"
-                    raw_rel = f"instrack/{slug}/{path_slug}.raw.md"
-                    mermaid_abs = instruction_dir / f"{path_slug}.mmd"
-                    raw_abs = instruction_dir / f"{path_slug}.raw.md"
-                    mermaid_text = str(item.get("mermaid") or "")
-                    if not mermaid_text.strip():
-                        # Keep one file per module even on extraction failure.
-                        mermaid_text = (
-                            "```mermaid\n"
-                            "flowchart LR\n"
-                            "  A[MERMAID_EXTRACT_FAILED] --> B[Check raw artifact]\n"
-                            "```\n"
-                        )
-                    mermaid_abs.write_text(mermaid_text, encoding="utf-8")
-                    raw_text = str(item.get("raw_draw_output") or "")
+                    raw_rel = f"instrack/{slug}/{path_slug}.orchestrate.raw.md"
+                    raw_abs = instruction_dir / f"{path_slug}.orchestrate.raw.md"
+                    raw_text = str(item.get("raw_orchestration_output") or "")
                     if raw_text.strip():
                         raw_abs.write_text(raw_text, encoding="utf-8")
-                    item["artifact_mermaid"] = mermaid_rel
-                    if raw_text.strip():
                         item["artifact_raw"] = raw_rel
 
-                draw_index_payload = {
+                orchestrate_index_payload = {
                     "instruction": instruction,
                     "start_module": parsed_search.get("start_module", ""),
-                    "items": draw_items,
+                    "schema_version": "pass3_3_2_orchestrate_index_v1",
+                    "items": orchestrate_items,
                 }
-                draw_index_text = json.dumps(draw_index_payload, ensure_ascii=False, indent=2)
-                draw_index_path.write_text(draw_index_text, encoding="utf-8")
+                orchestrate_index_text = json.dumps(orchestrate_index_payload, ensure_ascii=False, indent=2)
+                orchestrate_index_path.write_text(orchestrate_index_text, encoding="utf-8")
                 self.owner.project_tracker.update(
-                    artifact_draw_index_json,
-                    draw_index_text,
-                    input_hash=draw_input_hash,
-                    meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_2_draw"},
+                    artifact_orchestrate_index_json,
+                    orchestrate_index_text,
+                    input_hash=orchestrate_input_hash,
+                    meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_2_orchestrate"},
                 )
 
+            orchestrate_index_text = orchestrate_index_path.read_text(encoding="utf-8")
+            render_enabled = bool(getattr(self.owner, "pass3_3_3_enabled", True))
+            render_input_hash = self._instrack_stages.build_pass3_3_render_input_hash(
+                top_module=top_node.module_name,
+                instruction=instruction,
+                orchestration_json_text=orchestrate_index_text,
+            )
+            render_items: List[Dict[str, Any]] = []
+            if render_enabled:
+                if self.owner.project_tracker.is_done(
+                    artifact_render_index_json,
+                    str(render_index_path),
+                    expected_input_hash=render_input_hash,
+                ):
+                    try:
+                        render_payload = json.loads(render_index_path.read_text(encoding="utf-8"))
+                        if isinstance(render_payload, dict):
+                            loaded_items = render_payload.get("items")
+                            if isinstance(loaded_items, list):
+                                render_items = loaded_items
+                    except Exception:
+                        render_items = []
+
+                if not render_items:
+                    self.owner.project_tracker.mark_running(
+                        artifact_render_index_json,
+                        input_hash=render_input_hash,
+                        meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_3_render"},
+                    )
+                    render_items = []
+                    for item in orchestrate_items:
+                        module_slug = self._safe_slug(str(item.get("module") or "unknown"))
+                        instance_slug = self._safe_slug(str(item.get("instance") or "inst"))
+                        path_slug = self._safe_slug(str(item.get("path") or f"{module_slug}__{instance_slug}").replace("/", "__"))
+                        mermaid_rel = f"instrack/{slug}/{path_slug}.mmd"
+                        mermaid_abs = instruction_dir / f"{path_slug}.mmd"
+                        mermaid_text = self._instrack_stages.render_orchestration_item_mermaid(item)
+                        mermaid_abs.write_text(mermaid_text, encoding="utf-8")
+                        render_items.append({
+                            "module": str(item.get("module") or "").strip(),
+                            "instance": str(item.get("instance") or "").strip(),
+                            "path": str(item.get("path") or "").strip(),
+                            "artifact_mermaid": mermaid_rel,
+                        })
+
+                    render_index_payload = {
+                        "instruction": instruction,
+                        "start_module": parsed_search.get("start_module", ""),
+                        "schema_version": "pass3_3_3_render_index_v1",
+                        "items": render_items,
+                    }
+                    render_index_text = json.dumps(render_index_payload, ensure_ascii=False, indent=2)
+                    render_index_path.write_text(render_index_text, encoding="utf-8")
+                    self.owner.project_tracker.update(
+                        artifact_render_index_json,
+                        render_index_text,
+                        input_hash=render_input_hash,
+                        meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_3_render"},
+                    )
+
             lifecycle_modules: List[str] = []
-            for item in draw_items:
+            for item in orchestrate_items:
                 module_name = str(item.get("module") or "").strip()
                 if module_name and module_name not in lifecycle_modules:
                     lifecycle_modules.append(module_name)
@@ -1741,10 +1759,13 @@ class Pass3Generator:
                 "## Locate Context Artifact",
                 f"- `instrack/{slug}/locate_context.json`",
                 "",
-                "## Draw Artifacts",
+                "## Orchestrate Artifact",
+                f"- `instrack/{slug}/orchestrate_index.json`",
+                "",
+                "## Render Artifacts",
             ]
-            if draw_items:
-                for item in draw_items:
+            if render_items:
+                for item in render_items:
                     md_lines.append(f"- `{item.get('artifact_mermaid', '')}`")
             else:
                 md_lines.append("- (none)")
@@ -1754,15 +1775,16 @@ class Pass3Generator:
             self.owner.project_tracker.update(
                 artifact_md,
                 md_text,
-                input_hash=draw_input_hash,
-                meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_2"},
+                input_hash=render_input_hash,
+                meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3"},
             )
 
             json_payload = {
                 **parsed_search,
-                "schema_version": "pass3_3_2_lifecycle_v1",
+                "schema_version": "pass3_3_2_orchestrate_v1",
                 "locate_artifact_json": artifact_locate_json,
-                "draw_index_artifact_json": artifact_draw_index_json,
+                "orchestrate_index_artifact_json": artifact_orchestrate_index_json,
+                "render_index_artifact_json": artifact_render_index_json if render_enabled else "",
                 "lifecycle_modules": lifecycle_modules,
             }
             json_text = json.dumps(json_payload, ensure_ascii=False, indent=2)
@@ -1770,8 +1792,8 @@ class Pass3Generator:
             self.owner.project_tracker.update(
                 artifact_json,
                 json_text,
-                input_hash=draw_input_hash,
-                meta={"source": artifact_md, "parser": "instrack_lifecycle_v1"},
+                input_hash=orchestrate_input_hash,
+                meta={"source": artifact_md, "parser": "instrack_orchestrate_v1"},
             )
 
             index_entries.append({
@@ -1788,7 +1810,8 @@ class Pass3Generator:
                 "key_register_line_range": parsed_search.get("key_register_line_range", {"start_line": 0, "end_line": 0}),
                 "search_confidence": parsed_search.get("confidence", "low"),
                 "locate_artifact_json": artifact_locate_json,
-                "draw_index_artifact_json": artifact_draw_index_json,
+                "orchestrate_index_artifact_json": artifact_orchestrate_index_json,
+                "render_index_artifact_json": artifact_render_index_json if render_enabled else "",
                 "lifecycle_modules": lifecycle_modules,
             })
 

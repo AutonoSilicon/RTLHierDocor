@@ -14,6 +14,8 @@ from .prompts import (
     PASS3_2_PROMPT,
     PASS3_3_1_SEARCH_SYSTEM,
     PASS3_3_1_SEARCH_PROMPT,
+    PASS3_3_2_ORCHESTRATE_SYSTEM,
+    PASS3_3_2_ORCHESTRATE_PROMPT,
     PASS3_3_2_DRAW_SYSTEM,
     PASS3_3_2_DRAW_PROMPT,
 )
@@ -100,6 +102,41 @@ class Pass3Hash:
         }
         return hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
+    def build_pass3_3_orchestrate_input_hash(
+        self,
+        top_module: str,
+        instruction: str,
+        instruction_datasheet: str,
+        search_result_json_text: str,
+    ) -> str:
+        """Build cache key for pass3.3.2 orchestration stage."""
+        payload = {
+            "version": "pass3_3_instrack_orchestrate_cache_v1",
+            "top_module": top_module,
+            "instruction": instruction,
+            "system_prompt": PASS3_3_2_ORCHESTRATE_SYSTEM,
+            "prompt_template": PASS3_3_2_ORCHESTRATE_PROMPT,
+            "instruction_datasheet_hash": hash_text(instruction_datasheet),
+            "search_result_json_hash": hash_text(search_result_json_text),
+            "tools_schema": self.g._tools.pass3_3_2_tools(),
+        }
+        return hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    def build_pass3_3_render_input_hash(
+        self,
+        top_module: str,
+        instruction: str,
+        orchestration_json_text: str,
+    ) -> str:
+        """Build cache key for pass3.3.3 render stage."""
+        payload = {
+            "version": "pass3_3_instrack_render_cache_v1",
+            "top_module": top_module,
+            "instruction": instruction,
+            "orchestration_json_hash": hash_text(orchestration_json_text),
+        }
+        return hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
     def build_pass3_3_draw_input_hash(
         self,
         top_module: str,
@@ -107,18 +144,13 @@ class Pass3Hash:
         instruction_datasheet: str,
         search_result_json_text: str,
     ) -> str:
-        """Build cache key for pass3.3 draw stage."""
-        payload = {
-            "version": "pass3_3_instrack_draw_cache_v10",
-            "top_module": top_module,
-            "instruction": instruction,
-            "system_prompt": PASS3_3_2_DRAW_SYSTEM,
-            "prompt_template": PASS3_3_2_DRAW_PROMPT,
-            "instruction_datasheet_hash": hash_text(instruction_datasheet),
-            "search_result_json_hash": hash_text(search_result_json_text),
-            "tools_schema": self.g._tools.pass3_3_2_tools(),
-        }
-        return hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        """Backward-compatible alias for the old draw stage name."""
+        return self.build_pass3_3_orchestrate_input_hash(
+            top_module=top_module,
+            instruction=instruction,
+            instruction_datasheet=instruction_datasheet,
+            search_result_json_text=search_result_json_text,
+        )
 
     # Generic artifact hash
 
