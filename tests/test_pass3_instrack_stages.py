@@ -619,7 +619,6 @@ def test_build_draw_child_tool_result_returns_structured_boundary_summary_only()
             "instance": "x_dst0",
             "path": "top/x_dst0",
         },
-        "entry_ports": [{"port": "in_a", "direction": "input"}],
         "boundary_handoffs": [{"egress_port": "out1"}],
         "next_children": [],
         "instruction_state": "state",
@@ -720,7 +719,7 @@ def test_build_draw_child_tool_result_surfaces_next_children_and_compacts_large_
     result = stages._build_draw_child_tool_result(child_item, "continue issue")
     payload = json.loads(result.removeprefix("```json\n").removesuffix("\n```"))
 
-    assert len(payload["entry_ports"]) == 4
+    assert "entry_ports" not in payload
     assert payload["next_children"] == [
         {"target_instance": "x_rf_dp", "target_module": "ct_idu_rf_dp"},
         {"target_instance": "x_rf_ctrl", "target_module": "ct_idu_rf_ctrl"},

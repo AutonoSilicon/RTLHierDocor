@@ -1182,42 +1182,6 @@ class Pass3InStrackStages:
             return text
         return text[: max_chars - 3].rstrip() + "..."
 
-    def _summarize_tool_entry_ports(
-        self,
-        entry_ports: List[Dict[str, Any]],
-        *,
-        max_items: int = 4,
-    ) -> List[Dict[str, Any]]:
-        summarized: List[Dict[str, Any]] = []
-        for raw in list(entry_ports or [])[:max_items]:
-            if not isinstance(raw, dict):
-                continue
-            item: Dict[str, Any] = {}
-            port = str(raw.get("port") or raw.get("target_port") or "").strip()
-            if port:
-                item["port"] = port
-            direction = str(raw.get("direction") or "").strip()
-            if direction:
-                item["direction"] = direction
-            value_kind = str(raw.get("value_kind") or "").strip()
-            if value_kind:
-                item["value_kind"] = value_kind
-            semantic = self._compact_tool_text(raw.get("semantic"), max_chars=160)
-            if semantic:
-                item["semantic"] = semantic
-
-            matched_from_raw = raw.get("matched_from")
-            if isinstance(matched_from_raw, dict):
-                matched_from: Dict[str, Any] = {}
-                for key in ("source_instance", "source_module", "source_port", "parent_wire"):
-                    value = str(matched_from_raw.get(key) or "").strip()
-                    if value:
-                        matched_from[key] = value
-                if matched_from:
-                    item["matched_from"] = matched_from
-            summarized.append(item)
-        return summarized
-
     def _summarize_tool_boundary_handoffs(
         self,
         boundary_handoffs: List[Dict[str, Any]],
@@ -1372,7 +1336,6 @@ class Pass3InStrackStages:
                 "path": str(child_item.get("path") or "").strip(),
             },
             "cached": bool(cached),
-            "entry_ports": self._summarize_tool_entry_ports(list(payload.get("entry_ports") or [])),
             "boundary_handoffs": self._summarize_tool_boundary_handoffs(boundary_handoffs),
             "next_children": self._extract_next_children_from_handoffs(boundary_handoffs),
             "instruction_state": self._summarize_tool_instruction_state(payload.get("instruction_state") or ""),
