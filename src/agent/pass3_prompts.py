@@ -31,21 +31,23 @@ class Pass3Prompts:
         *,
         current_module: str,
         current_instance: str,
-        upstream_handoff: Optional[List[str]] = None,
-        upstream_context: Optional[Dict[str, Any]] = None,
+        boundary_takeover: Optional[List[Dict[str, Any]]] = None,
+        lifecycle_context: Optional[List[Dict[str, Any]]] = None,
+        continuation_source: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Build a bounded continuation-state JSON string for prompts."""
-        handoff = [str(item).strip() for item in (upstream_handoff or []) if str(item).strip()]
         payload: Dict[str, Any] = {
             "module": str(current_module or "").strip(),
             "instance": str(current_instance or "").strip(),
         }
-        if handoff:
-            payload["upstream_handoff"] = handoff[:16]
-            if len(handoff) > 16:
-                payload["upstream_handoff_truncated"] = len(handoff) - 16
-        if isinstance(upstream_context, dict) and upstream_context:
-            payload["upstream_context"] = upstream_context
+        if isinstance(boundary_takeover, list) and boundary_takeover:
+            payload["boundary_takeover"] = boundary_takeover[:16]
+            if len(boundary_takeover) > 16:
+                payload["boundary_takeover_truncated"] = len(boundary_takeover) - 16
+        if isinstance(lifecycle_context, list) and lifecycle_context:
+            payload["lifecycle_context"] = lifecycle_context
+        if isinstance(continuation_source, dict) and continuation_source:
+            payload["continuation_source"] = continuation_source
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     def build_instrack_current_module_topology(self, module_name: str) -> str:
@@ -109,7 +111,7 @@ class Pass3Prompts:
                 draw_state_json=self.build_instrack_draw_state_json(
                     current_module=current_node.module_name,
                     current_instance=current_node.instance_name,
-                    upstream_handoff=[],
+                    boundary_takeover=[],
                 ),
                 module_preview=current_description,
                 current_module_topology=current_module_topology,

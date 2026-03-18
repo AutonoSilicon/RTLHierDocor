@@ -361,14 +361,16 @@ class Pass3Generator:
         *,
         current_module: str,
         current_instance: str,
-        upstream_handoff: Optional[List[str]] = None,
-        upstream_context: Optional[Dict[str, Any]] = None,
+        boundary_takeover: Optional[List[Dict[str, Any]]] = None,
+        lifecycle_context: Optional[List[Dict[str, Any]]] = None,
+        continuation_source: Optional[Dict[str, Any]] = None,
     ) -> str:
         return self._prompts.build_instrack_draw_state_json(
             current_module=current_module,
             current_instance=current_instance,
-            upstream_handoff=upstream_handoff,
-            upstream_context=upstream_context,
+            boundary_takeover=boundary_takeover,
+            lifecycle_context=lifecycle_context,
+            continuation_source=continuation_source,
         )
 
     def _pass3_recursive_tools(self, prompt_style: str = "architecture") -> List[Dict[str, Any]]:

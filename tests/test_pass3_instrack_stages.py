@@ -142,7 +142,7 @@ def make_parent_tree():
     return parent, source, dst0, dst1
 
 
-def test_extract_pass3_3_draw_payload_parses_entry_ports_and_boundary_handoffs():
+def test_extract_pass3_3_draw_payload_ignores_takeover_fields_and_parses_boundary_handoffs():
     stages = make_stages()
     current = FakeNode("ct_mod", "x_ct_mod")
     content = """
@@ -153,6 +153,21 @@ flowchart LR
 {
   "module": "ct_mod",
   "instance": "x_ct_mod",
+  "boundary_takeover": [
+    {
+      "ingress_port": "ifu_in",
+      "value_kind": "instruction_valid",
+      "semantic": "slot valid from IFU",
+      "taken_from": {
+        "source_instance": "x_ifu",
+        "source_module": "ct_ifu_top",
+        "source_instance_path": "top/x_ifu",
+        "source_port": "ifu_out",
+        "source_handoff_id": "top/x_ifu::ifu_out",
+        "parent_wire": "ifu_idu_vld"
+      }
+    }
+  ],
   "entry_ports": [
     {
       "port": "ifu_in",
@@ -178,7 +193,6 @@ flowchart LR
     }
   ],
   "lifecycle_context": "decode handoff",
-  "instruction_state": "slot1 valid",
   "confidence": "high",
   "unknown": ""
 }
@@ -190,22 +204,10 @@ flowchart LR
     assert payload["module"] == "ct_mod"
     assert payload["instance"] == "x_ct_mod"
     assert payload["lifecycle_context"] == "decode handoff"
-    assert payload["instruction_state"] == "slot1 valid"
+    assert "instruction_state" not in payload
     assert payload["confidence"] == "high"
-    assert payload["entry_ports"] == [
-        {
-            "port": "ifu_in",
-            "direction": "input",
-            "value_kind": "instruction_valid",
-            "semantic": "slot valid from IFU",
-            "matched_from": {
-                "source_instance": "x_ifu",
-                "source_module": "ct_ifu_top",
-                "source_port": "ifu_out",
-                "parent_wire": "ifu_idu_vld",
-            },
-        }
-    ]
+    assert payload["boundary_takeover"] == []
+    assert "entry_ports" not in payload
     assert payload["boundary_handoffs"] == [
         {
             "source_block": "PROC_11",
@@ -279,7 +281,7 @@ def test_resolve_boundary_handoff_destinations_enriches_resolution_status_and_id
     assert "no strict boundary match" in dangling["unknown"]
 
 
-def test_build_upstream_context_only_keeps_exact_child_entry_ports():
+def test_build_boundary_takeover_only_keeps_exact_child_matches():
     stages = make_stages()
     parent, source, dst0, _ = make_parent_tree()
     handoffs = [
@@ -314,40 +316,31 @@ def test_build_upstream_context_only_keeps_exact_child_entry_ports():
         },
     ]
 
-    context = stages._build_upstream_context(
+    takeover = stages._build_boundary_takeover(
         parent_node=parent,
         source_child_node=source,
         target_child_node=dst0,
         handoffs=handoffs,
-        source_payload={
-            "lifecycle_context": "parent bridge",
-            "instruction_state": "decoded valid",
-        },
     )
 
-    assert context == {
-        "source_instance": "x_src",
-        "source_module": "src_mod",
-        "entry_ports": [
-            {
-                "target_port": "in_a",
-                "wire": "shared_wire",
-                "source_port": "out1",
+    assert takeover == [
+        {
+            "ingress_port": "in_a",
+            "value_kind": "instruction_valid",
+            "semantic": "to decode",
+            "taken_from": {
                 "source_instance": "x_src",
                 "source_module": "src_mod",
-                "semantic": "to decode",
-                "value_kind": "instruction_valid",
-            }
-        ],
-        "parent_logic_on_path": [],
-        "exits_parent": [],
-        "unresolved": ["dangling"],
-        "lifecycle_context": "parent bridge",
-        "instruction_state": "decoded valid",
-    }
+                "source_instance_path": "top/x_src",
+                "source_port": "out1",
+                "source_handoff_id": "top/x_src::out1",
+                "parent_wire": "shared_wire",
+            },
+        }
+    ]
 
 
-def test_build_parent_bridge_upstream_context_collects_candidate_children_and_parent_exits():
+def test_build_bridge_context_collects_candidate_children_and_parent_exits():
     stages = make_stages()
     parent, source, _, _ = make_parent_tree()
     raw_handoffs = [
@@ -357,13 +350,12 @@ def test_build_parent_bridge_upstream_context_collects_candidate_children_and_pa
     ]
     resolved_handoffs = stages._resolve_boundary_handoff_destinations(parent, source, raw_handoffs)
 
-    context = stages._build_parent_bridge_upstream_context(
+    context = stages._build_bridge_context(
         parent_node=parent,
         source_child_node=source,
         handoffs=resolved_handoffs,
         source_payload={
             "lifecycle_context": "ifu bridge",
-            "instruction_state": "dispatch bundle",
         },
     )
 
@@ -371,10 +363,24 @@ def test_build_parent_bridge_upstream_context_collects_candidate_children_and_pa
     assert context["source_module"] == "src_mod"
     assert context["source_instance_path"] == "top/x_src"
     assert context["parent_module"] == "parent_mod"
-    assert context["entry_ports"] == []
     assert context["candidate_children"] == [
         {"target_instance": "x_dst0", "target_module": "dst_mod"},
         {"target_instance": "x_dst1", "target_module": "dst_mod"},
+    ]
+    assert context["takeover_bundles"][0]["boundary_takeover"] == [
+        {
+            "ingress_port": "in_a",
+            "value_kind": "instruction_valid",
+            "semantic": "to decode",
+            "taken_from": {
+                "source_instance": "x_src",
+                "source_module": "src_mod",
+                "source_instance_path": "top/x_src",
+                "source_port": "out1",
+                "source_handoff_id": "top/x_src::out1",
+                "parent_wire": "shared_wire",
+            },
+        }
     ]
     assert context["exits_parent"] == [
         {
@@ -384,8 +390,6 @@ def test_build_parent_bridge_upstream_context_collects_candidate_children_and_pa
         }
     ]
     assert context["unresolved"] == ["dangling"]
-    assert context["lifecycle_context"] == "ifu bridge"
-    assert context["instruction_state"] == "dispatch bundle"
     assert context["resolved_handoffs"][0]["egress_port"] == "out1"
     assert context["resolved_handoffs"][0]["targets"] == [
         {
@@ -434,10 +438,15 @@ def test_advance_active_continuation_from_child_promotes_child_outputs():
         parent_node=parent,
         source_child_node=source,
         handoffs=[{"egress_port": "out1", "semantic": "old source"}],
-        source_payload={"lifecycle_context": "old", "instruction_state": "old-state"},
-        upstream_context=None,
+        source_payload={"lifecycle_context": "old"},
     )
-    assert initial_state["upstream_context"]["source_instance"] == "x_src"
+    assert initial_state["bridge_context"]["source_instance"] == "x_src"
+    assert initial_state["continuation_source"] == {
+        "source_instance": "x_src",
+        "source_module": "src_mod",
+        "source_instance_path": "top/x_src",
+    }
+    assert initial_state["boundary_takeover"] == []
 
     child_handoffs = stages._resolve_boundary_handoff_destinations(
         parent,
@@ -454,93 +463,82 @@ def test_advance_active_continuation_from_child_promotes_child_outputs():
             "orchestration": {
                 "boundary_handoffs": child_handoffs,
                 "lifecycle_context": "mid stage",
-                "instruction_state": "mid-state",
             }
         },
+        inherited_bridge_context=initial_state["bridge_context"],
+        inherited_lifecycle_context=initial_state["lifecycle_context"],
     )
 
     assert next_state["source_child_node"] is mid
     assert next_state["payload"]["lifecycle_context"] == "mid stage"
-    assert next_state["upstream_context"]["source_instance"] == "x_mid"
-    assert next_state["upstream_context"]["lifecycle_context"] == "mid stage"
-    assert next_state["upstream_context"]["candidate_children"] == [
+    assert next_state["lifecycle_context"] == [
+        {
+            "accessed_submodule": "x_src(src_mod)",
+            "behavior_description": "old",
+        },
+        {
+            "accessed_submodule": "x_mid(src_mod)",
+            "behavior_description": "mid stage",
+        },
+    ]
+    assert next_state["boundary_takeover"] == []
+    assert next_state["bridge_context"]["source_instance"] == "x_mid"
+    assert next_state["bridge_context"]["candidate_children"] == [
         {"target_instance": target0.instance_name, "target_module": target0.module_name},
         {"target_instance": target1.instance_name, "target_module": target1.module_name},
     ]
-    assert next_state["upstream_context"]["exits_parent"] == [
+    assert next_state["bridge_context"]["exits_parent"] == [
         {
             "parent_port": "top_out",
             "parent_wire": "top_out",
             "source_port": "out2",
         }
     ]
+    assert next_state["continuation_source"] == {
+        "source_instance": "x_mid",
+        "source_module": "src_mod",
+        "source_instance_path": "top/x_mid",
+    }
 
 
-def test_enrich_draw_payload_merges_upstream_entry_port_matches():
+def test_enrich_draw_payload_injects_python_boundary_takeover():
     stages = make_stages()
     _, source, _, _ = make_parent_tree()
     payload = {
-        "entry_ports": [
-            {
-                "port": "in_a",
-                "direction": "input",
-                "value_kind": "instruction_valid",
-                "semantic": "existing semantics",
-            }
-        ],
         "boundary_handoffs": [{"egress_port": "out1", "semantic": "to decode"}],
     }
-    upstream_context = {
-        "entry_ports": [
-            {
-                "target_port": "in_a",
-                "wire": "shared_wire",
-                "source_instance": "x_src",
-                "source_module": "src_mod",
-                "source_port": "out1",
-                "semantic": "from parent context",
-                "value_kind": "instruction_valid",
-            },
-            {
-                "target_port": "in_b",
-                "wire": "shared_wire",
-                "source_instance": "x_src",
-                "source_module": "src_mod",
-                "source_port": "out1",
-                "semantic": "second entry",
-                "value_kind": "instruction_valid",
-            },
-        ]
-    }
-
-    enriched = stages._enrich_draw_payload(source, payload, upstream_context)
-
-    assert enriched["entry_ports"] == [
+    boundary_takeover = [
         {
-            "port": "in_a",
-            "direction": "input",
+            "ingress_port": "in_a",
             "value_kind": "instruction_valid",
-            "semantic": "existing semantics",
-            "matched_from": {
+            "semantic": "from parent context",
+            "taken_from": {
                 "source_instance": "x_src",
                 "source_module": "src_mod",
+                "source_instance_path": "top/x_src",
                 "source_port": "out1",
+                "source_handoff_id": "top/x_src::out1",
                 "parent_wire": "shared_wire",
             },
         },
         {
-            "port": "in_b",
-            "direction": "input",
+            "ingress_port": "in_b",
             "value_kind": "instruction_valid",
             "semantic": "second entry",
-            "matched_from": {
+            "taken_from": {
                 "source_instance": "x_src",
                 "source_module": "src_mod",
+                "source_instance_path": "top/x_src",
                 "source_port": "out1",
+                "source_handoff_id": "top/x_src::out1",
                 "parent_wire": "shared_wire",
             },
         },
     ]
+
+    enriched = stages._enrich_draw_payload(source, payload, boundary_takeover)
+
+    assert enriched["boundary_takeover"] == boundary_takeover
     assert enriched["boundary_handoffs"][0]["status"] == "resolved"
 
 
@@ -548,7 +546,6 @@ def test_enrich_draw_payload_marks_invalid_duplicate_and_unknown_boundary_handof
     stages = make_stages()
     _, source, _, _ = make_parent_tree()
     payload = {
-        "entry_ports": [],
         "boundary_handoffs": [
             {"egress_port": "out1", "semantic": "primary handoff"},
             {"egress_port": "out1", "semantic": "duplicate handoff"},
@@ -557,7 +554,7 @@ def test_enrich_draw_payload_marks_invalid_duplicate_and_unknown_boundary_handof
         ],
     }
 
-    enriched = stages._enrich_draw_payload(source, payload, upstream_context=None)
+    enriched = stages._enrich_draw_payload(source, payload, boundary_takeover=None)
 
     assert [item["egress_port"] for item in enriched["boundary_handoffs"]] == ["out1", "out1", "bad", "ghost"]
     assert enriched["boundary_handoffs"][0]["status"] == "resolved"
@@ -573,7 +570,6 @@ def test_enrich_draw_payload_validates_top_module_boundary_ports_without_parent_
     stages = make_stages()
     top = FakeNode("parent_mod", "top")
     payload = {
-        "entry_ports": [],
         "boundary_handoffs": [
             {"egress_port": "top_out", "semantic": "legal top output"},
             {"egress_port": "top_in", "semantic": "input should be rejected"},
@@ -581,7 +577,7 @@ def test_enrich_draw_payload_validates_top_module_boundary_ports_without_parent_
         ],
     }
 
-    enriched = stages._enrich_draw_payload(top, payload, upstream_context=None)
+    enriched = stages._enrich_draw_payload(top, payload, boundary_takeover=None)
 
     assert enriched["boundary_handoffs"][0]["egress_port"] == "top_out"
     assert enriched["boundary_handoffs"][0].get("status", "") != "invalid"
@@ -599,9 +595,8 @@ def test_build_draw_child_tool_result_returns_structured_boundary_summary_only()
         "path": "top/x_dst0",
         "raw_draw_output": "```mermaid\nflowchart LR\nA-->B\n```",
         "orchestration": {
-            "entry_ports": [{"port": "in_a", "direction": "input"}],
+            "boundary_takeover": [{"ingress_port": "in_a"}],
             "boundary_handoffs": [{"egress_port": "out1"}],
-            "instruction_state": "state",
             "lifecycle_context": "ctx",
             "confidence": "medium",
             "unknown": "",
@@ -621,8 +616,6 @@ def test_build_draw_child_tool_result_returns_structured_boundary_summary_only()
         },
         "boundary_handoffs": [{"egress_port": "out1"}],
         "next_children": [],
-        "instruction_state": "state",
-        "lifecycle_context": "ctx",
         "confidence": "medium",
         "unknown": "",
         "cached": False,
@@ -637,12 +630,12 @@ def test_build_draw_child_tool_result_surfaces_next_children_and_compacts_large_
         "instance": "x_dst0",
         "path": "top/x_dst0",
         "orchestration": {
-            "entry_ports": [
-                {"port": "in0", "direction": "input", "semantic": "slot0"},
-                {"port": "in1", "direction": "input", "semantic": "slot1"},
-                {"port": "in2", "direction": "input", "semantic": "slot2"},
-                {"port": "in3", "direction": "input", "semantic": "slot3"},
-                {"port": "in4", "direction": "input", "semantic": "slot4"},
+            "boundary_takeover": [
+                {"ingress_port": "in0", "semantic": "slot0"},
+                {"ingress_port": "in1", "semantic": "slot1"},
+                {"ingress_port": "in2", "semantic": "slot2"},
+                {"ingress_port": "in3", "semantic": "slot3"},
+                {"ingress_port": "in4", "semantic": "slot4"},
             ],
             "boundary_handoffs": [
                 {
@@ -680,20 +673,7 @@ def test_build_draw_child_tool_result_surfaces_next_children_and_compacts_large_
                     ],
                 }
             ],
-            "instruction_state": [
-                {"step": 1, "description": "queue create", "state_update": "entry allocated"},
-                {"step": 2, "description": "ready tracking", "state_update": "sources wake up"},
-                {"step": 3, "description": "age arbitration", "state_update": "oldest ready selected"},
-                {"step": 4, "description": "issue mux", "state_update": "payload routed"},
-                {"step": 5, "description": "rf handoff", "state_update": "issue bus drives rf"},
-            ],
-            "lifecycle_context": {
-                "instruction": "ADD",
-                "execution_phase": "issue",
-                "role": "issue queue to RF bridge",
-                "pipeline_stages": ["IS", "AIQ", "RF", "IU", "RTU"],
-                "parallelism": "up to 4 issue candidates",
-            },
+            "lifecycle_context": "issue queue selects ADD and hands the issued payload to RF-facing logic",
             "confidence": "high",
             "unknown": [
                 {
@@ -747,7 +727,109 @@ def test_build_draw_child_tool_result_surfaces_next_children_and_compacts_large_
         },
     ]
     assert payload["boundary_handoffs"][0]["resolutions_truncated"] == 1
-    assert payload["instruction_state"][-1] == "+1 more state steps"
-    assert payload["lifecycle_context"]["execution_phase"] == "issue"
-    assert payload["lifecycle_context"]["pipeline_stages_truncated"] == 1
+    assert "instruction_state" not in payload
+    assert "lifecycle_context" not in payload
     assert payload["unknown"][-1] == "+1 more unknowns"
+
+
+def test_build_active_continuation_keeps_bridge_context_internal_and_takeover_explicit():
+    stages = make_stages()
+    parent, source, dst0, _ = make_parent_tree()
+    boundary_takeover = stages._build_boundary_takeover(
+        parent_node=parent,
+        source_child_node=source,
+        target_child_node=dst0,
+        handoffs=[
+            {
+                "egress_port": "out1",
+                "parent_wire": "shared_wire",
+                "resolutions": [
+                    {
+                        "resolution_kind": "sibling_child",
+                        "target_instance": "x_dst0",
+                        "target_module": "dst_mod",
+                        "target_port": "in_a",
+                    }
+                ],
+            }
+        ],
+    )
+    state = stages._build_active_continuation(
+        parent_node=parent,
+        source_child_node=source,
+        handoffs=[
+            {
+                "egress_port": "out1",
+                "parent_wire": "shared_wire",
+                "resolutions": [
+                    {
+                        "resolution_kind": "sibling_child",
+                        "target_instance": "x_dst0",
+                        "target_module": "dst_mod",
+                        "target_port": "in_a",
+                    }
+                ],
+            }
+        ],
+        source_payload={"lifecycle_context": "current child should not be appended yet"},
+        lifecycle_context=[
+            {
+                "accessed_submodule": "x_prev(prev_mod)",
+                "behavior_description": "previous sibling accepted the dispatch bundle",
+            }
+        ],
+        bridge_context=None,
+        boundary_takeover=boundary_takeover,
+        continuation_source=None,
+    )
+
+    assert state["bridge_context"]["candidate_children"] == [
+        {"target_instance": "x_dst0", "target_module": "dst_mod"},
+    ]
+    assert state["boundary_takeover"] == boundary_takeover
+    assert state["continuation_source"] == {
+        "source_instance": "x_src",
+        "source_module": "src_mod",
+        "source_instance_path": "top/x_src",
+    }
+    assert state["lifecycle_context"] == [
+        {
+            "accessed_submodule": "x_prev(prev_mod)",
+            "behavior_description": "previous sibling accepted the dispatch bundle",
+        },
+        {
+            "accessed_submodule": "x_src(src_mod)",
+            "behavior_description": "current child should not be appended yet",
+        },
+    ]
+
+
+def test_render_orchestration_item_mermaid_uses_boundary_takeover_entries():
+    stages = make_stages()
+    item = {
+        "module": "dst_mod",
+        "instance": "x_dst0",
+        "orchestration": {
+            "boundary_takeover": [
+                {
+                    "ingress_port": "in_a",
+                    "semantic": "decoded slot valid",
+                    "taken_from": {
+                        "source_instance": "x_src",
+                        "source_module": "src_mod",
+                        "source_instance_path": "top/x_src",
+                        "source_port": "out1",
+                        "source_handoff_id": "top/x_src::out1",
+                        "parent_wire": "shared_wire",
+                    },
+                }
+            ],
+            "boundary_handoffs": [{"egress_port": "out1", "semantic": "handoff to next stage"}],
+            "lifecycle_context": "consume the decoded slot and prepare the next stage handoff",
+        },
+    }
+
+    mermaid = stages.render_orchestration_item_mermaid(item)
+
+    assert "ENTRY in_a | decoded slot valid" in mermaid
+    assert "EXIT out1 | handoff to next stage" in mermaid

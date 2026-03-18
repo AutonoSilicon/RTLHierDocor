@@ -195,7 +195,7 @@ class Pass3Tools:
                 "type": "function",
                 "function": {
                     "name": "drawChild",
-                    "description": "Trigger draw generation for one direct child module only when needed, and return its structured boundary summary (entry ports, boundary handoffs, state summary). If that child was already drawn earlier in this run, return the cached orchestration result instead of redrawing it. If no child expansion is needed, output the result directly.",
+                    "description": "Trigger draw generation for one direct child module only when needed, and return its structured boundary summary (boundary handoffs, next-child candidates, confidence, unknowns). If that child was already drawn earlier in this run, return the cached orchestration result instead of redrawing it. If no child expansion is needed, output the result directly.",
                     "parameters": {
                         "type": "object",
                         "properties": {

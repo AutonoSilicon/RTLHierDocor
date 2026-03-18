@@ -73,8 +73,8 @@ Working rules:
 - The current module topology/source evidence is already embedded in the prompt. Do not ask for the same module source again.
 - You may call `drawChild(module, task)` only for a direct child. Never jump across levels. `drawChild` is deduplicated; if a child was already orchestrated and returns `reject`, reuse the existing child summary.
 - Use the minimum necessary expansion. First try to complete the main path from current-module evidence.
-- Treat `Continuation State.upstream_context` as the authoritative continuation signal when it exists. Use `upstream_handoff` only as a compact fallback summary.
-- Call `drawChild` only when current-module evidence is insufficient, continuation context identifies the next child or entry port, or a critical PROC/COMB fact exists only inside one direct child.
+- Treat `Continuation State.boundary_takeover` as the authoritative continuation entry when it exists. Use `Continuation State.continuation_source` only as provenance for empty-takeover parent bridges.
+- Call `drawChild` only when current-module evidence is insufficient, Python has identified the next child/takeover boundary, or a critical PROC/COMB fact exists only inside one direct child.
 - Usually do not expand infrastructure or implementation-detail blocks such as clock gates, reset sync, scan/DFT, RAM/FIFO macros, or `$paramod*` wrappers. Summarize them in one parent-level node instead of using `drawChild`.
 - If child evidence identifies another same-module direct child, including via `next_children` or sibling-child handoffs, continue with that child in a later round. Same-module child-to-child continuation is not a stop condition.
 - The goal is not to finish the full end-to-end instruction lifecycle in one module. Stop only at the current module boundary: a real output port of the current module, or a point where no further same-module child continuation is supported by the evidence.
@@ -84,8 +84,8 @@ Diagram rules:
 - Describe only the instruction-relevant main path in the current module.
 - Every lifecycle step must name the concrete register, latch, valid bit, state field, handshake, or gating condition that it reads, updates, or depends on.
 - Summarize child functionality from the parent view. Do not invent child-internal detail if the parent-level evidence is sufficient.
-- If `Continuation State.upstream_context.source_instance/source_module` is present, preserve that provenance in the current-module narrative. Do not relabel a known source as `external`.
-- `boundary_handoffs` must contain only real outputs of the current module. Child-local internal signals belong in `instruction_state` or `unknown`, not as current-module exits.
+- If `Continuation State.continuation_source` is present, preserve that provenance in the current-module narrative. Do not relabel a known source as `external`.
+- `boundary_handoffs` must contain only real outputs of the current module. Child-local internal signals belong in `unknown`, not as current-module exits.
 - End the current module description at the last instruction-relevant state action in this module. If the next step is outside this module, emit `boundary_handoffs` and stop.
 
 Output rules:
@@ -93,13 +93,12 @@ Output rules:
 2. The JSON must include at least:
    - `module`
    - `instance`
-   - `entry_ports`
    - `boundary_handoffs`
    - `lifecycle_context`
-   - `instruction_state`
    - `confidence` (`high|medium|low`)
    - `unknown`
-3. `instruction_state` should be structured enough for downstream rendering. Prefer either a concise list of lifecycle steps or a compact textual summary with explicit state/update semantics.
+3. `lifecycle_context` must be one concise string that summarizes only the current module's own behavior for this instruction.
+4. Do not return structured objects or arrays under `lifecycle_context`, and do not encode descendant/direct-child history inside it.
 """
 
 PASS3_3_2_ORCHESTRATE_PROMPT = """
@@ -121,14 +120,17 @@ PASS3_3_2_ORCHESTRATE_PROMPT = """
 
 ## Required Output
 - Return one `json` code block only.
-- The JSON must contain at least `module`, `instance`, `entry_ports`, `boundary_handoffs`, `lifecycle_context`, and `instruction_state`.
-- Map `module_preview` plus the embedded current-module topology evidence into register/state-update semantics that Python can render later.
+- The JSON must contain at least `module`, `instance`, `boundary_handoffs`, and `lifecycle_context`.
+- Map `module_preview` plus the embedded current-module topology evidence into concise current-module behavior semantics that Python can render later.
 - Prefer explicit state-update wording over pipeline-stage summaries.
-- Start from the current continuation entry of this module. If `Continuation State.upstream_context.entry_ports` exists, use it first; otherwise use `Continuation State.upstream_handoff` only as a weak fallback hint.
-- If `Continuation State.upstream_context.entry_ports` is empty but `Continuation State.upstream_context.source_instance/source_module` plus `resolved_handoffs` exist, treat that parent-bridge context as the authoritative continuation entry for this round.
+- `lifecycle_context` must be a single string describing the current module's own instruction-relevant behavior. Do not emit arrays/objects there, and do not turn child history into sibling items.
+- Start from the current continuation entry of this module. If `Continuation State.boundary_takeover` is non-empty, use it as the only authoritative entry contract.
+- `boundary_takeover` is Python-owned continuation input state. Read it from `Continuation State`; do not emit it in the output JSON.
+- Treat `Continuation State.lifecycle_context` as Python-maintained direct-child visit history for the current module. Use it only as high-level upstream behavior context, not as a schema you need to reproduce.
+- If `Continuation State.boundary_takeover` is empty but `Continuation State.continuation_source` is present, treat that as an empty-takeover parent bridge. Preserve the source provenance, but do not invent ingress ports.
 - If the latest child result points to another same-module direct child, including via `next_children` or sibling-child handoffs, continue into that child instead of stopping at the interconnect.
-- `entry_ports` must list only the instruction-relevant inputs that actually continue the current trace through this module. Prefer exact ports named in `Continuation State.upstream_context.entry_ports` when provided.
-- When upstream provenance is known, preserve it in `entry_ports` / step descriptions instead of replacing it with vague `external` wording.
+- `Continuation State.boundary_takeover` is a Python-generated projection of the previous module handoff onto this module's real ingress boundary. Do not regenerate it, rename it, or guess extra takeover items in the output JSON.
+- When upstream provenance is known, preserve it in step descriptions instead of replacing it with vague `external` wording.
 - Every `boundary_handoffs` item must represent exactly one real current-module output port, not a child port or internal wire. Include `source_block`, `source_state`, `egress_port`, `value_kind`, `semantic`, and `behavior`, and describe the output from the current module's view.
 - Do not guess target modules or target ports in `boundary_handoffs`; Python resolves destinations after generation.
 - If the trace ends here, return an empty `boundary_handoffs` array and explain closure in `unknown`.
