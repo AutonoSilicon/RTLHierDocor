@@ -8,7 +8,7 @@ navigate.
 import json
 import re
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .prompts import (
     PASS3_3_2_ORCHESTRATE_SYSTEM,
@@ -294,6 +294,21 @@ class Pass3InStrackStages:
             return value_condition
         return self._coerce_text_field(item.get("behavior"))
 
+    def _normalize_public_boundary_takeover(self, raw: Any) -> Dict[str, str]:
+        item = raw if isinstance(raw, dict) else {}
+        return {
+            "input_port": str(item.get("input_port") or "").strip(),
+            "value_condition": self._coerce_text_field(item.get("value_condition")),
+            "behavior": self._coerce_text_field(item.get("behavior")),
+        }
+
+    def _boundary_takeover_display_text(self, raw: Any) -> str:
+        item = raw if isinstance(raw, dict) else {}
+        value_condition = self._coerce_text_field(item.get("value_condition"))
+        if value_condition:
+            return value_condition
+        return self._coerce_text_field(item.get("behavior"))
+
     def _get_resolved_boundary_handoffs(self, payload: Any) -> List[Dict[str, Any]]:
         if not isinstance(payload, dict):
             return []
@@ -508,7 +523,7 @@ class Pass3InStrackStages:
                 },
             )
 
-            # Record newly generated on-demand child orchestrations triggered by forkSubAgent.
+            # Record newly generated on-demand child orchestrations triggered by drawChild requests.
             new_child_paths = sorted(path for path in orchestrate_cache.keys() if path not in cache_before_parent)
             for child_path in new_child_paths:
                 if child_path in recorded_paths:
@@ -878,29 +893,15 @@ class Pass3InStrackStages:
         for raw in boundary_takeover:
             if not isinstance(raw, dict):
                 continue
-            ingress_port = str(raw.get("ingress_port") or raw.get("port") or "").strip()
-            if not ingress_port:
+            item = self._normalize_public_boundary_takeover(raw)
+            input_port = str(item.get("input_port") or "").strip()
+            if not input_port:
                 continue
-            taken_from_raw = raw.get("taken_from")
-            taken_from = taken_from_raw if isinstance(taken_from_raw, dict) else {}
-            item = {
-                "ingress_port": ingress_port,
-                "value_kind": str(raw.get("value_kind") or "other").strip() or "other",
-                "semantic": self._coerce_text_field(raw.get("semantic")),
-                "taken_from": {
-                    "source_instance": str(taken_from.get("source_instance") or "").strip(),
-                    "source_module": str(taken_from.get("source_module") or "").strip(),
-                    "source_instance_path": str(taken_from.get("source_instance_path") or "").strip(),
-                    "source_port": str(taken_from.get("source_port") or "").strip(),
-                    "source_handoff_id": str(taken_from.get("source_handoff_id") or "").strip(),
-                    "parent_wire": str(taken_from.get("parent_wire") or "").strip(),
-                },
-            }
             key = "|".join(
                 [
-                    self._normalize_signal_name(item["ingress_port"]),
-                    str(item["taken_from"].get("source_handoff_id") or "").strip(),
-                    str(item["taken_from"].get("parent_wire") or "").strip(),
+                    self._normalize_signal_name(input_port),
+                    str(item.get("value_condition") or "").strip(),
+                    str(item.get("behavior") or "").strip(),
                 ]
             )
             if key in seen:
@@ -936,12 +937,8 @@ class Pass3InStrackStages:
         handoffs: List[Dict[str, Any]],
         source_child_node: Optional[Any] = None,
     ) -> List[Dict[str, Any]]:
+        del source_child_node
         bundles: Dict[str, Dict[str, Any]] = {}
-        default_source_instance = str(getattr(source_child_node, "instance_name", "") or "").strip()
-        default_source_module = str(getattr(source_child_node, "module_name", "") or "").strip()
-        default_source_path = (
-            source_child_node.get_path() if source_child_node is not None and hasattr(source_child_node, "get_path") else default_source_instance
-        )
 
         for item in handoffs or []:
             if not isinstance(item, dict):
@@ -949,15 +946,8 @@ class Pass3InStrackStages:
             output_port = str(item.get("output_port") or "").strip()
             if not output_port:
                 continue
-            source_instance = str(item.get("source_instance") or default_source_instance).strip()
-            source_module = str(item.get("source_module") or default_source_module).strip()
-            source_instance_path = str(item.get("source_instance_path") or default_source_path or "").strip()
-            source_handoff_id = str(item.get("handoff_id") or "").strip()
-            if not source_handoff_id and source_instance_path:
-                source_handoff_id = f"{source_instance_path}::{output_port}"
-            semantic = self._boundary_handoff_display_text(item)
-            value_kind = "other"
-            fallback_parent_wire = str(item.get("parent_wire") or "").strip()
+            value_condition = self._boundary_handoff_display_text(item)
+            behavior = self._coerce_text_field(item.get("behavior"))
 
             for resolution in list(item.get("resolutions") or []):
                 if not isinstance(resolution, dict):
@@ -979,23 +969,15 @@ class Pass3InStrackStages:
                     }
                     bundles[bundle_key] = bundle
                 takeover_item = {
-                    "ingress_port": ingress_port,
-                    "value_kind": value_kind,
-                    "semantic": semantic,
-                    "taken_from": {
-                        "source_instance": source_instance,
-                        "source_module": source_module,
-                        "source_instance_path": source_instance_path,
-                        "source_port": output_port,
-                        "source_handoff_id": source_handoff_id,
-                        "parent_wire": str(resolution.get("parent_wire") or fallback_parent_wire).strip(),
-                    },
+                    "input_port": ingress_port,
+                    "value_condition": value_condition,
+                    "behavior": behavior,
                 }
                 dedupe_key = "|".join(
                     [
                         self._normalize_signal_name(ingress_port),
-                        str(takeover_item["taken_from"].get("source_handoff_id") or "").strip(),
-                        str(takeover_item["taken_from"].get("parent_wire") or "").strip(),
+                        str(takeover_item.get("value_condition") or "").strip(),
+                        str(takeover_item.get("behavior") or "").strip(),
                     ]
                 )
                 seen_takeovers = bundle.setdefault("_seen_takeovers", set())
@@ -1035,6 +1017,39 @@ class Pass3InStrackStages:
             if target_module and target_module == str(target_child_node.module_name or "").strip():
                 return list(bundle.get("boundary_takeover") or [])[:8]
         return []
+
+    def _prepare_child_continuation_inputs(
+        self,
+        *,
+        parent_node: Any,
+        source_child_node: Optional[Any],
+        target_child_node: Any,
+        handoffs: List[Dict[str, Any]],
+        bridge_context: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, str], str]:
+        child_boundary_takeover: List[Dict[str, Any]] = []
+        child_continuation_source: Dict[str, str] = {}
+        warning = ""
+        if source_child_node is None:
+            return child_boundary_takeover, child_continuation_source, warning
+
+        child_boundary_takeover = self._build_boundary_takeover(
+            parent_node=parent_node,
+            source_child_node=source_child_node,
+            target_child_node=target_child_node,
+            handoffs=handoffs,
+        )
+        child_continuation_source = self._build_continuation_source(
+            source_child_node,
+            bridge_context,
+        )
+        if not child_boundary_takeover:
+            warning = (
+                "No Python-validated boundary_takeover exists for "
+                f"{target_child_node.instance_name}({target_child_node.module_name}) in the current continuation; "
+                "proceeding with empty takeover bridge."
+            )
+        return child_boundary_takeover, child_continuation_source, warning
 
     def _build_bridge_context(
         self,
@@ -1349,6 +1364,19 @@ class Pass3InStrackStages:
         return f"```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```"
 
     @staticmethod
+    def _rewrite_orchestrate_draw_child_tool_text(tool_text: str) -> str:
+        text = str(tool_text or "")
+        if not text:
+            return text
+        if "Error: cannot fork the current module back into itself." in text:
+            return (
+                "Error: cannot draw the current module into itself. "
+                "Use the current-module evidence already embedded in the prompt to verify same-module facts, "
+                "and use drawChild only for direct children."
+            )
+        return text.replace("forkSubAgent", "drawChild")
+
+    @staticmethod
     def _sanitize_mermaid_label(text: Any, max_chars: int = 120) -> str:
         raw = " ".join(str(text or "").split())
         raw = raw.replace('"', "'").replace("<", "(").replace(">", ")")
@@ -1369,8 +1397,10 @@ class Pass3InStrackStages:
         prev_id = None
 
         for idx, takeover in enumerate(boundary_takeover[:4], start=1):
-            port = self._sanitize_mermaid_label(takeover.get("ingress_port") or f"entry_{idx}")
-            semantic = self._sanitize_mermaid_label(takeover.get("semantic") or "")
+            port = self._sanitize_mermaid_label(takeover.get("input_port") or f"entry_{idx}")
+            semantic = self._sanitize_mermaid_label(
+                takeover.get("value_condition") or takeover.get("behavior") or ""
+            )
             node_id = f"E{idx}"
             label = f"ENTRY {port}"
             if semantic:
@@ -1465,7 +1495,7 @@ class Pass3InStrackStages:
                 topology = self.g._build_topology_block(str(scoped_node.module_name))
                 return f"[readSource] module={scoped_node.module_name}\n\n{topology}"
 
-            if tool_name == "forkSubAgent":
+            if tool_name in {"drawChild", "forkSubAgent"}:
                 module = str(args.get("module") or "").strip()
                 child_task = str(args.get("task") or "").strip()
                 async def _run_child_orchestration(child_node: Any, resolved_task: str) -> Dict[str, Any]:
@@ -1480,26 +1510,17 @@ class Pass3InStrackStages:
                     raw_handoffs = list(active_continuation.get("handoffs") or [])
                     active_source_node = active_continuation.get("source_child_node")
                     active_bridge_context = dict(active_continuation.get("bridge_context") or {})
-                    child_boundary_takeover: List[Dict[str, Any]] = []
-                    child_continuation_source: Dict[str, Any] = {}
-                    if active_source_node is not None:
-                        child_boundary_takeover = self._build_boundary_takeover(
+                    child_boundary_takeover, child_continuation_source, takeover_warning = (
+                        self._prepare_child_continuation_inputs(
                             parent_node=node,
                             source_child_node=active_source_node,
                             target_child_node=child_node,
                             handoffs=raw_handoffs,
+                            bridge_context=active_bridge_context,
                         )
-                        if not child_boundary_takeover:
-                            return {
-                                "tool_result": (
-                                    "Error: no Python-validated boundary_takeover exists for "
-                                    f"{child_node.instance_name}({child_node.module_name}) in the current continuation."
-                                ),
-                            }
-                        child_continuation_source = self._build_continuation_source(
-                            active_source_node,
-                            active_bridge_context,
-                        )
+                    )
+                    if takeover_warning:
+                        print(f"[WARN] {takeover_warning}")
                     if cached_child is None:
                         cached_child = await self._run_orchestrate_agent_for_node(
                             top_node=top_node,
@@ -1572,7 +1593,7 @@ class Pass3InStrackStages:
                         ),
                     }
 
-                return await self.g._dispatch_direct_child_fork_subagent(
+                tool_result = await self.g._dispatch_direct_child_fork_subagent(
                     scope_node=node,
                     module_selector=module,
                     child_task=child_task,
@@ -1584,6 +1605,7 @@ class Pass3InStrackStages:
                     require_task=False,
                     runner=_run_child_orchestration,
                 )
+                return self._rewrite_orchestrate_draw_child_tool_text(tool_result)
 
             return f"Error: unknown tool '{tool_name}'"
 

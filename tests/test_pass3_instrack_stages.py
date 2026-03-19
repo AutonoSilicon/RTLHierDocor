@@ -184,11 +184,8 @@ flowchart LR
   ],
   "boundary_handoffs": [
     {
-      "source_block": "PROC_11",
-      "source_state": "ctrl_id_pipedown_inst1_vld",
-      "egress_port": "id_out",
-      "value_kind": "instruction_valid",
-      "semantic": "decoded slot valid",
+      "output_port": "id_out",
+      "value_condition": "id_out = ctrl_id_pipedown_inst1_vld",
       "behavior": "assert on pipedown"
     }
   ],
@@ -210,16 +207,9 @@ flowchart LR
     assert "entry_ports" not in payload
     assert payload["boundary_handoffs"] == [
         {
-            "source_block": "PROC_11",
-            "source_state": "ctrl_id_pipedown_inst1_vld",
-            "egress_port": "id_out",
-            "value_kind": "instruction_valid",
-            "semantic": "decoded slot valid",
+            "output_port": "id_out",
+            "value_condition": "id_out = ctrl_id_pipedown_inst1_vld",
             "behavior": "assert on pipedown",
-            "resolutions": [],
-            "status": "",
-            "confidence": "high",
-            "unknown": "",
         }
     ]
 
@@ -228,10 +218,10 @@ def test_resolve_boundary_handoff_destinations_enriches_resolution_status_and_id
     stages = make_stages()
     parent, source, _, _ = make_parent_tree()
     handoffs = [
-        {"egress_port": "out1", "semantic": "to decode", "unknown": ""},
-        {"egress_port": "out2", "semantic": "leave parent", "unknown": ""},
-        {"egress_port": "bad", "semantic": "wrong direction", "unknown": ""},
-        {"egress_port": "dangling", "semantic": "no consumer", "unknown": ""},
+        {"output_port": "out1", "behavior": "to decode", "unknown": ""},
+        {"output_port": "out2", "behavior": "leave parent", "unknown": ""},
+        {"output_port": "bad", "behavior": "wrong direction", "unknown": ""},
+        {"output_port": "dangling", "behavior": "no consumer", "unknown": ""},
     ]
 
     enriched = stages._resolve_boundary_handoff_destinations(parent, source, handoffs)
@@ -286,10 +276,9 @@ def test_build_boundary_takeover_only_keeps_exact_child_matches():
     parent, source, dst0, _ = make_parent_tree()
     handoffs = [
         {
-            "egress_port": "out1",
+            "output_port": "out1",
             "parent_wire": "shared_wire",
-            "semantic": "to decode",
-            "value_kind": "instruction_valid",
+            "behavior": "to decode",
             "source_instance": "x_src",
             "source_module": "src_mod",
             "resolutions": [
@@ -310,7 +299,7 @@ def test_build_boundary_takeover_only_keeps_exact_child_matches():
             ],
         },
         {
-            "egress_port": "dangling",
+            "output_port": "dangling",
             "status": "unresolved",
             "resolutions": [],
         },
@@ -325,28 +314,95 @@ def test_build_boundary_takeover_only_keeps_exact_child_matches():
 
     assert takeover == [
         {
-            "ingress_port": "in_a",
-            "value_kind": "instruction_valid",
-            "semantic": "to decode",
-            "taken_from": {
-                "source_instance": "x_src",
-                "source_module": "src_mod",
-                "source_instance_path": "top/x_src",
-                "source_port": "out1",
-                "source_handoff_id": "top/x_src::out1",
-                "parent_wire": "shared_wire",
-            },
+            "input_port": "in_a",
+            "value_condition": "to decode",
+            "behavior": "to decode",
         }
     ]
+
+
+def test_prepare_child_continuation_inputs_warns_and_keeps_source_when_takeover_missing():
+    stages = make_stages()
+    parent, source, _, dst1 = make_parent_tree()
+
+    takeover, continuation_source, warning = stages._prepare_child_continuation_inputs(
+        parent_node=parent,
+        source_child_node=source,
+        target_child_node=dst1,
+        handoffs=[
+            {
+                "output_port": "out2",
+                "parent_wire": "top_out",
+                "behavior": "leave parent",
+                "resolutions": [
+                    {
+                        "resolution_kind": "exit_parent",
+                        "parent_wire": "top_out",
+                        "parent_port": "top_out",
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert takeover == []
+    assert continuation_source == {
+        "source_instance": "x_src",
+        "source_module": "src_mod",
+        "source_instance_path": "top/x_src",
+    }
+    assert "No Python-validated boundary_takeover exists" in warning
+    assert "x_dst1(dst_mod)" in warning
+
+
+def test_prepare_child_continuation_inputs_returns_takeover_without_warning():
+    stages = make_stages()
+    parent, source, dst0, _ = make_parent_tree()
+
+    takeover, continuation_source, warning = stages._prepare_child_continuation_inputs(
+        parent_node=parent,
+        source_child_node=source,
+        target_child_node=dst0,
+        handoffs=[
+            {
+                "output_port": "out1",
+                "parent_wire": "shared_wire",
+                "behavior": "to decode",
+                "resolutions": [
+                    {
+                        "resolution_kind": "sibling_child",
+                        "parent_wire": "shared_wire",
+                        "target_instance": "x_dst0",
+                        "target_module": "dst_mod",
+                        "target_port": "in_a",
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert takeover == [
+        {
+            "input_port": "in_a",
+            "value_condition": "to decode",
+            "behavior": "to decode",
+        }
+    ]
+    assert continuation_source == {
+        "source_instance": "x_src",
+        "source_module": "src_mod",
+        "source_instance_path": "top/x_src",
+    }
+    assert warning == ""
 
 
 def test_build_bridge_context_collects_candidate_children_and_parent_exits():
     stages = make_stages()
     parent, source, _, _ = make_parent_tree()
     raw_handoffs = [
-        {"egress_port": "out1", "semantic": "to decode", "value_kind": "instruction_valid"},
-        {"egress_port": "out2", "semantic": "leave parent", "value_kind": "instruction_bundle"},
-        {"egress_port": "dangling", "semantic": "stuck", "value_kind": "instruction_valid"},
+        {"output_port": "out1", "behavior": "to decode"},
+        {"output_port": "out2", "behavior": "leave parent"},
+        {"output_port": "dangling", "behavior": "stuck"},
     ]
     resolved_handoffs = stages._resolve_boundary_handoff_destinations(parent, source, raw_handoffs)
 
@@ -369,17 +425,9 @@ def test_build_bridge_context_collects_candidate_children_and_parent_exits():
     ]
     assert context["takeover_bundles"][0]["boundary_takeover"] == [
         {
-            "ingress_port": "in_a",
-            "value_kind": "instruction_valid",
-            "semantic": "to decode",
-            "taken_from": {
-                "source_instance": "x_src",
-                "source_module": "src_mod",
-                "source_instance_path": "top/x_src",
-                "source_port": "out1",
-                "source_handoff_id": "top/x_src::out1",
-                "parent_wire": "shared_wire",
-            },
+            "input_port": "in_a",
+            "value_condition": "to decode",
+            "behavior": "to decode",
         }
     ]
     assert context["exits_parent"] == [
@@ -390,7 +438,7 @@ def test_build_bridge_context_collects_candidate_children_and_parent_exits():
         }
     ]
     assert context["unresolved"] == ["dangling"]
-    assert context["resolved_handoffs"][0]["egress_port"] == "out1"
+    assert context["resolved_handoffs"][0]["output_port"] == "out1"
     assert context["resolved_handoffs"][0]["targets"] == [
         {
             "target_instance": "x_dst0",
@@ -405,7 +453,7 @@ def test_build_bridge_context_collects_candidate_children_and_parent_exits():
             "parent_wire": "shared_wire",
         },
     ]
-    assert context["resolved_handoffs"][1]["egress_port"] == "out2"
+    assert context["resolved_handoffs"][1]["output_port"] == "out2"
     assert context["resolved_handoffs"][1]["status"] == "exit_parent"
 
 
@@ -437,7 +485,7 @@ def test_advance_active_continuation_from_child_promotes_child_outputs():
     initial_state = stages._build_active_continuation(
         parent_node=parent,
         source_child_node=source,
-        handoffs=[{"egress_port": "out1", "semantic": "old source"}],
+        handoffs=[{"output_port": "out1", "behavior": "old source"}],
         source_payload={"lifecycle_context": "old"},
     )
     assert initial_state["bridge_context"]["source_instance"] == "x_src"
@@ -452,8 +500,8 @@ def test_advance_active_continuation_from_child_promotes_child_outputs():
         parent,
         mid,
         [
-            {"egress_port": "out1", "semantic": "to next child", "value_kind": "instruction_valid"},
-            {"egress_port": "out2", "semantic": "leave parent", "value_kind": "instruction_bundle"},
+            {"output_port": "out1", "behavior": "to next child"},
+            {"output_port": "out2", "behavior": "leave parent"},
         ],
     )
     next_state = stages._advance_active_continuation_from_child(
@@ -505,41 +553,28 @@ def test_enrich_orchestration_payload_injects_python_boundary_takeover():
     stages = make_stages()
     _, source, _, _ = make_parent_tree()
     payload = {
-        "boundary_handoffs": [{"egress_port": "out1", "semantic": "to decode"}],
+        "boundary_handoffs": [{"output_port": "out1", "behavior": "to decode"}],
     }
     boundary_takeover = [
         {
-            "ingress_port": "in_a",
-            "value_kind": "instruction_valid",
-            "semantic": "from parent context",
-            "taken_from": {
-                "source_instance": "x_src",
-                "source_module": "src_mod",
-                "source_instance_path": "top/x_src",
-                "source_port": "out1",
-                "source_handoff_id": "top/x_src::out1",
-                "parent_wire": "shared_wire",
-            },
+            "input_port": "in_a",
+            "value_condition": "from parent context",
+            "behavior": "accept primary entry",
         },
         {
-            "ingress_port": "in_b",
-            "value_kind": "instruction_valid",
-            "semantic": "second entry",
-            "taken_from": {
-                "source_instance": "x_src",
-                "source_module": "src_mod",
-                "source_instance_path": "top/x_src",
-                "source_port": "out1",
-                "source_handoff_id": "top/x_src::out1",
-                "parent_wire": "shared_wire",
-            },
+            "input_port": "in_b",
+            "value_condition": "second entry",
+            "behavior": "accept alternate entry",
         },
     ]
 
     enriched = stages._enrich_orchestration_payload(source, payload, boundary_takeover)
 
     assert enriched["boundary_takeover"] == boundary_takeover
-    assert enriched["boundary_handoffs"][0]["status"] == "resolved"
+    assert enriched["boundary_handoffs"] == [
+        {"output_port": "out1", "value_condition": "", "behavior": "to decode"}
+    ]
+    assert enriched["_boundary_handoff_routes"][0]["status"] == "resolved"
 
 
 def test_enrich_orchestration_payload_marks_invalid_duplicate_and_unknown_boundary_handoffs():
@@ -547,23 +582,26 @@ def test_enrich_orchestration_payload_marks_invalid_duplicate_and_unknown_bounda
     _, source, _, _ = make_parent_tree()
     payload = {
         "boundary_handoffs": [
-            {"egress_port": "out1", "semantic": "primary handoff"},
-            {"egress_port": "out1", "semantic": "duplicate handoff"},
-            {"egress_port": "bad", "semantic": "input should be rejected"},
-            {"egress_port": "ghost", "semantic": "unknown port should be rejected"},
+            {"output_port": "out1", "behavior": "primary handoff"},
+            {"output_port": "out1", "behavior": "duplicate handoff"},
+            {"output_port": "bad", "behavior": "input should be rejected"},
+            {"output_port": "ghost", "behavior": "unknown port should be rejected"},
         ],
     }
 
     enriched = stages._enrich_orchestration_payload(source, payload, boundary_takeover=None)
 
-    assert [item["egress_port"] for item in enriched["boundary_handoffs"]] == ["out1", "out1", "bad", "ghost"]
-    assert enriched["boundary_handoffs"][0]["status"] == "resolved"
-    assert enriched["boundary_handoffs"][1]["status"] == "invalid"
-    assert "duplicate boundary_handoff" in enriched["boundary_handoffs"][1]["unknown"]
-    assert enriched["boundary_handoffs"][2]["status"] == "invalid"
-    assert "is not an output port" in enriched["boundary_handoffs"][2]["unknown"]
-    assert enriched["boundary_handoffs"][3]["status"] == "invalid"
-    assert "is not a declared port" in enriched["boundary_handoffs"][3]["unknown"]
+    assert enriched["boundary_handoffs"] == [
+        {"output_port": "out1", "value_condition": "", "behavior": "primary handoff"}
+    ]
+    routes = enriched["_boundary_handoff_routes"]
+    assert routes[0]["status"] == "resolved"
+    assert routes[1]["status"] == "invalid"
+    assert "duplicate boundary_handoff" in routes[1]["unknown"]
+    assert routes[2]["status"] == "invalid"
+    assert "is not an output port" in routes[2]["unknown"]
+    assert routes[3]["status"] == "invalid"
+    assert "is not a declared port" in routes[3]["unknown"]
 
 
 def test_enrich_orchestration_payload_validates_top_module_boundary_ports_without_parent_resolution():
@@ -571,20 +609,23 @@ def test_enrich_orchestration_payload_validates_top_module_boundary_ports_withou
     top = FakeNode("parent_mod", "top")
     payload = {
         "boundary_handoffs": [
-            {"egress_port": "top_out", "semantic": "legal top output"},
-            {"egress_port": "top_in", "semantic": "input should be rejected"},
-            {"egress_port": "ghost", "semantic": "unknown top port"},
+            {"output_port": "top_out", "behavior": "legal top output"},
+            {"output_port": "top_in", "behavior": "input should be rejected"},
+            {"output_port": "ghost", "behavior": "unknown top port"},
         ],
     }
 
     enriched = stages._enrich_orchestration_payload(top, payload, boundary_takeover=None)
 
-    assert enriched["boundary_handoffs"][0]["egress_port"] == "top_out"
-    assert enriched["boundary_handoffs"][0].get("status", "") != "invalid"
-    assert enriched["boundary_handoffs"][1]["status"] == "invalid"
-    assert "is not an output port" in enriched["boundary_handoffs"][1]["unknown"]
-    assert enriched["boundary_handoffs"][2]["status"] == "invalid"
-    assert "is not a declared port" in enriched["boundary_handoffs"][2]["unknown"]
+    assert enriched["boundary_handoffs"] == [
+        {"output_port": "top_out", "value_condition": "", "behavior": "legal top output"}
+    ]
+    routes = enriched["_boundary_handoff_routes"]
+    assert routes[0].get("status", "") != "invalid"
+    assert routes[1]["status"] == "invalid"
+    assert "is not an output port" in routes[1]["unknown"]
+    assert routes[2]["status"] == "invalid"
+    assert "is not a declared port" in routes[2]["unknown"]
 
 
 def test_build_fork_subagent_tool_result_returns_structured_boundary_summary_only():
@@ -595,8 +636,8 @@ def test_build_fork_subagent_tool_result_returns_structured_boundary_summary_onl
         "path": "top/x_dst0",
         "raw_orchestration_output": "```mermaid\nflowchart LR\nA-->B\n```",
         "orchestration": {
-            "boundary_takeover": [{"ingress_port": "in_a"}],
-            "boundary_handoffs": [{"egress_port": "out1"}],
+            "boundary_takeover": [{"input_port": "in_a"}],
+            "boundary_handoffs": [{"output_port": "out1"}],
             "lifecycle_context": "ctx",
             "confidence": "medium",
             "unknown": "",
@@ -614,7 +655,7 @@ def test_build_fork_subagent_tool_result_returns_structured_boundary_summary_onl
             "instance": "x_dst0",
             "path": "top/x_dst0",
         },
-        "boundary_handoffs": [{"egress_port": "out1"}],
+        "boundary_handoffs": [{"output_port": "out1"}],
         "next_children": [],
         "confidence": "medium",
         "unknown": "",
@@ -631,17 +672,17 @@ def test_build_fork_subagent_tool_result_surfaces_next_children_and_compacts_lar
         "path": "top/x_dst0",
         "orchestration": {
             "boundary_takeover": [
-                {"ingress_port": "in0", "semantic": "slot0"},
-                {"ingress_port": "in1", "semantic": "slot1"},
-                {"ingress_port": "in2", "semantic": "slot2"},
-                {"ingress_port": "in3", "semantic": "slot3"},
-                {"ingress_port": "in4", "semantic": "slot4"},
+                {"input_port": "in0", "value_condition": "slot0", "behavior": "slot0"},
+                {"input_port": "in1", "value_condition": "slot1", "behavior": "slot1"},
+                {"input_port": "in2", "value_condition": "slot2", "behavior": "slot2"},
+                {"input_port": "in3", "value_condition": "slot3", "behavior": "slot3"},
+                {"input_port": "in4", "value_condition": "slot4", "behavior": "slot4"},
             ],
             "boundary_handoffs": [
                 {
-                    "egress_port": "out1",
-                    "semantic": "issue payload to RF stage",
+                    "output_port": "out1",
                     "status": "resolved",
+                    "value_condition": "out1 = issue_payload",
                     "behavior": " ".join(["payload"] * 60),
                     "resolutions": [
                         {
@@ -732,6 +773,21 @@ def test_build_fork_subagent_tool_result_surfaces_next_children_and_compacts_lar
     assert payload["unknown"][-1] == "+1 more unknowns"
 
 
+def test_rewrite_orchestrate_draw_child_tool_text_rebrands_generic_fork_errors():
+    stages = make_stages()
+
+    rewritten = stages._rewrite_orchestrate_draw_child_tool_text(
+        "Error: cannot fork the current module back into itself. "
+        "Use the current-module evidence already in context (or readSource on the current module) "
+        "to verify same-module facts, and use forkSubAgent only for direct children."
+    )
+
+    assert "cannot draw the current module into itself" in rewritten
+    assert "drawChild only for direct children" in rewritten
+    assert "forkSubAgent" not in rewritten
+    assert "readSource" not in rewritten
+
+
 def test_build_active_continuation_keeps_bridge_context_internal_and_takeover_explicit():
     stages = make_stages()
     parent, source, dst0, _ = make_parent_tree()
@@ -741,7 +797,7 @@ def test_build_active_continuation_keeps_bridge_context_internal_and_takeover_ex
         target_child_node=dst0,
         handoffs=[
             {
-                "egress_port": "out1",
+                "output_port": "out1",
                 "parent_wire": "shared_wire",
                 "resolutions": [
                     {
@@ -759,7 +815,7 @@ def test_build_active_continuation_keeps_bridge_context_internal_and_takeover_ex
         source_child_node=source,
         handoffs=[
             {
-                "egress_port": "out1",
+                "output_port": "out1",
                 "parent_wire": "shared_wire",
                 "resolutions": [
                     {
@@ -812,19 +868,12 @@ def test_render_orchestration_item_mermaid_uses_boundary_takeover_entries():
         "orchestration": {
             "boundary_takeover": [
                 {
-                    "ingress_port": "in_a",
-                    "semantic": "decoded slot valid",
-                    "taken_from": {
-                        "source_instance": "x_src",
-                        "source_module": "src_mod",
-                        "source_instance_path": "top/x_src",
-                        "source_port": "out1",
-                        "source_handoff_id": "top/x_src::out1",
-                        "parent_wire": "shared_wire",
-                    },
+                    "input_port": "in_a",
+                    "value_condition": "decoded slot valid",
+                    "behavior": "accept decoded slot",
                 }
             ],
-            "boundary_handoffs": [{"egress_port": "out1", "semantic": "handoff to next stage"}],
+            "boundary_handoffs": [{"output_port": "out1", "behavior": "handoff to next stage"}],
             "lifecycle_context": "consume the decoded slot and prepare the next stage handoff",
         },
     }
