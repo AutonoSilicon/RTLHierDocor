@@ -311,28 +311,32 @@ def cmd_docor(args):
     }
     llm = get_llm_backend(llm_config)
 
-    # Optional dedicated model for Pass3.3 draw
-    instrack_draw_llm = None
-    instrack_draw_enabled = any([
-        cfg.instrack_draw_model,
-        cfg.instrack_draw_thinking is not None,
+    # Optional dedicated model for Pass3.3 orchestrate
+    instrack_orchestrate_llm = None
+    instrack_orchestrate_enabled = any([
+        cfg.instrack_orchestrate_model,
+        cfg.instrack_orchestrate_thinking is not None,
     ])
-    if instrack_draw_enabled:
-        instrack_draw_model = cfg.instrack_draw_model if cfg.instrack_draw_model else cfg.agent_model
-        instrack_draw_thinking = (
-            cfg.instrack_draw_thinking if cfg.instrack_draw_thinking is not None else cfg.agent_thinking
+    if instrack_orchestrate_enabled:
+        instrack_orchestrate_model = (
+            cfg.instrack_orchestrate_model if cfg.instrack_orchestrate_model else cfg.agent_model
         )
-        instrack_draw_llm_config = {
+        instrack_orchestrate_thinking = (
+            cfg.instrack_orchestrate_thinking
+            if cfg.instrack_orchestrate_thinking is not None
+            else cfg.agent_thinking
+        )
+        instrack_orchestrate_llm_config = {
             "backend": cfg.agent_backend,
-            "model": instrack_draw_model,
+            "model": instrack_orchestrate_model,
             "api_key": cfg.agent_api_key,
             "base_url": cfg.agent_base_url,
-            "thinking": instrack_draw_thinking,
+            "thinking": instrack_orchestrate_thinking,
         }
-        instrack_draw_llm = get_llm_backend(instrack_draw_llm_config)
+        instrack_orchestrate_llm = get_llm_backend(instrack_orchestrate_llm_config)
         if cfg.verbose:
-            print(f"[config] instrack draw model:    {instrack_draw_model}")
-            print(f"[config] instrack draw thinking: {instrack_draw_thinking}")
+            print(f"[config] instrack orchestrate model:    {instrack_orchestrate_model}")
+            print(f"[config] instrack orchestrate thinking: {instrack_orchestrate_thinking}")
 
     # Optional dedicated endpoint for Pass2 incremental composer
     composer_llm = None
@@ -375,7 +379,7 @@ def cmd_docor(args):
     generator = AgentDocGenerator(
         hierarchy=hierarchy,
         llm=llm,
-        instrack_draw_llm=instrack_draw_llm,
+        instrack_orchestrate_llm=instrack_orchestrate_llm,
         composer_llm=composer_llm,
         resolver=resolver,
         tracker=tracker,

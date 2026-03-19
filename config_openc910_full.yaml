@@ -22,8 +22,8 @@ agent:
   base_url: "https://coding.dashscope.aliyuncs.com/v1"
   api_key: "sk-sp-0b4bfeb434d946bda2d005ac9c85026e"
   thinking: true
-  instrack_draw_model: "glm-5"
-  instrack_draw_thinking: true
+  instrack_orchestrate_model: "glm-5"
+  instrack_orchestrate_thinking: true
 
   composer_model: "glm-5"
   composer_base_url: "https://coding.dashscope.aliyuncs.com/v1"

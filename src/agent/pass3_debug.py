@@ -109,7 +109,7 @@ class Pass3Debug:
                 stage_tag = "pass3.3"
                 if prompt_style == "instrack_search" or pass_name == "pass3_3_1":
                     stage_tag = "pass3.3.1/search"
-                elif prompt_style == "instrack_draw" or pass_name in {"pass3_3_2_draw", "pass3_3_2_orchestrate"}:
+                elif prompt_style == "instrack_orchestrate" or pass_name == "pass3_3_2_orchestrate":
                     stage_tag = "pass3.3.2/orchestrate"
                 elif pass_name == "pass3_3_3_render":
                     stage_tag = "pass3.3.3/render"
@@ -134,7 +134,7 @@ class Pass3Debug:
                         f"{indent}{'return':<8}L{level} {node_inst}({node_mod}) "
                         f"prompt_tokens={prompt_tokens} ctx={context_pct:.1f}%"
                     )
-                elif event == "draw_enter":
+                elif event == "orchestrate_enter":
                     node_inst = str((payload or {}).get("instance") or "?")
                     node_mod = str((payload or {}).get("module") or "?")
                     level = int((payload or {}).get("level") or 0)
@@ -146,7 +146,7 @@ class Pass3Debug:
                         action = "parent"
                     indent = self._instrack_indent(level)
                     print(f"{indent}{action:<8}L{level} {node_inst}({node_mod})")
-                elif event == "draw_return":
+                elif event == "orchestrate_return":
                     node_inst = str((payload or {}).get("instance") or "?")
                     node_mod = str((payload or {}).get("module") or "?")
                     level = int((payload or {}).get("level") or 0)
@@ -198,7 +198,7 @@ class Pass3Debug:
                 with open(trace_331, "a", encoding="utf-8") as f331:
                     f331.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-            is_pass3_3_2 = pass_name in {"pass3_3_2_draw", "pass3_3_2_orchestrate"} or prompt_style == "instrack_draw"
+            is_pass3_3_2 = pass_name == "pass3_3_2_orchestrate" or prompt_style == "instrack_orchestrate"
             if is_pass3_3_2:
                 trace_332 = self.fork_trace_log_path_pass3_3_2()
                 with open(trace_332, "a", encoding="utf-8") as f332:
@@ -259,6 +259,7 @@ class Pass3Debug:
         prompt: str,
         output: str = "",
         error: str = "",
+        prompt_redaction_policy: str = "",
     ):
         """Append explicit agent input/output snapshot for deterministic debugging."""
         try:
@@ -270,13 +271,45 @@ class Pass3Debug:
                     f.write("### System\n")
                     f.write(self._compact_system_snapshot(system or "") + "\n\n")
                     f.write("### Prompt\n")
-                    f.write(self._compact_prompt_snapshot(prompt or "") + "\n")
+                    f.write(
+                        self._compact_prompt_snapshot(
+                            prompt or "",
+                            redaction_policy=prompt_redaction_policy,
+                        )
+                        + "\n"
+                    )
                 else:
                     if error:
                         f.write("### Error\n")
                         f.write(error + "\n\n")
                     f.write("### Output\n")
                     f.write((output or "") + "\n")
+        except Exception:
+            # Debug log failure should not block generation.
+            pass
+
+    def append_instrack_continuation_snapshot(
+        self,
+        log_path: str,
+        *,
+        round_idx: int,
+        child_instance: str,
+        child_module: str,
+        cached: bool,
+        continuation_state_json: str,
+    ):
+        """Append the Python-updated continuation state after one tool round."""
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write("\n\n" + "=" * 80 + "\n")
+                f.write(f"## Updated Continuation State After Tool Round {int(round_idx)}\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(f"- child: {child_instance} ({child_module})\n")
+                f.write(f"- cached: {bool(cached)}\n\n")
+                f.write("```json\n")
+                payload = str(continuation_state_json or "").strip()
+                f.write(payload + "\n")
+                f.write("```\n")
         except Exception:
             # Debug log failure should not block generation.
             pass
@@ -313,7 +346,7 @@ class Pass3Debug:
         )
         return header + "\n\n" + self._truncate_text(text, max_lines=18, max_chars=2200)
 
-    def _compact_prompt_snapshot(self, prompt: str) -> str:
+    def _compact_prompt_snapshot(self, prompt: str, *, redaction_policy: str = "") -> str:
         text = str(prompt or "").strip()
         if not text:
             return ""
@@ -329,7 +362,10 @@ class Pass3Debug:
         for title, body in sections:
             rendered.append("")
             rendered.append(f"## {title}")
-            rendered.append(self._compact_prompt_section(title, body))
+            if self._should_redact_prompt_section(title, redaction_policy):
+                rendered.append(self._render_redacted_prompt_section(body))
+            else:
+                rendered.append(self._compact_prompt_section(title, body))
         return "\n".join(rendered).strip()
 
     @staticmethod
@@ -354,6 +390,28 @@ class Pass3Debug:
             return self._truncate_text(body, max_lines=28, max_chars=2600)
         if title == "Instruction Datasheet":
             return self._truncate_text(body, max_lines=22, max_chars=1800)
-        if title in {"Draw State", "Continuation State"}:
+        if title in {"Orchestrate State", "Continuation State"}:
             return self._truncate_text(body, max_lines=20, max_chars=5200)
         return self._truncate_text(body, max_lines=16, max_chars=1800)
+
+    @staticmethod
+    def _should_redact_prompt_section(title: str, redaction_policy: str) -> bool:
+        policy = str(redaction_policy or "").strip()
+        if policy != "instrack_context":
+            return False
+
+        normalized = str(title or "").strip()
+        if normalized.startswith("Instruction Datasheet"):
+            return True
+        return normalized in {
+            "Current Module Preview",
+            "Current Module Topology",
+            "Direct Child Preview List",
+        }
+
+    def _render_redacted_prompt_section(self, body: str) -> str:
+        text = str(body or "").strip()
+        return (
+            f"[debug-hidden] body_redacted chars={len(text)} "
+            f"lines={len(text.splitlines())} sha256={self._hash_text(text)}"
+        )

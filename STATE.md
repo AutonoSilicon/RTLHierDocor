@@ -72,7 +72,7 @@
 - 当 `boundary_takeover=[]` 时，LLM 只能依赖 `continuation_source` 保留来源，不得虚构 ingress port
 
 2. Active Continuation
-这是 Python 内部维护的“当前 parent session 正在追哪一段”的状态，不直接作为最终产物落盘，但决定后续 `drawChild` 怎么走。
+这是 Python 内部维护的“当前 parent session 正在追哪一段”的状态，不直接作为最终产物落盘，但决定后续 `forkSubAgent` 怎么走。
 
 内部结构：
 
@@ -168,7 +168,7 @@
 - child 返回后，active continuation 会前移到新 source child，并重算 bridge context
 
 3. Child Tool Result
-这是 `drawChild(...)` 返回给 LLM 的中间消息格式。它不是 child 的完整 module trace，而是 parent 继续决策时消费的 continuation digest。
+这是 `forkSubAgent(...)` 返回给 LLM 的中间消息格式。它不是 child 的完整 module trace，而是 parent 继续决策时消费的 continuation digest。
 
 设计目标：
 

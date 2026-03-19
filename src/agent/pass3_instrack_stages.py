@@ -13,8 +13,6 @@ from typing import Any, Dict, List, Optional, Set
 from .prompts import (
     PASS3_3_2_ORCHESTRATE_SYSTEM,
     PASS3_3_2_ORCHESTRATE_PROMPT,
-    PASS3_3_2_DRAW_SYSTEM,
-    PASS3_3_2_DRAW_PROMPT,
 )
 
 
@@ -56,21 +54,6 @@ class Pass3InStrackStages:
             "orchestration_json_hash": self.g._hash_text(orchestration_json_text),
         }
         return self.g._hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-
-    def build_pass3_3_draw_input_hash(
-        self,
-        top_module: str,
-        instruction: str,
-        instruction_datasheet: str,
-        search_result_json_text: str,
-    ) -> str:
-        """Backward-compatible alias for the old draw stage name."""
-        return self.build_pass3_3_orchestrate_input_hash(
-            top_module=top_module,
-            instruction=instruction,
-            instruction_datasheet=instruction_datasheet,
-            search_result_json_text=search_result_json_text,
-        )
 
     def collect_hierarchy_nodes_depth_first(self, top_node: Any) -> List[Any]:
         nodes: List[Any] = []
@@ -294,10 +277,6 @@ class Pass3InStrackStages:
 
         return payload
 
-    def extract_pass3_3_draw_payload(self, content: str, current_node: Any) -> Dict[str, Any]:
-        """Backward-compatible alias for legacy call sites."""
-        return self.extract_pass3_3_orchestrate_payload(content, current_node)
-
     @staticmethod
     def _coerce_text_field(value: Any) -> str:
         if value is None:
@@ -397,13 +376,13 @@ class Pass3InStrackStages:
         # Step 1: orchestrate leaf start module first.
         start_node = path_nodes[-1]
         results: List[Dict[str, Any]] = []
-        draw_cache: Dict[str, Dict[str, Any]] = {}
+        orchestrate_cache: Dict[str, Dict[str, Any]] = {}
 
         self.g._append_fork_trace(
-            "draw_enter",
+            "orchestrate_enter",
             {
                 "pass": "pass3_3_2_orchestrate",
-                "prompt_style": "instrack_draw",
+                "prompt_style": "instrack_orchestrate",
                 "stage_label": "start_module",
                 "instance": start_node.instance_name,
                 "module": start_node.module_name,
@@ -411,19 +390,19 @@ class Pass3InStrackStages:
                 "node_path": start_node.get_path() if hasattr(start_node, "get_path") else start_node.instance_name,
             },
         )
-        start_item = await self._run_draw_agent_for_node(
+        start_item = await self._run_orchestrate_agent_for_node(
             top_node=top_node,
             node=start_node,
             instruction=instruction,
             instruction_datasheet=instruction_datasheet,
             stage_label="start_module",
-            draw_cache=draw_cache,
+            orchestrate_cache=orchestrate_cache,
         )
         self.g._append_fork_trace(
-            "draw_return",
+            "orchestrate_return",
             {
                 "pass": "pass3_3_2_orchestrate",
-                "prompt_style": "instrack_draw",
+                "prompt_style": "instrack_orchestrate",
                 "stage_label": "start_module",
                 "instance": start_node.instance_name,
                 "module": start_node.module_name,
@@ -436,7 +415,7 @@ class Pass3InStrackStages:
         results.append(start_item)
         start_path = start_node.get_path() if hasattr(start_node, "get_path") else start_node.instance_name
         recorded_paths: Set[str] = {start_path}
-        draw_cache[start_path] = start_item
+        orchestrate_cache[start_path] = start_item
         pending_handoffs = list((start_item.get("orchestration") or {}).get("boundary_handoffs") or [])
         pending_payload = dict(start_item.get("orchestration") or {})
 
@@ -445,7 +424,7 @@ class Pass3InStrackStages:
             parent_node = path_nodes[idx]
             source_child_node = path_nodes[idx + 1]
             parent_path = parent_node.get_path() if hasattr(parent_node, "get_path") else parent_node.instance_name
-            cache_before_parent = set(draw_cache.keys())
+            cache_before_parent = set(orchestrate_cache.keys())
             stage_label = "top_module" if parent_node is path_nodes[0] else "parent_module"
             parent_bridge_context = self._build_bridge_context(
                 parent_node=parent_node,
@@ -454,10 +433,10 @@ class Pass3InStrackStages:
                 source_payload=pending_payload,
             )
             self.g._append_fork_trace(
-                "draw_parent_context",
+                "orchestrate_parent_context",
                 {
                     "pass": "pass3_3_2_orchestrate",
-                    "prompt_style": "instrack_draw",
+                    "prompt_style": "instrack_orchestrate",
                     "stage_label": stage_label,
                     "instance": parent_node.instance_name,
                     "module": parent_node.module_name,
@@ -472,10 +451,10 @@ class Pass3InStrackStages:
                 },
             )
             self.g._append_fork_trace(
-                "draw_enter",
+                "orchestrate_enter",
                 {
                     "pass": "pass3_3_2_orchestrate",
-                    "prompt_style": "instrack_draw",
+                    "prompt_style": "instrack_orchestrate",
                     "stage_label": stage_label,
                     "instance": parent_node.instance_name,
                     "module": parent_node.module_name,
@@ -483,13 +462,13 @@ class Pass3InStrackStages:
                     "node_path": parent_path,
                 },
             )
-            parent_item = await self._run_draw_agent_for_node(
+            parent_item = await self._run_orchestrate_agent_for_node(
                 top_node=top_node,
                 node=parent_node,
                 instruction=instruction,
                 instruction_datasheet=instruction_datasheet,
                 stage_label=stage_label,
-                draw_cache=draw_cache,
+                orchestrate_cache=orchestrate_cache,
                 continuation_handoffs_raw=pending_handoffs,
                 source_child_for_handoff=source_child_node,
                 source_payload_for_handoff=pending_payload,
@@ -498,10 +477,10 @@ class Pass3InStrackStages:
                 continuation_source=self._build_continuation_source(source_child_node, parent_bridge_context),
             )
             self.g._append_fork_trace(
-                "draw_return",
+                "orchestrate_return",
                 {
                     "pass": "pass3_3_2_orchestrate",
-                    "prompt_style": "instrack_draw",
+                    "prompt_style": "instrack_orchestrate",
                     "stage_label": stage_label,
                     "instance": parent_node.instance_name,
                     "module": parent_node.module_name,
@@ -512,38 +491,23 @@ class Pass3InStrackStages:
                 },
             )
 
-            # Record newly generated on-demand child draws triggered by drawChild.
-            new_child_paths = sorted(path for path in draw_cache.keys() if path not in cache_before_parent)
+            # Record newly generated on-demand child orchestrations triggered by forkSubAgent.
+            new_child_paths = sorted(path for path in orchestrate_cache.keys() if path not in cache_before_parent)
             for child_path in new_child_paths:
                 if child_path in recorded_paths:
                     continue
-                child_item = draw_cache.get(child_path)
+                child_item = orchestrate_cache.get(child_path)
                 if child_item:
                     results.append(child_item)
                     recorded_paths.add(child_path)
 
             results.append(parent_item)
             recorded_paths.add(parent_path)
-            draw_cache[parent_path] = parent_item
+            orchestrate_cache[parent_path] = parent_item
             pending_handoffs = list((parent_item.get("orchestration") or {}).get("boundary_handoffs") or [])
             pending_payload = dict(parent_item.get("orchestration") or {})
 
         return results
-
-    async def run_pass3_3_2_draw(
-        self,
-        top_node: Any,
-        instruction: str,
-        instruction_datasheet: str,
-        search_result: Dict[str, Any],
-    ) -> List[Dict[str, Any]]:
-        """Backward-compatible alias for the old draw stage name."""
-        return await self.run_pass3_3_2_orchestrate(
-            top_node=top_node,
-            instruction=instruction,
-            instruction_datasheet=instruction_datasheet,
-            search_result=search_result,
-        )
 
     @staticmethod
     def _format_child_selector(child_node: Any) -> str:
@@ -1249,15 +1213,6 @@ class Pass3InStrackStages:
             out["boundary_handoffs"] = boundary_handoffs
         return out
 
-    def _enrich_draw_payload(
-        self,
-        node: Any,
-        payload: Dict[str, Any],
-        boundary_takeover: Optional[List[Dict[str, Any]]],
-    ) -> Dict[str, Any]:
-        """Backward-compatible alias for legacy call sites."""
-        return self._enrich_orchestration_payload(node, payload, boundary_takeover)
-
     def _compact_tool_text(self, value: Any, max_chars: int = 220) -> str:
         text = self._coerce_text_field(value)
         if not text:
@@ -1352,7 +1307,12 @@ class Pass3InStrackStages:
             return lines
         return self._compact_tool_text(unknown, max_chars=220)
 
-    def _build_draw_child_tool_result(self, child_item: Dict[str, Any], child_task: str, cached: bool = False) -> str:
+    def _build_fork_subagent_tool_result(
+        self,
+        child_item: Dict[str, Any],
+        child_task: str,
+        cached: bool = False,
+    ) -> str:
         payload = dict(child_item.get("orchestration") or {})
         boundary_handoffs = list(payload.get("boundary_handoffs") or [])
         result = {
@@ -1424,14 +1384,14 @@ class Pass3InStrackStages:
 
         return "```mermaid\n" + "\n".join(lines) + "\n```\n"
 
-    async def _run_draw_agent_for_node(
+    async def _run_orchestrate_agent_for_node(
         self,
         top_node: Any,
         node: Any,
         instruction: str,
         instruction_datasheet: str,
         stage_label: str,
-        draw_cache: Dict[str, Dict[str, Any]],
+        orchestrate_cache: Dict[str, Dict[str, Any]],
         continuation_handoffs_raw: Optional[List[Dict[str, Any]]] = None,
         source_child_for_handoff: Optional[Any] = None,
         source_payload_for_handoff: Optional[Dict[str, Any]] = None,
@@ -1457,7 +1417,7 @@ class Pass3InStrackStages:
         prompt = PASS3_3_2_ORCHESTRATE_PROMPT.format(
             instruction=instruction,
             instruction_datasheet=instruction_datasheet,
-            draw_state_json=self.g._build_instrack_draw_state_json(
+            orchestrate_state_json=self.g._build_instrack_orchestrate_state_json(
                 current_module=node.module_name,
                 current_instance=node.instance_name,
                 boundary_takeover=list(active_continuation.get("boundary_takeover") or []),
@@ -1469,143 +1429,164 @@ class Pass3InStrackStages:
             child_preview_list=self.build_child_overview(node),
         )
 
+        continuation_round_idx = 0
+
         async def _tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
             nonlocal active_continuation
+            nonlocal continuation_round_idx
             if tool_name == "readSource":
                 module = str(args.get("module") or "").strip()
                 scoped_node, scope_error = self.g._resolve_scope_node(node, module, child_only=False)
                 if scoped_node is None:
                     return (
-                        "Error: instrack draw readSource scope violation. "
+                        "Error: instrack orchestrate readSource scope violation. "
                         "At this level you can read only current module and direct children. "
                         f"Details: {scope_error}"
                     )
                 topology = self.g._build_topology_block(str(scoped_node.module_name))
                 return f"[readSource] module={scoped_node.module_name}\n\n{topology}"
 
-            if tool_name == "drawChild":
+            if tool_name == "forkSubAgent":
                 module = str(args.get("module") or "").strip()
                 child_task = str(args.get("task") or "").strip()
-                child_node, error = self.g._resolve_scope_node(node, module, child_only=True)
-                if child_node is None:
-                    return error
-                child_path = child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
-                cached_child = draw_cache.get(child_path)
-                cache_hit = cached_child is not None
-                raw_handoffs = list(active_continuation.get("handoffs") or [])
-                active_source_node = active_continuation.get("source_child_node")
-                active_bridge_context = dict(active_continuation.get("bridge_context") or {})
-                child_boundary_takeover: List[Dict[str, Any]] = []
-                child_continuation_source: Dict[str, Any] = {}
-                if active_source_node is not None:
-                    child_boundary_takeover = self._build_boundary_takeover(
-                        parent_node=node,
-                        source_child_node=active_source_node,
-                        target_child_node=child_node,
-                        handoffs=raw_handoffs,
+                async def _run_child_orchestration(child_node: Any, resolved_task: str) -> Dict[str, Any]:
+                    nonlocal active_continuation
+                    nonlocal continuation_round_idx
+
+                    child_path = (
+                        child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
                     )
-                    if not child_boundary_takeover:
-                        return (
-                            "Error: no Python-validated boundary_takeover exists for "
-                            f"{child_node.instance_name}({child_node.module_name}) in the current continuation."
+                    cached_child = orchestrate_cache.get(child_path)
+                    cache_hit = cached_child is not None
+                    raw_handoffs = list(active_continuation.get("handoffs") or [])
+                    active_source_node = active_continuation.get("source_child_node")
+                    active_bridge_context = dict(active_continuation.get("bridge_context") or {})
+                    child_boundary_takeover: List[Dict[str, Any]] = []
+                    child_continuation_source: Dict[str, Any] = {}
+                    if active_source_node is not None:
+                        child_boundary_takeover = self._build_boundary_takeover(
+                            parent_node=node,
+                            source_child_node=active_source_node,
+                            target_child_node=child_node,
+                            handoffs=raw_handoffs,
                         )
-                    child_continuation_source = self._build_continuation_source(
-                        active_source_node,
-                        active_bridge_context,
+                        if not child_boundary_takeover:
+                            return {
+                                "tool_result": (
+                                    "Error: no Python-validated boundary_takeover exists for "
+                                    f"{child_node.instance_name}({child_node.module_name}) in the current continuation."
+                                ),
+                            }
+                        child_continuation_source = self._build_continuation_source(
+                            active_source_node,
+                            active_bridge_context,
+                        )
+                    if cached_child is None:
+                        cached_child = await self._run_orchestrate_agent_for_node(
+                            top_node=top_node,
+                            node=child_node,
+                            instruction=instruction,
+                            instruction_datasheet=instruction_datasheet,
+                            stage_label="agent_requested_child",
+                            orchestrate_cache=orchestrate_cache,
+                            continuation_handoffs_raw=raw_handoffs,
+                            source_child_for_handoff=None,
+                            source_payload_for_handoff=dict(active_continuation.get("payload") or {}),
+                            lifecycle_context=list(active_continuation.get("lifecycle_context") or []),
+                            bridge_context=None,
+                            boundary_takeover=child_boundary_takeover,
+                            continuation_source=child_continuation_source,
+                        )
+                        orchestrate_cache[child_path] = cached_child
+                    active_continuation = self._advance_active_continuation_from_child(
+                        parent_node=node,
+                        child_node=child_node,
+                        child_item=cached_child,
+                        inherited_bridge_context=active_continuation.get("bridge_context"),
+                        inherited_lifecycle_context=active_continuation.get("lifecycle_context"),
                     )
-                if cached_child is None:
-                    self.g._append_fork_trace(
-                        "fork_dispatch",
-                        {
-                            "parent_path": node_path,
-                            "parent_level": node.depth,
-                            "child_instance": child_node.instance_name,
-                            "child_module": child_node.module_name,
-                            "child_level": node.depth + 1,
-                            "task": child_task,
-                            "prompt_style": "instrack_draw",
-                        },
-                    )
-                    cached_child = await self._run_draw_agent_for_node(
-                        top_node=top_node,
-                        node=child_node,
-                        instruction=instruction,
-                        instruction_datasheet=instruction_datasheet,
-                        stage_label="agent_requested_child",
-                        draw_cache=draw_cache,
-                        continuation_handoffs_raw=raw_handoffs,
-                        source_child_for_handoff=None,
-                        source_payload_for_handoff=dict(active_continuation.get("payload") or {}),
+                    continuation_round_idx += 1
+                    active_bridge_context = dict(active_continuation.get("bridge_context") or {})
+                    continuation_state_json = self.g._build_instrack_orchestrate_state_json(
+                        current_module=node.module_name,
+                        current_instance=node.instance_name,
+                        boundary_takeover=list(active_continuation.get("boundary_takeover") or []),
                         lifecycle_context=list(active_continuation.get("lifecycle_context") or []),
-                        bridge_context=None,
-                        boundary_takeover=child_boundary_takeover,
-                        continuation_source=child_continuation_source,
+                        continuation_source=dict(active_continuation.get("continuation_source") or {}),
                     )
-                    draw_cache[child_path] = cached_child
+                    self.g._append_instrack_continuation_snapshot(
+                        orchestrate_log_path,
+                        round_idx=continuation_round_idx,
+                        child_instance=child_node.instance_name,
+                        child_module=child_node.module_name,
+                        cached=cache_hit,
+                        continuation_state_json=continuation_state_json,
+                    )
                     self.g._append_fork_trace(
-                        "fork_return",
+                        "orchestrate_continuation_update",
                         {
+                            "pass": "pass3_3_2_orchestrate",
+                            "prompt_style": "instrack_orchestrate",
                             "parent_path": node_path,
-                            "parent_level": node.depth,
+                            "parent_level": int(getattr(node, "depth", 0) or 0),
                             "child_instance": child_node.instance_name,
                             "child_module": child_node.module_name,
-                            "child_level": node.depth + 1,
-                            "report_chars": len(str(cached_child.get("raw_orchestration_output") or "")),
-                            "prompt_tokens": int(
-                                dict(cached_child.get("token_stats") or {}).get("input_tokens", 0) or 0
-                            ),
-                            "prompt_style": "instrack_draw",
+                            "cached": cache_hit,
+                            "source_instance": str(active_bridge_context.get("source_instance") or "").strip(),
+                            "source_module": str(active_bridge_context.get("source_module") or "").strip(),
+                            "lifecycle_context": list(active_continuation.get("lifecycle_context") or []),
+                            "candidate_children": list(active_bridge_context.get("candidate_children") or []),
+                            "resolved_handoffs": list(active_bridge_context.get("resolved_handoffs") or []),
+                            "exits_parent": list(active_bridge_context.get("exits_parent") or []),
+                            "unresolved": list(active_bridge_context.get("unresolved") or []),
                         },
                     )
-                active_continuation = self._advance_active_continuation_from_child(
-                    parent_node=node,
-                    child_node=child_node,
-                    child_item=cached_child,
-                    inherited_bridge_context=active_continuation.get("bridge_context"),
-                    inherited_lifecycle_context=active_continuation.get("lifecycle_context"),
+                    return {
+                        "tool_result": self._build_fork_subagent_tool_result(
+                            cached_child,
+                            resolved_task,
+                            cached=cache_hit,
+                        ),
+                        "report_chars": len(str(cached_child.get("raw_orchestration_output") or "")),
+                        "prompt_tokens": int(
+                            dict(cached_child.get("token_stats") or {}).get("input_tokens", 0) or 0
+                        ),
+                    }
+
+                return await self.g._dispatch_direct_child_fork_subagent(
+                    scope_node=node,
+                    module_selector=module,
+                    child_task=child_task,
+                    parent_path=node_path,
+                    parent_instance=node.instance_name,
+                    parent_module=node.module_name,
+                    parent_level=node.depth,
+                    prompt_style="instrack_orchestrate",
+                    require_task=False,
+                    runner=_run_child_orchestration,
                 )
-                active_bridge_context = dict(active_continuation.get("bridge_context") or {})
-                self.g._append_fork_trace(
-                    "draw_continuation_update",
-                    {
-                        "pass": "pass3_3_2_orchestrate",
-                        "prompt_style": "instrack_draw",
-                        "parent_path": node_path,
-                        "parent_level": int(getattr(node, "depth", 0) or 0),
-                        "child_instance": child_node.instance_name,
-                        "child_module": child_node.module_name,
-                        "cached": cache_hit,
-                        "source_instance": str(active_bridge_context.get("source_instance") or "").strip(),
-                        "source_module": str(active_bridge_context.get("source_module") or "").strip(),
-                        "lifecycle_context": list(active_continuation.get("lifecycle_context") or []),
-                        "candidate_children": list(active_bridge_context.get("candidate_children") or []),
-                        "resolved_handoffs": list(active_bridge_context.get("resolved_handoffs") or []),
-                        "exits_parent": list(active_bridge_context.get("exits_parent") or []),
-                        "unresolved": list(active_bridge_context.get("unresolved") or []),
-                    },
-                )
-                return self._build_draw_child_tool_result(cached_child, child_task, cached=cache_hit)
 
             return f"Error: unknown tool '{tool_name}'"
 
-        draw_log_path = self.g._build_pass3_instrack_agent_log_path(
+        orchestrate_log_path = self.g._build_pass3_instrack_agent_log_path(
             instruction=instruction,
             node_path=node_path,
             level=node.depth,
-            role=f"draw_agent_{stage_label}",
+            role=f"orchestrate_agent_{stage_label}",
         )
 
         self.g._append_agent_io_snapshot(
-            draw_log_path,
+            orchestrate_log_path,
             stage="Input",
             system=system_prompt,
             prompt=prompt,
+            prompt_redaction_policy="instrack_context",
         )
 
-        draw_content, token_stats = await self.g.owner.instrack_draw_llm.generate(
+        orchestrate_content, token_stats = await self.g.owner.instrack_orchestrate_llm.generate(
             system_prompt,
             prompt,
-            log_path=draw_log_path,
+            log_path=orchestrate_log_path,
             tools_enabled=True,
             tools=self.g._pass3_3_2_tools(),
             tool_callback=_tool_callback,
@@ -1613,14 +1594,14 @@ class Pass3InStrackStages:
         )
 
         self.g._append_agent_io_snapshot(
-            draw_log_path,
+            orchestrate_log_path,
             stage="Output",
             system="",
             prompt="",
-            output=draw_content or "",
+            output=orchestrate_content or "",
         )
 
-        payload = self.extract_pass3_3_orchestrate_payload(draw_content or "", node)
+        payload = self.extract_pass3_3_orchestrate_payload(orchestrate_content or "", node)
         payload = self._enrich_orchestration_payload(
             node,
             payload,
@@ -1632,6 +1613,6 @@ class Pass3InStrackStages:
             "path": node_path,
             "orchestration": payload,
             "orchestrator_role": stage_label,
-            "raw_orchestration_output": draw_content or "",
+            "raw_orchestration_output": orchestrate_content or "",
             "token_stats": dict(token_stats or {}),
         }

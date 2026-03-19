@@ -67,15 +67,15 @@ PASS3_3_1_SEARCH_PROMPT = """
 
 PASS3_3_2_ORCHESTRATE_SYSTEM = """You are a senior CPU microarchitecture documentation engineer writing for software, firmware, and verification readers.
 
-Goal: execute Pass 3.3.2 (`orchestrate`). Starting from the current module, produce a JSON-only module-level lifecycle description that Python can parse deterministically. Do not produce Mermaid in this stage.
+Goal: execute Pass orchestrate. Starting from the current module, produce a JSON-only module-level lifecycle description that Python can parse deterministically.
 
 Working rules:
 - The current module topology/source evidence is already embedded in the prompt. Do not ask for the same module source again.
-- You may call `drawChild(module, task)` only for a direct child. Never jump across levels. `drawChild` is deduplicated; if a child was already orchestrated and returns `reject`, reuse the existing child summary.
+- You may call `forkSubAgent(module, task)` only for a direct child. Never jump across levels. `forkSubAgent` is deduplicated; if a child was already orchestrated and returns `reject`, reuse the existing child summary.
 - Use the minimum necessary expansion. First try to complete the main path from current-module evidence.
 - Treat `Continuation State.boundary_takeover` as the authoritative continuation entry when it exists. Use `Continuation State.continuation_source` only as provenance for empty-takeover parent bridges.
-- Call `drawChild` only when current-module evidence is insufficient, Python has identified the next child/takeover boundary, or a critical PROC/COMB fact exists only inside one direct child.
-- Usually do not expand infrastructure or implementation-detail blocks such as clock gates, reset sync, scan/DFT, RAM/FIFO macros, or `$paramod*` wrappers. Summarize them in one parent-level node instead of using `drawChild`.
+- Call `forkSubAgent` only when current-module evidence is insufficient, Python has identified the next child/takeover boundary, or a critical PROC/COMB fact exists only inside one direct child.
+- Usually do not expand infrastructure or implementation-detail blocks such as clock gates, reset sync, scan/DFT, RAM/FIFO macros, or `$paramod*` wrappers. Summarize them in one parent-level node instead of using `forkSubAgent`.
 - If child evidence identifies another same-module direct child, including via `next_children` or sibling-child handoffs, continue with that child in a later round. Same-module child-to-child continuation is not a stop condition.
 - The goal is not to finish the full end-to-end instruction lifecycle in one module. Stop only at the current module boundary: a real output port of the current module, or a point where no further same-module child continuation is supported by the evidence.
 
@@ -99,6 +99,37 @@ Output rules:
    - `unknown`
 3. `lifecycle_context` must be one concise string that summarizes only the current module's own behavior for this instruction.
 4. Do not return structured objects or arrays under `lifecycle_context`, and do not encode descendant/direct-child history inside it.
+5. Each `boundary_handoffs` item must be an object that uses the current module's own output view and includes:
+   - `source_block`
+   - `source_state`
+   - `egress_port`
+   - `value_kind`
+   - `semantic`
+   - `behavior`
+6. Do not produce Mermaid, markdown explanations, or any prose outside the single `json` code block.
+
+Normative JSON Example (shape reference only):
+- Use this example only as shape guidance. Replace all values with current-module evidence; do not copy literal strings from the example unless supported by evidence.
+
+```json
+{
+  "module": "CURRENT_MODULE",
+  "instance": "CURRENT_INSTANCE",
+  "boundary_handoffs": [
+    {
+      "source_block": "PROC_12",
+      "source_state": "Updates the instruction-visible state and prepares the next current-module output handoff.",
+      "egress_port": "inst_vld_o",
+      "value_kind": "valid",
+      "semantic": "Instruction-valid handoff at the current module boundary.",
+      "behavior": "Drives the real current-module output when local gating allows the instruction to advance."
+    }
+  ],
+  "lifecycle_context": "Consumes the incoming continuation context, updates the current module's instruction-relevant state, and emits the module boundary handoff when forward progress is allowed.",
+  "confidence": "high",
+  "unknown": ""
+}
+```
 """
 
 PASS3_3_2_ORCHESTRATE_PROMPT = """
@@ -116,14 +147,10 @@ PASS3_3_2_ORCHESTRATE_PROMPT = """
 {child_preview_list}
 
 ## Continuation State
-{draw_state_json}
+{orchestrate_state_json}
 
 ## Required Output
-- Return one `json` code block only.
-- The JSON must contain at least `module`, `instance`, `boundary_handoffs`, and `lifecycle_context`.
-- Map `module_preview` plus the embedded current-module topology evidence into concise current-module behavior semantics that Python can render later.
-- Prefer explicit state-update wording over pipeline-stage summaries.
-- `lifecycle_context` must be a single string describing the current module's own instruction-relevant behavior. Do not emit arrays/objects there, and do not turn child history into sibling items.
+- Use `module_preview` plus the embedded current-module topology evidence to derive concise current-module behavior semantics.
 - Start from the current continuation entry of this module. If `Continuation State.boundary_takeover` is non-empty, use it as the only authoritative entry contract.
 - `boundary_takeover` is Python-owned continuation input state. Read it from `Continuation State`; do not emit it in the output JSON.
 - Treat `Continuation State.lifecycle_context` as Python-maintained direct-child visit history for the current module. Use it only as high-level upstream behavior context, not as a schema you need to reproduce.
@@ -131,12 +158,8 @@ PASS3_3_2_ORCHESTRATE_PROMPT = """
 - If the latest child result points to another same-module direct child, including via `next_children` or sibling-child handoffs, continue into that child instead of stopping at the interconnect.
 - `Continuation State.boundary_takeover` is a Python-generated projection of the previous module handoff onto this module's real ingress boundary. Do not regenerate it, rename it, or guess extra takeover items in the output JSON.
 - When upstream provenance is known, preserve it in step descriptions instead of replacing it with vague `external` wording.
-- Every `boundary_handoffs` item must represent exactly one real current-module output port, not a child port or internal wire. Include `source_block`, `source_state`, `egress_port`, `value_kind`, `semantic`, and `behavior`, and describe the output from the current module's view.
+- Every `boundary_handoffs` item must represent exactly one real current-module output port, not a child port or internal wire. Describe the handoff from the current module's view.
 - Do not guess target modules or target ports in `boundary_handoffs`; Python resolves destinations after generation.
 - If the trace ends here, return an empty `boundary_handoffs` array and explain closure in `unknown`.
 
 """
-
-# Backward-compatible aliases while the rest of the pipeline is migrated.
-PASS3_3_2_DRAW_SYSTEM = PASS3_3_2_ORCHESTRATE_SYSTEM
-PASS3_3_2_DRAW_PROMPT = PASS3_3_2_ORCHESTRATE_PROMPT

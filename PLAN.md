@@ -44,7 +44,7 @@
   - `exits_parent`
   - `unresolved`
 - `takeover_bundles` 是 sibling routing 的唯一候选来源。
-- `drawChild` 只有在存在对应 takeover bundle 时，才把该 child 当作正常 continuation 目标。
+- `forkSubAgent` 只有在存在对应 takeover bundle 时，才把该 child 当作正常 continuation 目标。
 
 ## LLM / Python Responsibility Split
 - LLM 只负责：

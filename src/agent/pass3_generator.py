@@ -6,7 +6,7 @@ doc generator to keep responsibilities focused and files maintainable.
 import json
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .pass3_instrack_stages import Pass3InStrackStages
 from .pass3_partition_helpers import Pass3PartitionHelpers
@@ -139,6 +139,7 @@ class Pass3Generator:
         prompt: str,
         output: str = "",
         error: str = "",
+        prompt_redaction_policy: str = "",
     ):
         self._debug.append_agent_io_snapshot(
             log_path,
@@ -147,6 +148,26 @@ class Pass3Generator:
             prompt=prompt,
             output=output,
             error=error,
+            prompt_redaction_policy=prompt_redaction_policy,
+        )
+
+    def _append_instrack_continuation_snapshot(
+        self,
+        log_path: str,
+        *,
+        round_idx: int,
+        child_instance: str,
+        child_module: str,
+        cached: bool,
+        continuation_state_json: str,
+    ):
+        self._debug.append_instrack_continuation_snapshot(
+            log_path,
+            round_idx=round_idx,
+            child_instance=child_instance,
+            child_module=child_module,
+            cached=cached,
+            continuation_state_json=continuation_state_json,
         )
 
     @staticmethod
@@ -162,6 +183,115 @@ class Pass3Generator:
     ) -> str:
         """Build a stable cache key for recursive sub-agent calls."""
         return f"{prompt_style}||{node_path}||{task}||L{level}"
+
+    async def _dispatch_direct_child_fork_subagent(
+        self,
+        *,
+        scope_node: Any,
+        module_selector: str,
+        child_task: str,
+        parent_path: str,
+        parent_instance: str,
+        parent_module: str,
+        parent_level: int,
+        prompt_style: str,
+        runner: Callable[[Any, str], Awaitable[Dict[str, Any]]],
+        request_event: str = "fork_request",
+        reject_event: str = "fork_rejected",
+        dispatch_event: str = "fork_dispatch",
+        return_event: str = "fork_return",
+        default_task_builder: Optional[Callable[[Any], str]] = None,
+        task_error_message: str = "",
+        require_task: bool = True,
+    ) -> str:
+        module_text = str(module_selector or "")
+        resolved_task = str(child_task or "").strip()
+
+        self._append_fork_trace(
+            request_event,
+            {
+                "parent_path": parent_path,
+                "parent_instance": parent_instance,
+                "parent_module": parent_module,
+                "parent_level": parent_level,
+                "module_selector": module_text,
+                "task": resolved_task,
+                "prompt_style": prompt_style,
+            },
+        )
+
+        child_node, error = self._resolve_scope_node(scope_node, module_text, child_only=True)
+        if child_node is None:
+            self._append_fork_trace(
+                reject_event,
+                {
+                    "parent_path": parent_path,
+                    "parent_level": parent_level,
+                    "module_selector": module_text,
+                    "reason": error,
+                    "prompt_style": prompt_style,
+                },
+            )
+            return error
+
+        if not resolved_task and default_task_builder is not None:
+            resolved_task = str(default_task_builder(child_node) or "").strip()
+
+        if require_task and not resolved_task:
+            error_message = (
+                task_error_message
+                or "Error: forkSubAgent requires a non-empty 'task'. The parent agent must define a free-form goal for the child agent."
+            )
+            self._append_fork_trace(
+                reject_event,
+                {
+                    "parent_path": parent_path,
+                    "parent_level": parent_level,
+                    "child_instance": child_node.instance_name,
+                    "child_module": child_node.module_name,
+                    "child_level": parent_level + 1,
+                    "module_selector": module_text,
+                    "reason": error_message,
+                    "prompt_style": prompt_style,
+                },
+            )
+            return error_message
+
+        child_level = parent_level + 1
+        self._append_fork_trace(
+            dispatch_event,
+            {
+                "parent_path": parent_path,
+                "parent_level": parent_level,
+                "child_instance": child_node.instance_name,
+                "child_module": child_node.module_name,
+                "child_level": child_level,
+                "task": resolved_task,
+                "prompt_style": prompt_style,
+            },
+        )
+
+        result_payload = await runner(child_node, resolved_task)
+        result_payload = dict(result_payload or {})
+        tool_result = str(result_payload.get("tool_result") or "")
+        report_chars = int(result_payload.get("report_chars") or len(tool_result))
+        prompt_tokens = int(result_payload.get("prompt_tokens") or 0)
+
+        trace_payload = {
+            "parent_path": parent_path,
+            "parent_level": parent_level,
+            "child_instance": child_node.instance_name,
+            "child_module": child_node.module_name,
+            "child_level": child_level,
+            "report_chars": report_chars,
+            "prompt_tokens": prompt_tokens,
+            "prompt_style": prompt_style,
+        }
+        extra_trace_payload = result_payload.get("trace_payload")
+        if isinstance(extra_trace_payload, dict):
+            trace_payload.update(extra_trace_payload)
+        self._append_fork_trace(return_event, trace_payload)
+        return tool_result
 
     def _build_instance_path_index(self, top_node: Any) -> Dict[str, Any]:
         return self._topology.build_instance_path_index(top_node)
@@ -356,7 +486,7 @@ class Pass3Generator:
     def _pass3_3_tools(self) -> List[Dict[str, Any]]:
         return self._tools.pass3_3_tools()
 
-    def _build_instrack_draw_state_json(
+    def _build_instrack_orchestrate_state_json(
         self,
         *,
         current_module: str,
@@ -365,7 +495,7 @@ class Pass3Generator:
         lifecycle_context: Optional[List[Dict[str, Any]]] = None,
         continuation_source: Optional[Dict[str, Any]] = None,
     ) -> str:
-        return self._prompts.build_instrack_draw_state_json(
+        return self._prompts.build_instrack_orchestrate_state_json(
             current_module=current_module,
             current_instance=current_instance,
             boundary_takeover=boundary_takeover,
@@ -651,9 +781,9 @@ class Pass3Generator:
                 )
 
             if tool_name == "readDoc":
-                if prompt_style == "instrack_draw":
+                if prompt_style == "instrack_orchestrate":
                     return (
-                        "Error: readDoc is disabled in instrack_draw mode to reduce context size. "
+                        "Error: readDoc is disabled in instrack_orchestrate mode to reduce context size. "
                         "Use readSource(module) instead."
                     )
                 if prompt_style == "instrack_search":
@@ -669,93 +799,54 @@ class Pass3Generator:
                 module = str(args.get("module") or "")
                 child_task = str(args.get("task") or "").strip()
 
-                self._append_fork_trace(
-                    "fork_request",
-                    {
-                        "parent_path": node_path,
-                        "parent_instance": current_node.instance_name,
-                        "parent_module": current_node.module_name,
-                        "parent_level": level,
-                        "module_selector": module,
-                        "task": child_task,
-                        "prompt_style": prompt_style,
-                    },
-                )
-
-                child_node, error = self._resolve_scope_node(current_node, module, child_only=True)
-                if child_node is None:
-                    self._append_fork_trace(
-                        "fork_rejected",
-                        {
-                            "parent_path": node_path,
-                            "parent_level": level,
-                            "module_selector": module,
-                            "reason": error,
-                            "prompt_style": prompt_style,
-                        },
+                async def _run_recursive_child(child_node: Any, resolved_task: str) -> Dict[str, Any]:
+                    child_node_path = (
+                        child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
                     )
-                    return error
+                    child_cache_key = self._build_recursive_cache_key(
+                        prompt_style,
+                        child_node_path,
+                        resolved_task,
+                        level + 1,
+                    )
 
-                if not child_task:
-                    return "Error: forkSubAgent requires a non-empty 'task'. The parent agent must define a free-form goal for the child agent."
-
-                self._append_fork_trace(
-                    "fork_dispatch",
-                    {
-                        "parent_path": node_path,
-                        "parent_level": level,
-                        "child_instance": child_node.instance_name,
-                        "child_module": child_node.module_name,
-                        "child_level": level + 1,
-                        "task": child_task,
-                        "prompt_style": prompt_style,
-                    },
-                )
-                child_node_path = (
-                    child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
-                )
-                child_cache_key = self._build_recursive_cache_key(
-                    prompt_style,
-                    child_node_path,
-                    child_task,
-                    level + 1,
-                )
-
-                report = await self._run_pass3_recursive_agent(
-                    top_node=top_node,
-                    current_node=child_node,
-                    task=child_task,
-                    level=level + 1,
-                    max_depth=max_depth,
-                    prompt_style=prompt_style,
-                    instruction=instruction,
-                    instruction_datasheet=instruction_datasheet,
-                    path_records=path_records,
-                )
-                if len(report) > 16000:
-                    report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
-                child_token_stats = dict(self._subagent_token_stats.get(child_cache_key) or {})
-
-                self._append_fork_trace(
-                    "fork_return",
-                    {
-                        "parent_path": node_path,
-                        "parent_level": level,
-                        "child_instance": child_node.instance_name,
-                        "child_module": child_node.module_name,
-                        "child_level": level + 1,
+                    report = await self._run_pass3_recursive_agent(
+                        top_node=top_node,
+                        current_node=child_node,
+                        task=resolved_task,
+                        level=level + 1,
+                        max_depth=max_depth,
+                        prompt_style=prompt_style,
+                        instruction=instruction,
+                        instruction_datasheet=instruction_datasheet,
+                        path_records=path_records,
+                    )
+                    if len(report) > 16000:
+                        report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
+                    child_token_stats = dict(self._subagent_token_stats.get(child_cache_key) or {})
+                    if str(prompt_style).startswith("instrack"):
+                        tool_result = report
+                    else:
+                        tool_result = (
+                            f"[forkSubAgent] child={child_node.instance_name}({child_node.module_name}), "
+                            f"level={level + 1}\n\n{report}"
+                        )
+                    return {
+                        "tool_result": tool_result,
                         "report_chars": len(report),
                         "prompt_tokens": int(child_token_stats.get("input_tokens", 0) or 0),
-                        "prompt_style": prompt_style,
-                    },
-                )
+                    }
 
-                # Keep instrack fork tool results quiet to avoid noisy terminal echoes.
-                if str(prompt_style).startswith("instrack"):
-                    return report
-                return (
-                    f"[forkSubAgent] child={child_node.instance_name}({child_node.module_name}), level={level + 1}\n\n"
-                    f"{report}"
+                return await self._dispatch_direct_child_fork_subagent(
+                    scope_node=current_node,
+                    module_selector=module,
+                    child_task=child_task,
+                    parent_path=node_path,
+                    parent_instance=current_node.instance_name,
+                    parent_module=current_node.module_name,
+                    parent_level=level,
+                    prompt_style=prompt_style,
+                    runner=_run_recursive_child,
                 )
 
             return f"Error: unknown tool '{tool_name}'"
@@ -801,6 +892,7 @@ class Pass3Generator:
                 stage="Input",
                 system=system,
                 prompt=prompt,
+                prompt_redaction_policy="instrack_context",
             )
 
         report, token_stats = await self.owner.llm.generate(
@@ -1053,77 +1145,54 @@ class Pass3Generator:
             if tool_name == "forkSubAgent":
                 module = str(args.get("module") or "")
                 task = str(args.get("task") or "").strip()
-                self._append_fork_trace(
-                    "pass3_1_fork_request",
-                    {
-                        "top_module": top_node.module_name,
-                        "module_selector": module,
-                        "task": task,
-                        "prompt_style": "partition",
-                    },
-                )
-                child_node, error = self._resolve_scope_node(top_node, module, child_only=True)
-                if child_node is None:
-                    self._append_fork_trace(
-                        "pass3_1_fork_rejected",
-                        {
-                            "top_module": top_node.module_name,
-                            "module_selector": module,
-                            "reason": error,
-                            "prompt_style": "partition",
-                        },
+
+                async def _run_partition_child(child_node: Any, resolved_task: str) -> Dict[str, Any]:
+                    child_node_path = (
+                        child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
                     )
-                    return error
-                if not task:
-                    task = (
-                        f"请针对 {child_node.instance_name}({child_node.module_name}) 补充 SoC 子系统边界证据，"
-                        "输出可归属的 SoC 子系统、边界依据与待确认项，并按需继续 fork。"
+                    child_cache_key = self._build_recursive_cache_key(
+                        "partition",
+                        child_node_path,
+                        resolved_task,
+                        1,
                     )
-                self._append_fork_trace(
-                    "pass3_1_fork_dispatch",
-                    {
-                        "top_module": top_node.module_name,
-                        "child_instance": child_node.instance_name,
-                        "child_module": child_node.module_name,
-                        "child_level": 1,
-                        "task": task,
-                        "prompt_style": "partition",
-                    },
-                )
-                child_node_path = (
-                    child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
-                )
-                child_cache_key = self._build_recursive_cache_key(
-                    "partition",
-                    child_node_path,
-                    task,
-                    1,
-                )
-                report = await self._run_pass3_recursive_agent(
-                    top_node=top_node,
-                    current_node=child_node,
-                    task=task,
-                    level=1,
-                    prompt_style="partition",
-                )
-                if len(report) > 16000:
-                    report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
-                child_token_stats = dict(self._subagent_token_stats.get(child_cache_key) or {})
-                self._append_fork_trace(
-                    "pass3_1_fork_return",
-                    {
-                        "top_module": top_node.module_name,
-                        "child_instance": child_node.instance_name,
-                        "child_module": child_node.module_name,
-                        "child_level": 1,
+                    report = await self._run_pass3_recursive_agent(
+                        top_node=top_node,
+                        current_node=child_node,
+                        task=resolved_task,
+                        level=1,
+                        prompt_style="partition",
+                    )
+                    if len(report) > 16000:
+                        report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
+                    child_token_stats = dict(self._subagent_token_stats.get(child_cache_key) or {})
+                    return {
+                        "tool_result": (
+                            f"[forkSubAgent] child={child_node.instance_name}({child_node.module_name}), level=1\n\n"
+                            f"{report}"
+                        ),
                         "report_chars": len(report),
                         "prompt_tokens": int(child_token_stats.get("input_tokens", 0) or 0),
-                        "prompt_style": "partition",
-                    },
-                )
-                return (
-                    f"[forkSubAgent] child={child_node.instance_name}({child_node.module_name}), level=1\n\n"
-                    f"{report}"
+                    }
+
+                return await self._dispatch_direct_child_fork_subagent(
+                    scope_node=top_node,
+                    module_selector=module,
+                    child_task=task,
+                    parent_path=top_node.module_name,
+                    parent_instance=top_node.instance_name if hasattr(top_node, "instance_name") else "<top>",
+                    parent_module=top_node.module_name,
+                    parent_level=0,
+                    prompt_style="partition",
+                    request_event="pass3_1_fork_request",
+                    reject_event="pass3_1_fork_rejected",
+                    dispatch_event="pass3_1_fork_dispatch",
+                    return_event="pass3_1_fork_return",
+                    default_task_builder=lambda child_node: (
+                        f"请针对 {child_node.instance_name}({child_node.module_name}) 补充 SoC 子系统边界证据，"
+                        "输出可归属的 SoC 子系统、边界依据与待确认项，并按需继续 fork。"
+                    ),
+                    runner=_run_partition_child,
                 )
 
             return f"Error: unknown tool '{tool_name}'"
@@ -1248,77 +1317,54 @@ class Pass3Generator:
             if tool_name == "forkSubAgent":
                 module = str(args.get("module") or "")
                 task = str(args.get("task") or "").strip()
-                self._append_fork_trace(
-                    "pass3_2_fork_request",
-                    {
-                        "top_module": top_node.module_name,
-                        "module_selector": module,
-                        "task": task,
-                        "prompt_style": "partition",
-                    },
-                )
-                child_node, error = self._resolve_scope_node(top_node, module, child_only=True)
-                if child_node is None:
-                    self._append_fork_trace(
-                        "pass3_2_fork_rejected",
-                        {
-                            "top_module": top_node.module_name,
-                            "module_selector": module,
-                            "reason": error,
-                            "prompt_style": "partition",
-                        },
+
+                async def _run_core_partition_child(child_node: Any, resolved_task: str) -> Dict[str, Any]:
+                    child_node_path = (
+                        child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
                     )
-                    return error
-                if not task:
-                    task = (
-                        f"请针对 {child_node.instance_name}({child_node.module_name}) 输出 core 相关 top-down 微架构划分，"
-                        "并按需继续fork下一级。"
+                    child_cache_key = self._build_recursive_cache_key(
+                        "partition",
+                        child_node_path,
+                        resolved_task,
+                        1,
                     )
-                self._append_fork_trace(
-                    "pass3_2_fork_dispatch",
-                    {
-                        "top_module": top_node.module_name,
-                        "child_instance": child_node.instance_name,
-                        "child_module": child_node.module_name,
-                        "child_level": 1,
-                        "task": task,
-                        "prompt_style": "partition",
-                    },
-                )
-                child_node_path = (
-                    child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
-                )
-                child_cache_key = self._build_recursive_cache_key(
-                    "partition",
-                    child_node_path,
-                    task,
-                    1,
-                )
-                report = await self._run_pass3_recursive_agent(
-                    top_node=top_node,
-                    current_node=child_node,
-                    task=task,
-                    level=1,
-                    prompt_style="partition",
-                )
-                if len(report) > 16000:
-                    report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
-                child_token_stats = dict(self._subagent_token_stats.get(child_cache_key) or {})
-                self._append_fork_trace(
-                    "pass3_2_fork_return",
-                    {
-                        "top_module": top_node.module_name,
-                        "child_instance": child_node.instance_name,
-                        "child_module": child_node.module_name,
-                        "child_level": 1,
+                    report = await self._run_pass3_recursive_agent(
+                        top_node=top_node,
+                        current_node=child_node,
+                        task=resolved_task,
+                        level=1,
+                        prompt_style="partition",
+                    )
+                    if len(report) > 16000:
+                        report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
+                    child_token_stats = dict(self._subagent_token_stats.get(child_cache_key) or {})
+                    return {
+                        "tool_result": (
+                            f"[forkSubAgent] child={child_node.instance_name}({child_node.module_name}), level=1\n\n"
+                            f"{report}"
+                        ),
                         "report_chars": len(report),
                         "prompt_tokens": int(child_token_stats.get("input_tokens", 0) or 0),
-                        "prompt_style": "partition",
-                    },
-                )
-                return (
-                    f"[forkSubAgent] child={child_node.instance_name}({child_node.module_name}), level=1\n\n"
-                    f"{report}"
+                    }
+
+                return await self._dispatch_direct_child_fork_subagent(
+                    scope_node=top_node,
+                    module_selector=module,
+                    child_task=task,
+                    parent_path=top_node.module_name,
+                    parent_instance=top_node.instance_name if hasattr(top_node, "instance_name") else "<top>",
+                    parent_module=top_node.module_name,
+                    parent_level=0,
+                    prompt_style="partition",
+                    request_event="pass3_2_fork_request",
+                    reject_event="pass3_2_fork_rejected",
+                    dispatch_event="pass3_2_fork_dispatch",
+                    return_event="pass3_2_fork_return",
+                    default_task_builder=lambda child_node: (
+                        f"请针对 {child_node.instance_name}({child_node.module_name}) 输出 core 相关 top-down 微架构划分，"
+                        "并按需继续fork下一级。"
+                    ),
+                    runner=_run_core_partition_child,
                 )
 
             return f"Error: unknown tool '{tool_name}'"
@@ -1444,86 +1490,50 @@ class Pass3Generator:
                         task = str(args.get("task") or "").strip()
                         top_path = top_node.instance_name if hasattr(top_node, "instance_name") else top_node.module_name
 
-                        self._append_fork_trace(
-                            "fork_request",
-                            {
-                                "parent_path": top_path,
-                                "parent_instance": top_node.instance_name if hasattr(top_node, "instance_name") else "<top>",
-                                "parent_module": top_node.module_name,
-                                "parent_level": 0,
-                                "module_selector": module,
-                                "task": task,
-                                "prompt_style": "instrack_search",
-                            },
-                        )
-
-                        child_node, error = self._resolve_scope_node(top_node, module, child_only=True)
-                        if child_node is None:
-                            self._append_fork_trace(
-                                "fork_rejected",
-                                {
-                                    "parent_path": top_path,
-                                    "parent_level": 0,
-                                    "module_selector": module,
-                                    "reason": error,
-                                    "prompt_style": "instrack_search",
-                                },
+                        async def _run_search_child(child_node: Any, resolved_task: str) -> Dict[str, Any]:
+                            child_node_path = (
+                                child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
                             )
-                            return error
+                            child_cache_key = self._build_recursive_cache_key(
+                                "instrack_search",
+                                child_node_path,
+                                resolved_task,
+                                1,
+                            )
 
-                        if not task:
-                            return "Error: forkSubAgent requires a non-empty 'task'. Define a free-form child goal from the parent context."
-
-                        self._append_fork_trace(
-                            "fork_dispatch",
-                            {
-                                "parent_path": top_path,
-                                "parent_level": 0,
-                                "child_instance": child_node.instance_name,
-                                "child_module": child_node.module_name,
-                                "child_level": 1,
-                                "task": task,
-                                "prompt_style": "instrack_search",
-                            },
-                        )
-                        child_node_path = (
-                            child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
-                        )
-                        child_cache_key = self._build_recursive_cache_key(
-                            "instrack_search",
-                            child_node_path,
-                            task,
-                            1,
-                        )
-
-                        report = await self._run_pass3_recursive_agent(
-                            top_node=top_node,
-                            current_node=child_node,
-                            task=task,
-                            level=1,
-                            prompt_style="instrack_search",
-                            instruction=instruction,
-                            instruction_datasheet=instruction_datasheet,
-                            path_records=[],
-                        )
-                        if len(report) > 16000:
-                            report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
-                        child_token_stats = dict(self._subagent_token_stats.get(child_cache_key) or {})
-
-                        self._append_fork_trace(
-                            "fork_return",
-                            {
-                                "parent_path": top_path,
-                                "parent_level": 0,
-                                "child_instance": child_node.instance_name,
-                                "child_module": child_node.module_name,
-                                "child_level": 1,
+                            report = await self._run_pass3_recursive_agent(
+                                top_node=top_node,
+                                current_node=child_node,
+                                task=resolved_task,
+                                level=1,
+                                prompt_style="instrack_search",
+                                instruction=instruction,
+                                instruction_datasheet=instruction_datasheet,
+                                path_records=[],
+                            )
+                            if len(report) > 16000:
+                                report = report[:16000] + "\n\n[... truncated sub-agent report ...]"
+                            child_token_stats = dict(self._subagent_token_stats.get(child_cache_key) or {})
+                            return {
+                                "tool_result": report,
                                 "report_chars": len(report),
                                 "prompt_tokens": int(child_token_stats.get("input_tokens", 0) or 0),
-                                "prompt_style": "instrack_search",
-                            },
+                            }
+
+                        return await self._dispatch_direct_child_fork_subagent(
+                            scope_node=top_node,
+                            module_selector=module,
+                            child_task=task,
+                            parent_path=top_path,
+                            parent_instance=top_node.instance_name if hasattr(top_node, "instance_name") else "<top>",
+                            parent_module=top_node.module_name,
+                            parent_level=0,
+                            prompt_style="instrack_search",
+                            task_error_message=(
+                                "Error: forkSubAgent requires a non-empty 'task'. Define a free-form child goal from the parent context."
+                            ),
+                            runner=_run_search_child,
                         )
-                        return report
 
                     return f"Error: unknown tool '{tool_name}'"
 
@@ -1544,6 +1554,7 @@ class Pass3Generator:
                     stage="Input",
                     system=PASS3_3_1_SEARCH_SYSTEM,
                     prompt=search_prompt,
+                    prompt_redaction_policy="instrack_context",
                 )
 
                 try:

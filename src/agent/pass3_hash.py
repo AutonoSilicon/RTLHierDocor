@@ -16,8 +16,6 @@ from .prompts import (
     PASS3_3_1_SEARCH_PROMPT,
     PASS3_3_2_ORCHESTRATE_SYSTEM,
     PASS3_3_2_ORCHESTRATE_PROMPT,
-    PASS3_3_2_DRAW_SYSTEM,
-    PASS3_3_2_DRAW_PROMPT,
 )
 
 
@@ -116,21 +114,6 @@ class Pass3Hash:
             "orchestration_json_hash": hash_text(orchestration_json_text),
         }
         return hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-
-    def build_pass3_3_draw_input_hash(
-        self,
-        top_module: str,
-        instruction: str,
-        instruction_datasheet: str,
-        search_result_json_text: str,
-    ) -> str:
-        """Backward-compatible alias for the old draw stage name."""
-        return self.build_pass3_3_orchestrate_input_hash(
-            top_module=top_module,
-            instruction=instruction,
-            instruction_datasheet=instruction_datasheet,
-            search_result_json_text=search_result_json_text,
-        )
 
     # Generic artifact hash
 

@@ -26,7 +26,7 @@ class Pass3Prompts:
     def __init__(self, generator: Any):
         self.g = generator
 
-    def build_instrack_draw_state_json(
+    def build_instrack_orchestrate_state_json(
         self,
         *,
         current_module: str,
@@ -63,7 +63,7 @@ class Pass3Prompts:
         if prompt_style == "instrack_search":
             return PASS3_3_1_SEARCH_SYSTEM.strip()
 
-        if prompt_style == "instrack_draw":
+        if prompt_style == "instrack_orchestrate":
             return PASS3_3_2_ORCHESTRATE_SYSTEM.strip()
 
         if prompt_style != "partition":
@@ -99,7 +99,7 @@ class Pass3Prompts:
                 child_preview_list=child_overview,
             ).strip()
 
-        if prompt_style == "instrack_draw":
+        if prompt_style == "instrack_orchestrate":
             current_module_topology = self.build_instrack_current_module_topology(current_node.module_name)
             return PASS3_3_2_ORCHESTRATE_PROMPT.format(
                 instruction=instruction or "UNKNOWN",
@@ -108,7 +108,7 @@ class Pass3Prompts:
                     if (instruction_datasheet or "").strip()
                     else "Instruction unavailable"
                 ),
-                draw_state_json=self.build_instrack_draw_state_json(
+                orchestrate_state_json=self.build_instrack_orchestrate_state_json(
                     current_module=current_node.module_name,
                     current_instance=current_node.instance_name,
                     boundary_takeover=[],

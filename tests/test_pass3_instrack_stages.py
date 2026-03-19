@@ -142,7 +142,7 @@ def make_parent_tree():
     return parent, source, dst0, dst1
 
 
-def test_extract_pass3_3_draw_payload_ignores_takeover_fields_and_parses_boundary_handoffs():
+def test_extract_pass3_3_orchestrate_payload_ignores_takeover_fields_and_parses_boundary_handoffs():
     stages = make_stages()
     current = FakeNode("ct_mod", "x_ct_mod")
     content = """
@@ -199,7 +199,7 @@ flowchart LR
 ```
 """
 
-    payload = stages.extract_pass3_3_draw_payload(content, current)
+    payload = stages.extract_pass3_3_orchestrate_payload(content, current)
 
     assert payload["module"] == "ct_mod"
     assert payload["instance"] == "x_ct_mod"
@@ -501,7 +501,7 @@ def test_advance_active_continuation_from_child_promotes_child_outputs():
     }
 
 
-def test_enrich_draw_payload_injects_python_boundary_takeover():
+def test_enrich_orchestration_payload_injects_python_boundary_takeover():
     stages = make_stages()
     _, source, _, _ = make_parent_tree()
     payload = {
@@ -536,13 +536,13 @@ def test_enrich_draw_payload_injects_python_boundary_takeover():
         },
     ]
 
-    enriched = stages._enrich_draw_payload(source, payload, boundary_takeover)
+    enriched = stages._enrich_orchestration_payload(source, payload, boundary_takeover)
 
     assert enriched["boundary_takeover"] == boundary_takeover
     assert enriched["boundary_handoffs"][0]["status"] == "resolved"
 
 
-def test_enrich_draw_payload_marks_invalid_duplicate_and_unknown_boundary_handoffs():
+def test_enrich_orchestration_payload_marks_invalid_duplicate_and_unknown_boundary_handoffs():
     stages = make_stages()
     _, source, _, _ = make_parent_tree()
     payload = {
@@ -554,7 +554,7 @@ def test_enrich_draw_payload_marks_invalid_duplicate_and_unknown_boundary_handof
         ],
     }
 
-    enriched = stages._enrich_draw_payload(source, payload, boundary_takeover=None)
+    enriched = stages._enrich_orchestration_payload(source, payload, boundary_takeover=None)
 
     assert [item["egress_port"] for item in enriched["boundary_handoffs"]] == ["out1", "out1", "bad", "ghost"]
     assert enriched["boundary_handoffs"][0]["status"] == "resolved"
@@ -566,7 +566,7 @@ def test_enrich_draw_payload_marks_invalid_duplicate_and_unknown_boundary_handof
     assert "is not a declared port" in enriched["boundary_handoffs"][3]["unknown"]
 
 
-def test_enrich_draw_payload_validates_top_module_boundary_ports_without_parent_resolution():
+def test_enrich_orchestration_payload_validates_top_module_boundary_ports_without_parent_resolution():
     stages = make_stages()
     top = FakeNode("parent_mod", "top")
     payload = {
@@ -577,7 +577,7 @@ def test_enrich_draw_payload_validates_top_module_boundary_ports_without_parent_
         ],
     }
 
-    enriched = stages._enrich_draw_payload(top, payload, boundary_takeover=None)
+    enriched = stages._enrich_orchestration_payload(top, payload, boundary_takeover=None)
 
     assert enriched["boundary_handoffs"][0]["egress_port"] == "top_out"
     assert enriched["boundary_handoffs"][0].get("status", "") != "invalid"
@@ -587,13 +587,13 @@ def test_enrich_draw_payload_validates_top_module_boundary_ports_without_parent_
     assert "is not a declared port" in enriched["boundary_handoffs"][2]["unknown"]
 
 
-def test_build_draw_child_tool_result_returns_structured_boundary_summary_only():
+def test_build_fork_subagent_tool_result_returns_structured_boundary_summary_only():
     stages = make_stages()
     child_item = {
         "module": "dst_mod",
         "instance": "x_dst0",
         "path": "top/x_dst0",
-        "raw_draw_output": "```mermaid\nflowchart LR\nA-->B\n```",
+        "raw_orchestration_output": "```mermaid\nflowchart LR\nA-->B\n```",
         "orchestration": {
             "boundary_takeover": [{"ingress_port": "in_a"}],
             "boundary_handoffs": [{"egress_port": "out1"}],
@@ -603,7 +603,7 @@ def test_build_draw_child_tool_result_returns_structured_boundary_summary_only()
         },
     }
 
-    result = stages._build_draw_child_tool_result(child_item, "continue decode")
+    result = stages._build_fork_subagent_tool_result(child_item, "continue decode")
 
     assert result.startswith("```json")
     assert "flowchart LR" not in result
@@ -623,7 +623,7 @@ def test_build_draw_child_tool_result_returns_structured_boundary_summary_only()
     }
 
 
-def test_build_draw_child_tool_result_surfaces_next_children_and_compacts_large_fields():
+def test_build_fork_subagent_tool_result_surfaces_next_children_and_compacts_large_fields():
     stages = make_stages()
     child_item = {
         "module": "dst_mod",
@@ -696,7 +696,7 @@ def test_build_draw_child_tool_result_surfaces_next_children_and_compacts_large_
         },
     }
 
-    result = stages._build_draw_child_tool_result(child_item, "continue issue")
+    result = stages._build_fork_subagent_tool_result(child_item, "continue issue")
     payload = json.loads(result.removeprefix("```json\n").removesuffix("\n```"))
 
     assert "entry_ports" not in payload

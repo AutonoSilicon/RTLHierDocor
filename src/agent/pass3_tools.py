@@ -189,13 +189,13 @@ class Pass3Tools:
         ]
 
     def pass3_3_2_tools(self) -> List[Dict[str, Any]]:
-        """Tools for pass3.3.2 instruction draw."""
+        """Tools for pass3.3.2 instruction orchestration."""
         return [
             {
                 "type": "function",
                 "function": {
-                    "name": "drawChild",
-                    "description": "Trigger draw generation for one direct child module only when needed, and return its structured boundary summary (boundary handoffs, next-child candidates, confidence, unknowns). If that child was already drawn earlier in this run, return the cached orchestration result instead of redrawing it. If no child expansion is needed, output the result directly.",
+                    "name": "forkSubAgent",
+                    "description": "Trigger child orchestration for one direct child module only when needed, and return its structured boundary summary (boundary handoffs, next-child candidates, confidence, unknowns). If that child was already orchestrated earlier in this run, return the cached orchestration result instead of recomputing it. If no child expansion is needed, output the result directly.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -205,7 +205,7 @@ class Pass3Tools:
                             },
                             "task": {
                                 "type": "string",
-                                "description": "Optional free-form child draw goal in current context.",
+                                "description": "Optional free-form child orchestration goal in current context.",
                             },
                         },
                         "required": ["module"],
@@ -248,7 +248,7 @@ class Pass3Tools:
             },
         ]
 
-        if prompt_style not in {"instrack_search", "instrack_draw"}:
+        if prompt_style not in {"instrack_search", "instrack_orchestrate"}:
             tools.insert(
                 0,
                 {
@@ -294,7 +294,7 @@ class Pass3Tools:
                 },
             )
 
-        if prompt_style not in {"instrack_search", "instrack_draw"}:
+        if prompt_style not in {"instrack_search", "instrack_orchestrate"}:
             tools.insert(
                 2,
                 {

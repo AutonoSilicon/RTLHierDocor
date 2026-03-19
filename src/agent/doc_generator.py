@@ -54,7 +54,7 @@ class AgentDocGenerator:
         self,
         hierarchy: Any,
         llm: LLMBackend,
-        instrack_draw_llm: Optional[LLMBackend],
+        instrack_orchestrate_llm: Optional[LLMBackend],
         composer_llm: Optional[LLMBackend],
         resolver: SourceResolver,
         tracker: ProgressTracker,
@@ -80,7 +80,7 @@ class AgentDocGenerator:
     ):
         self.hierarchy = hierarchy
         self.llm = llm
-        self.instrack_draw_llm = instrack_draw_llm or llm
+        self.instrack_orchestrate_llm = instrack_orchestrate_llm or llm
         self.resolver = resolver
         self.tracker = tracker
         self.output_dir = Path(output_dir)

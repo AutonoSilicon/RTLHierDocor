@@ -174,8 +174,8 @@ class ProjectConfig:
     agent_api_key: Optional[str] = None
     agent_base_url: Optional[str] = None
     agent_thinking: bool = False
-    instrack_draw_model: Optional[str] = None
-    instrack_draw_thinking: Optional[bool] = None
+    instrack_orchestrate_model: Optional[str] = None
+    instrack_orchestrate_thinking: Optional[bool] = None
     composer_backend: Optional[str] = None
     composer_model: Optional[str] = None
     composer_api_key: Optional[str] = None
@@ -265,10 +265,10 @@ class ProjectConfig:
                 config.agent_base_url = str(agent['base_url'])
             if 'thinking' in agent:
                 config.agent_thinking = bool(agent['thinking'])
-            if 'instrack_draw_model' in agent:
-                config.instrack_draw_model = str(agent['instrack_draw_model'])
-            if 'instrack_draw_thinking' in agent:
-                config.instrack_draw_thinking = bool(agent['instrack_draw_thinking'])
+            if 'instrack_orchestrate_model' in agent:
+                config.instrack_orchestrate_model = str(agent['instrack_orchestrate_model'])
+            if 'instrack_orchestrate_thinking' in agent:
+                config.instrack_orchestrate_thinking = bool(agent['instrack_orchestrate_thinking'])
             if 'composer_backend' in agent:
                 config.composer_backend = str(agent['composer_backend'])
             if 'composer_model' in agent:
