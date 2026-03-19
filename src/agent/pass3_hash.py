@@ -89,7 +89,7 @@ class Pass3Hash:
     ) -> str:
         """Build cache key for pass3.3.2 orchestration stage."""
         payload = {
-            "version": "pass3_3_instrack_orchestrate_cache_v1",
+            "version": "pass3_3_instrack_orchestrate_cache_v2",
             "top_module": top_module,
             "instruction": instruction,
             "system_prompt": PASS3_3_2_ORCHESTRATE_SYSTEM,

@@ -100,13 +100,13 @@ Output rules:
 3. `lifecycle_context` must be one concise string that summarizes only the current module's own behavior for this instruction.
 4. Do not return structured objects or arrays under `lifecycle_context`, and do not encode descendant/direct-child history inside it.
 5. Each `boundary_handoffs` item must be an object that uses the current module's own output view and includes:
-   - `source_block`
-   - `source_state`
-   - `egress_port`
-   - `value_kind`
-   - `semantic`
+   - `output_port`
+   - `value_condition`
    - `behavior`
-6. Do not produce Mermaid, markdown explanations, or any prose outside the single `json` code block.
+6. `value_condition` must be an expression-first field, not free-form prose. Prefer a compact RTL-style condition or assignment-like expression that includes the necessary concrete signals, ports, valid bits, key registers, or gating terms.
+7. If the exact logic is only partially known, still return the best-supported expression fragment with real signal names instead of replacing it with a full sentence.
+8. Each `boundary_handoffs` item must contain only those three fields. Do not emit extra keys such as source-block metadata, value-kind labels, semantic aliases, routing guesses, or target information.
+9. Do not produce Mermaid, markdown explanations, or any prose outside the single `json` code block.
 
 Normative JSON Example (shape reference only):
 - Use this example only as shape guidance. Replace all values with current-module evidence; do not copy literal strings from the example unless supported by evidence.
@@ -117,12 +117,9 @@ Normative JSON Example (shape reference only):
   "instance": "CURRENT_INSTANCE",
   "boundary_handoffs": [
     {
-      "source_block": "PROC_12",
-      "source_state": "Updates the instruction-visible state and prepares the next current-module output handoff.",
-      "egress_port": "inst_vld_o",
-      "value_kind": "valid",
-      "semantic": "Instruction-valid handoff at the current module boundary.",
-      "behavior": "Drives the real current-module output when local gating allows the instruction to advance."
+      "output_port": "inst_vld_o",
+      "value_condition": "inst_vld_o = inst_vld & issue_en & !flush",
+      "behavior": "Emits the instruction-valid boundary handoff that lets the instruction leave the current module."
     }
   ],
   "lifecycle_context": "Consumes the incoming continuation context, updates the current module's instruction-relevant state, and emits the module boundary handoff when forward progress is allowed.",
@@ -158,7 +155,14 @@ PASS3_3_2_ORCHESTRATE_PROMPT = """
 - If the latest child result points to another same-module direct child, including via `next_children` or sibling-child handoffs, continue into that child instead of stopping at the interconnect.
 - `Continuation State.boundary_takeover` is a Python-generated projection of the previous module handoff onto this module's real ingress boundary. Do not regenerate it, rename it, or guess extra takeover items in the output JSON.
 - When upstream provenance is known, preserve it in step descriptions instead of replacing it with vague `external` wording.
-- Every `boundary_handoffs` item must represent exactly one real current-module output port, not a child port or internal wire. Describe the handoff from the current module's view.
+- Every `boundary_handoffs` item must represent exactly one real current-module output port, not a child port or internal wire. Use the declared full output-port name under `output_port`.
+- `value_condition` must be written as an expression, not as a narrative sentence. Prefer a boolean / mux / assignment-like expression using concrete current-module signal names.
+- Include the necessary key signals in `value_condition`, such as valid bits, enables, flush/kill gates, key register names, and relevant input/output port names when they are part of the condition.
+- Good style example: `inst_vld_o = inst_vld & issue_grant & !flush`
+- Bad style example: `the instruction leaves the module when local gating allows progress`
+- Keep `value_condition` as a current-module condition only. Do not use it for route descriptions, target-module guesses, or vague summaries.
+- `behavior` must be a short textual description of what that output handoff means. Do not use it for target-module guesses or structured routing metadata.
+- Each `boundary_handoffs` item must contain only `output_port`, `value_condition`, and `behavior`.
 - Do not guess target modules or target ports in `boundary_handoffs`; Python resolves destinations after generation.
 - If the trace ends here, return an empty `boundary_handoffs` array and explain closure in `unknown`.
 

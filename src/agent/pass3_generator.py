@@ -1664,7 +1664,7 @@ class Pass3Generator:
                 orchestrate_index_payload = {
                     "instruction": instruction,
                     "start_module": parsed_search.get("start_module", ""),
-                    "schema_version": "pass3_3_2_orchestrate_index_v1",
+                    "schema_version": "pass3_3_2_orchestrate_index_v2",
                     "items": orchestrate_items,
                 }
                 orchestrate_index_text = json.dumps(orchestrate_index_payload, ensure_ascii=False, indent=2)

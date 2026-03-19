@@ -30,7 +30,7 @@ class Pass3InStrackStages:
         search_result_json_text: str,
     ) -> str:
         payload = {
-            "version": "pass3_3_instrack_orchestrate_cache_v1",
+            "version": "pass3_3_instrack_orchestrate_cache_v2",
             "top_module": top_module,
             "instruction": instruction,
             "system_prompt": PASS3_3_2_ORCHESTRATE_SYSTEM,
@@ -256,23 +256,14 @@ class Pass3InStrackStages:
             for item in boundary_handoffs:
                 if not isinstance(item, dict):
                     continue
-                egress_port = str(item.get("egress_port") or "").strip()
-                if not egress_port:
+                output_port = str(item.get("output_port") or "").strip()
+                if not output_port:
                     continue
-                norm_handoffs.append(
-                    {
-                        "source_block": str(item.get("source_block") or "").strip(),
-                        "source_state": self._coerce_text_field(item.get("source_state")),
-                        "egress_port": egress_port,
-                        "value_kind": str(item.get("value_kind") or "other").strip() or "other",
-                        "semantic": self._coerce_text_field(item.get("semantic")),
-                        "behavior": self._coerce_text_field(item.get("behavior")),
-                        "resolutions": [],
-                        "status": str(item.get("status") or "").strip(),
-                        "confidence": str(item.get("confidence") or payload["confidence"]).strip().lower() or payload["confidence"],
-                        "unknown": self._coerce_text_field(item.get("unknown")),
-                    }
-                )
+                norm_handoffs.append({
+                    "output_port": output_port,
+                    "value_condition": self._coerce_text_field(item.get("value_condition")),
+                    "behavior": self._coerce_text_field(item.get("behavior")),
+                })
             payload["boundary_handoffs"] = norm_handoffs
 
         return payload
@@ -287,6 +278,32 @@ class Pass3InStrackStages:
             return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         except Exception:
             return str(value).strip()
+
+    def _normalize_public_boundary_handoff(self, raw: Any) -> Dict[str, str]:
+        item = raw if isinstance(raw, dict) else {}
+        return {
+            "output_port": str(item.get("output_port") or "").strip(),
+            "value_condition": self._coerce_text_field(item.get("value_condition")),
+            "behavior": self._coerce_text_field(item.get("behavior")),
+        }
+
+    def _boundary_handoff_display_text(self, raw: Any) -> str:
+        item = raw if isinstance(raw, dict) else {}
+        value_condition = self._coerce_text_field(item.get("value_condition"))
+        if value_condition:
+            return value_condition
+        return self._coerce_text_field(item.get("behavior"))
+
+    def _get_resolved_boundary_handoffs(self, payload: Any) -> List[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        resolved = payload.get("_boundary_handoff_routes")
+        if isinstance(resolved, list):
+            return [dict(item) for item in resolved if isinstance(item, dict)]
+        handoffs = payload.get("boundary_handoffs")
+        if isinstance(handoffs, list):
+            return [dict(item) for item in handoffs if isinstance(item, dict)]
+        return []
 
     def _coerce_lifecycle_history(self, lifecycle_context: Any) -> List[Dict[str, str]]:
         history: List[Dict[str, str]] = []
@@ -416,7 +433,7 @@ class Pass3InStrackStages:
         start_path = start_node.get_path() if hasattr(start_node, "get_path") else start_node.instance_name
         recorded_paths: Set[str] = {start_path}
         orchestrate_cache[start_path] = start_item
-        pending_handoffs = list((start_item.get("orchestration") or {}).get("boundary_handoffs") or [])
+        pending_handoffs = self._get_resolved_boundary_handoffs(start_item.get("orchestration") or {})
         pending_payload = dict(start_item.get("orchestration") or {})
 
         # Step 2: climb to top and orchestrate parent-context bridges level by level.
@@ -504,7 +521,7 @@ class Pass3InStrackStages:
             results.append(parent_item)
             recorded_paths.add(parent_path)
             orchestrate_cache[parent_path] = parent_item
-            pending_handoffs = list((parent_item.get("orchestration") or {}).get("boundary_handoffs") or [])
+            pending_handoffs = self._get_resolved_boundary_handoffs(parent_item.get("orchestration") or {})
             pending_payload = dict(parent_item.get("orchestration") or {})
 
         return results
@@ -563,8 +580,8 @@ class Pass3InStrackStages:
         for item in handoffs or []:
             if not isinstance(item, dict):
                 continue
-            egress_port = str(item.get("egress_port") or "").strip()
-            semantic = self._coerce_text_field(item.get("semantic"))
+            output_port = str(item.get("output_port") or "").strip()
+            summary_text = self._boundary_handoff_display_text(item)
             resolutions = list(item.get("resolutions") or [])
             targets: List[str] = []
             for resolution in resolutions:
@@ -587,9 +604,9 @@ class Pass3InStrackStages:
             preview = "; ".join(targets[:3])
             if len(targets) > 3:
                 preview += f"; +{len(targets) - 3}"
-            head = egress_port or "unknown_port"
-            if semantic:
-                head = f"{head}({semantic})"
+            head = output_port or "unknown_port"
+            if summary_text:
+                head = f"{head}({summary_text})"
             lines.append(f"{head} -> {preview}" if preview else head)
         return lines[:6]
 
@@ -671,13 +688,13 @@ class Pass3InStrackStages:
             if not isinstance(raw_item, dict):
                 continue
             handoff = dict(raw_item)
-            egress_port = str(handoff.get("egress_port") or "").strip()
-            norm_port = self._normalize_signal_name(egress_port)
-            if not egress_port:
+            output_port = str(handoff.get("output_port") or "").strip()
+            norm_port = self._normalize_signal_name(output_port)
+            if not output_port:
                 handoff["status"] = "invalid"
                 handoff["unknown"] = self._append_reason(
                     str(handoff.get("unknown") or ""),
-                    "missing egress_port",
+                    "missing output_port",
                 )
                 validated.append(handoff)
                 continue
@@ -687,7 +704,7 @@ class Pass3InStrackStages:
                 handoff["status"] = "invalid"
                 handoff["unknown"] = self._append_reason(
                     str(handoff.get("unknown") or ""),
-                    f"egress_port '{egress_port}' is not a declared port of module '{node.module_name}'",
+                    f"output_port '{output_port}' is not a declared port of module '{node.module_name}'",
                 )
                 validated.append(handoff)
                 continue
@@ -696,7 +713,7 @@ class Pass3InStrackStages:
                 handoff["status"] = "invalid"
                 handoff["unknown"] = self._append_reason(
                     str(handoff.get("unknown") or ""),
-                    f"egress_port '{egress_port}' is not an output port",
+                    f"output_port '{output_port}' is not an output port",
                 )
                 validated.append(handoff)
                 continue
@@ -705,7 +722,7 @@ class Pass3InStrackStages:
                 handoff["status"] = "invalid"
                 handoff["unknown"] = self._append_reason(
                     str(handoff.get("unknown") or ""),
-                    f"duplicate boundary_handoff for egress_port '{egress_port}'",
+                    f"duplicate boundary_handoff for output_port '{output_port}'",
                 )
                 validated.append(handoff)
                 continue
@@ -738,18 +755,18 @@ class Pass3InStrackStages:
             if not isinstance(item, dict):
                 continue
             handoff = dict(item)
-            egress_port = str(handoff.get("egress_port") or "").strip()
+            output_port = str(handoff.get("output_port") or "").strip()
             handoff["source_instance_path"] = source_path
             handoff["source_module"] = source_child_node.module_name
             handoff["source_instance"] = source_child_node.instance_name
-            handoff["handoff_id"] = f"{source_path}::{egress_port}" if egress_port else f"{source_path}::unknown"
+            handoff["handoff_id"] = f"{source_path}::{output_port}" if output_port else f"{source_path}::unknown"
             handoff["source_direction"] = ""
             handoff["parent_wire"] = ""
             handoff["resolutions"] = []
 
-            if not egress_port:
+            if not output_port:
                 handoff["status"] = "invalid"
-                handoff["unknown"] = self._append_reason(str(handoff.get("unknown") or ""), "missing egress_port")
+                handoff["unknown"] = self._append_reason(str(handoff.get("unknown") or ""), "missing output_port")
                 enriched.append(handoff)
                 continue
 
@@ -759,7 +776,7 @@ class Pass3InStrackStages:
 
             port_dir = ""
             for name, direction in source_port_dirs.items():
-                if self._normalize_signal_name(name) == self._normalize_signal_name(egress_port):
+                if self._normalize_signal_name(name) == self._normalize_signal_name(output_port):
                     port_dir = direction
                     break
             handoff["source_direction"] = port_dir
@@ -767,18 +784,18 @@ class Pass3InStrackStages:
                 handoff["status"] = "invalid"
                 handoff["unknown"] = self._append_reason(
                     str(handoff.get("unknown") or ""),
-                    f"egress_port '{egress_port}' is not an output port",
+                    f"output_port '{output_port}' is not an output port",
                 )
                 enriched.append(handoff)
                 continue
 
-            raw_wire = self._lookup_port_connection(source_child_node, egress_port)
+            raw_wire = self._lookup_port_connection(source_child_node, output_port)
             norm_wire = self._normalize_signal_name(raw_wire)
             if not raw_wire or raw_wire.startswith("[") or not norm_wire:
                 handoff["status"] = "unresolved"
                 handoff["unknown"] = self._append_reason(
                     str(handoff.get("unknown") or ""),
-                    f"no resolvable parent wire for egress_port '{egress_port}'",
+                    f"no resolvable parent wire for output_port '{output_port}'",
                 )
                 enriched.append(handoff)
                 continue
@@ -836,7 +853,7 @@ class Pass3InStrackStages:
                 handoff["status"] = "unresolved"
                 handoff["unknown"] = self._append_reason(
                     str(handoff.get("unknown") or ""),
-                    f"no strict boundary match for egress_port '{egress_port}' on wire '{norm_wire}'",
+                    f"no strict boundary match for output_port '{output_port}' on wire '{norm_wire}'",
                 )
             enriched.append(handoff)
         return enriched
@@ -929,17 +946,17 @@ class Pass3InStrackStages:
         for item in handoffs or []:
             if not isinstance(item, dict):
                 continue
-            egress_port = str(item.get("egress_port") or "").strip()
-            if not egress_port:
+            output_port = str(item.get("output_port") or "").strip()
+            if not output_port:
                 continue
             source_instance = str(item.get("source_instance") or default_source_instance).strip()
             source_module = str(item.get("source_module") or default_source_module).strip()
             source_instance_path = str(item.get("source_instance_path") or default_source_path or "").strip()
             source_handoff_id = str(item.get("handoff_id") or "").strip()
             if not source_handoff_id and source_instance_path:
-                source_handoff_id = f"{source_instance_path}::{egress_port}"
-            semantic = self._coerce_text_field(item.get("semantic"))
-            value_kind = str(item.get("value_kind") or "other").strip() or "other"
+                source_handoff_id = f"{source_instance_path}::{output_port}"
+            semantic = self._boundary_handoff_display_text(item)
+            value_kind = "other"
             fallback_parent_wire = str(item.get("parent_wire") or "").strip()
 
             for resolution in list(item.get("resolutions") or []):
@@ -969,7 +986,7 @@ class Pass3InStrackStages:
                         "source_instance": source_instance,
                         "source_module": source_module,
                         "source_instance_path": source_instance_path,
-                        "source_port": egress_port,
+                        "source_port": output_port,
                         "source_handoff_id": source_handoff_id,
                         "parent_wire": str(resolution.get("parent_wire") or fallback_parent_wire).strip(),
                     },
@@ -1050,12 +1067,9 @@ class Pass3InStrackStages:
         for item in handoffs or []:
             if not isinstance(item, dict):
                 continue
-            egress_port = str(item.get("egress_port") or "").strip()
-            semantic = self._coerce_text_field(item.get("semantic"))
-            value_kind = str(item.get("value_kind") or "other").strip() or "other"
+            output_port = str(item.get("output_port") or "").strip()
+            value_condition = self._coerce_text_field(item.get("value_condition"))
             behavior = self._coerce_text_field(item.get("behavior"))
-            source_block = str(item.get("source_block") or "").strip()
-            source_state = self._coerce_text_field(item.get("source_state"))
             status = str(item.get("status") or "").strip()
             parent_wire = str(item.get("parent_wire") or "").strip()
 
@@ -1085,18 +1099,15 @@ class Pass3InStrackStages:
                             {
                                 "parent_port": parent_port,
                                 "parent_wire": str(resolution.get("parent_wire") or parent_wire).strip(),
-                                "source_port": egress_port,
+                                "source_port": output_port,
                             }
                         )
 
-            if egress_port or semantic or source_block or source_state:
+            if output_port or value_condition or behavior:
                 handoff_entry: Dict[str, Any] = {
-                    "egress_port": egress_port,
-                    "semantic": semantic,
-                    "value_kind": value_kind,
+                    "output_port": output_port,
+                    "value_condition": value_condition,
                     "behavior": behavior,
-                    "source_block": source_block,
-                    "source_state": source_state,
                     "status": status,
                     "parent_wire": parent_wire,
                 }
@@ -1105,7 +1116,7 @@ class Pass3InStrackStages:
                 resolved_handoffs.append(handoff_entry)
 
             if status in {"unresolved", "invalid"}:
-                label = egress_port or semantic or source_block or "unknown"
+                label = output_port or value_condition or behavior or "unknown"
                 if label and label not in unresolved:
                     unresolved.append(label)
 
@@ -1173,7 +1184,7 @@ class Pass3InStrackStages:
     ) -> Dict[str, Any]:
         del inherited_bridge_context
         payload = dict((child_item or {}).get("orchestration") or {})
-        handoffs = list(payload.get("boundary_handoffs") or [])
+        handoffs = self._get_resolved_boundary_handoffs(payload)
         next_bridge_context = self._build_bridge_context(
             parent_node=parent_node,
             source_child_node=child_node,
@@ -1204,13 +1215,19 @@ class Pass3InStrackStages:
             list(out.get("boundary_handoffs") or []),
         )
         if getattr(node, "parent", None) is not None and boundary_handoffs:
-            out["boundary_handoffs"] = self._resolve_boundary_handoff_destinations(
+            resolved_handoffs = self._resolve_boundary_handoff_destinations(
                 parent_node=node.parent,
                 source_child_node=node,
                 boundary_handoffs=boundary_handoffs,
             )
         else:
-            out["boundary_handoffs"] = boundary_handoffs
+            resolved_handoffs = boundary_handoffs
+        out["boundary_handoffs"] = [
+            self._normalize_public_boundary_handoff(item)
+            for item in resolved_handoffs
+            if str(item.get("output_port") or "").strip() and str(item.get("status") or "").strip() != "invalid"
+        ]
+        out["_boundary_handoff_routes"] = resolved_handoffs
         return out
 
     def _compact_tool_text(self, value: Any, max_chars: int = 220) -> str:
@@ -1234,13 +1251,13 @@ class Pass3InStrackStages:
             if not isinstance(raw, dict):
                 continue
             item: Dict[str, Any] = {}
-            for key in ("egress_port", "status", "value_kind"):
+            for key in ("output_port", "status"):
                 value = str(raw.get(key) or "").strip()
                 if value:
                     item[key] = value
-            semantic = self._compact_tool_text(raw.get("semantic"), max_chars=160)
-            if semantic:
-                item["semantic"] = semantic
+            value_condition = self._compact_tool_text(raw.get("value_condition"), max_chars=160)
+            if value_condition:
+                item["value_condition"] = value_condition
             behavior = self._compact_tool_text(raw.get("behavior"), max_chars=180)
             if behavior:
                 item["behavior"] = behavior
@@ -1314,7 +1331,7 @@ class Pass3InStrackStages:
         cached: bool = False,
     ) -> str:
         payload = dict(child_item.get("orchestration") or {})
-        boundary_handoffs = list(payload.get("boundary_handoffs") or [])
+        boundary_handoffs = self._get_resolved_boundary_handoffs(payload)
         result = {
             "child": {
                 "module": str(child_item.get("module") or payload.get("module") or "").strip(),
@@ -1372,8 +1389,10 @@ class Pass3InStrackStages:
         prev_id = node_id
 
         for idx, handoff in enumerate(handoffs[:4], start=1):
-            port = self._sanitize_mermaid_label(handoff.get("egress_port") or f"egress_{idx}")
-            semantic = self._sanitize_mermaid_label(handoff.get("semantic") or handoff.get("behavior") or "")
+            port = self._sanitize_mermaid_label(handoff.get("output_port") or f"output_{idx}")
+            semantic = self._sanitize_mermaid_label(
+                handoff.get("value_condition") or handoff.get("behavior") or ""
+            )
             node_id = f"H{idx}"
             label = f"EXIT {port}"
             if semantic:
