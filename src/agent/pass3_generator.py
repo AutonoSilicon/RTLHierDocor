@@ -317,6 +317,16 @@ class Pass3Generator:
         )
 
     @staticmethod
+    def _pass3_3_1_resume_enabled() -> bool:
+        """Pass 3.3.1 search artifacts are reusable across reruns."""
+        return True
+
+    @staticmethod
+    def _pass3_3_2_resume_enabled() -> bool:
+        """Pass 3.3.2 orchestration is intentionally rerun every time."""
+        return False
+
+    @staticmethod
     def _instrack_datasheet_path() -> Path:
         from .pass3_isa import instrack_datasheet_path
         return instrack_datasheet_path()
@@ -494,6 +504,7 @@ class Pass3Generator:
         boundary_takeover: Optional[List[Dict[str, Any]]] = None,
         lifecycle_context: Optional[List[Dict[str, Any]]] = None,
         continuation_source: Optional[Dict[str, Any]] = None,
+        override_hint: Optional[Dict[str, Any]] = None,
     ) -> str:
         return self._prompts.build_instrack_orchestrate_state_json(
             current_module=current_module,
@@ -501,6 +512,7 @@ class Pass3Generator:
             boundary_takeover=boundary_takeover,
             lifecycle_context=lifecycle_context,
             continuation_source=continuation_source,
+            override_hint=override_hint,
         )
 
     def _pass3_recursive_tools(self, prompt_style: str = "architecture") -> List[Dict[str, Any]]:
@@ -1466,7 +1478,14 @@ class Pass3Generator:
             )
 
             search_content: Optional[str] = None
-            if self.owner.project_tracker.is_done(artifact_search_md, str(out_search_md), expected_input_hash=search_input_hash):
+            if (
+                self._pass3_3_1_resume_enabled()
+                and self.owner.project_tracker.is_done(
+                    artifact_search_md,
+                    str(out_search_md),
+                    expected_input_hash=search_input_hash,
+                )
+            ):
                 try:
                     search_content = out_search_md.read_text(encoding="utf-8")
                 except Exception:
@@ -1622,10 +1641,13 @@ class Pass3Generator:
             )
 
             orchestrate_items: List[Dict[str, Any]] = []
-            if self.owner.project_tracker.is_done(
-                artifact_orchestrate_index_json,
-                str(orchestrate_index_path),
-                expected_input_hash=orchestrate_input_hash,
+            if (
+                self._pass3_3_2_resume_enabled()
+                and self.owner.project_tracker.is_done(
+                    artifact_orchestrate_index_json,
+                    str(orchestrate_index_path),
+                    expected_input_hash=orchestrate_input_hash,
+                )
             ):
                 try:
                     orchestrate_payload = json.loads(orchestrate_index_path.read_text(encoding="utf-8"))

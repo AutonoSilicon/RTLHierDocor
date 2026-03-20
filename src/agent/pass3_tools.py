@@ -195,7 +195,7 @@ class Pass3Tools:
                 "type": "function",
                 "function": {
                     "name": "drawChild",
-                    "description": "Draw one direct child's orchestration summary only when the current module evidence cannot finish the local instruction path. Return only the child's structured boundary summary (boundary handoffs, next-child candidates, confidence, unknowns). If that child was already drawn earlier in this run, return the cached orchestration result instead of redrawing it. If no child expansion is needed, output the result directly.",
+                    "description": "Draw one direct child's orchestration summary only when the current module evidence cannot finish the local instruction path. Return only the child's structured boundary summary (boundary handoffs, next-child candidates, confidence, unknowns). If the requested direct child is not supported by the current continuation, the first call may return an advisory_non_direct_child result with a recommended relay child instead of drawing immediately. If that child was already drawn earlier in this run, return the cached orchestration result instead of redrawing it. If no child expansion is needed, output the result directly.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -205,10 +205,10 @@ class Pass3Tools:
                             },
                             "task": {
                                 "type": "string",
-                                "description": "Optional free-form child draw goal in current continuation context.",
+                                "description": "Required free-form child draw goal in current continuation context. Must be non-empty.",
                             },
                         },
-                        "required": ["module"],
+                        "required": ["module", "task"],
                     },
                 },
             },

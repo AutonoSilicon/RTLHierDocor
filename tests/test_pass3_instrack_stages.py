@@ -1,4 +1,5 @@
 import json
+import hashlib
 
 from agent.pass3_instrack_stages import Pass3InStrackStages
 
@@ -28,11 +29,15 @@ class FakeModule:
 
 
 class FakeBackend:
-    def __init__(self, modules):
+    def __init__(self, modules, dot_map=None):
         self._modules = dict(modules)
+        self._dot_map = dict(dot_map or {})
 
     def get_module(self, module_name):
         return self._modules.get(module_name)
+
+    def generate_dot(self, module_name):
+        return self._dot_map.get(module_name)
 
 
 class FakeResolver:
@@ -67,6 +72,9 @@ class FakeGenerator:
     def __init__(self, owner):
         self.owner = owner
 
+    def _hash_text(self, text):
+        return hashlib.md5(str(text or "").encode("utf-8")).hexdigest()
+
 
 class FakeNode:
     def __init__(self, module_name, instance_name, *, parent=None, port_connections=None):
@@ -85,7 +93,41 @@ class FakeNode:
         return f"{self.parent.get_path()}/{self.instance_name}"
 
 
-def make_stages():
+def make_parent_dot():
+    return r'''
+digraph "parent_mod" {
+label="parent_mod";
+rankdir="LR";
+n_out [ shape=octagon, label="top_out", color="black", fontcolor="black"];
+n_in [ shape=octagon, label="top_in", color="black", fontcolor="black"];
+n_dang [ shape=diamond, label="dang_buf", color="black", fontcolor="black"];
+c_src [ shape=record, label="{{<p1> bad}|x_src\nsrc_mod|{<p2> out1|<p3> out2|<p4> dangling}}",  ];
+c_mid [ shape=record, label="{{<p30> bad}|x_mid\nsrc_mod|{<p31> out1|<p32> out2|<p33> dangling}}",  ];
+c_dst0 [ shape=record, label="{{<p5> in_a}|x_dst0\ndst_mod|{<p6> out}}",  ];
+c_dst1 [ shape=record, label="{{<p7> in_b}|x_dst1\ndst_mod|{<p8> out}}",  ];
+c_mid_dst0 [ shape=record, label="{{<p40> in_a}|x_mid_dst0\ndst_mod|{<p41> out}}",  ];
+c_mid_dst1 [ shape=record, label="{{<p42> in_b}|x_mid_dst1\ndst_mod|{<p43> out}}",  ];
+c_comb [ shape=record, label="{{<p10> A}|$1\n$buf|{<p11> Y}}",  ];
+c_seq [ shape=record, label="{{<p20> CLK|<p21> D}|$2\n$dff|{<p22> Q}}",  ];
+x0 [shape=point, ];
+x1 [shape=point, ];
+c_src:p2:e -> c_comb:p10:w [color="black", fontcolor="black", label=""];
+c_comb:p11:e -> x0:w [color="black", fontcolor="black", label=""];
+x0:e -> c_dst0:p5:w [color="black", fontcolor="black", label=""];
+x0:e -> c_dst1:p7:w [color="black", fontcolor="black", label=""];
+c_src:p3:e -> n_out:w [color="black", fontcolor="black", label=""];
+c_src:p4:e -> n_dang:w [color="black", fontcolor="black", label=""];
+n_in:e -> c_seq:p20:w [color="black", fontcolor="black", label=""];
+c_mid:p31:e -> c_seq:p21:w [color="black", fontcolor="black", label=""];
+c_seq:p22:e -> x1:w [color="black", fontcolor="black", label=""];
+x1:e -> c_mid_dst0:p40:w [color="black", fontcolor="black", label=""];
+x1:e -> c_mid_dst1:p42:w [color="black", fontcolor="black", label=""];
+c_mid:p32:e -> n_out:w [color="black", fontcolor="black", label=""];
+}
+'''.strip()
+
+
+def make_stages(dot_map=None):
     backend = FakeBackend(
         {
             "parent_mod": FakeModule(
@@ -108,7 +150,8 @@ def make_stages():
                     FakeWire("\\in_b", port_input=True),
                 ]
             ),
-        }
+        },
+        dot_map=dot_map or {"parent_mod": make_parent_dot()},
     )
     owner = FakeOwner(backend, graphs={"parent_mod": FakeGraph({"top_out": "\\top_out"})})
     return Pass3InStrackStages(FakeGenerator(owner))
@@ -240,7 +283,7 @@ def test_resolve_boundary_handoff_destinations_enriches_resolution_status_and_id
             "target_instance": "x_dst0",
             "target_module": "dst_mod",
             "target_port": "in_a",
-            "match_policy": "exact_port",
+            "match_policy": "graph_forward",
         },
         {
             "resolution_kind": "sibling_child",
@@ -248,7 +291,7 @@ def test_resolve_boundary_handoff_destinations_enriches_resolution_status_and_id
             "target_instance": "x_dst1",
             "target_module": "dst_mod",
             "target_port": "in_b",
-            "match_policy": "exact_port",
+            "match_policy": "graph_forward",
         },
     ]
 
@@ -259,7 +302,7 @@ def test_resolve_boundary_handoff_destinations_enriches_resolution_status_and_id
             "resolution_kind": "exit_parent",
             "parent_wire": "top_out",
             "parent_port": "top_out",
-            "match_policy": "exact_port",
+            "match_policy": "graph_forward",
         }
     ]
 
@@ -268,7 +311,7 @@ def test_resolve_boundary_handoff_destinations_enriches_resolution_status_and_id
 
     assert dangling["status"] == "unresolved"
     assert dangling["parent_wire"] == "dangling_wire"
-    assert "no strict boundary match" in dangling["unknown"]
+    assert "graph_forward search did not reach" in dangling["unknown"]
 
 
 def test_build_boundary_takeover_only_keeps_exact_child_matches():
@@ -351,7 +394,7 @@ def test_prepare_child_continuation_inputs_warns_and_keeps_source_when_takeover_
         "source_module": "src_mod",
         "source_instance_path": "top/x_src",
     }
-    assert "No Python-validated boundary_takeover exists" in warning
+    assert "No graph-resolved boundary_takeover exists" in warning
     assert "x_dst1(dst_mod)" in warning
 
 
@@ -394,6 +437,129 @@ def test_prepare_child_continuation_inputs_returns_takeover_without_warning():
         "source_instance_path": "top/x_src",
     }
     assert warning == ""
+
+
+def test_prepare_child_continuation_inputs_suppresses_generic_warning_for_override_hint():
+    stages = make_stages()
+    parent, source, _, dst1 = make_parent_tree()
+
+    takeover, continuation_source, warning = stages._prepare_child_continuation_inputs(
+        parent_node=parent,
+        source_child_node=source,
+        target_child_node=dst1,
+        handoffs=[
+            {
+                "output_port": "out2",
+                "parent_wire": "top_out",
+                "behavior": "leave parent",
+                "resolutions": [
+                    {
+                        "resolution_kind": "exit_parent",
+                        "parent_wire": "top_out",
+                        "parent_port": "top_out",
+                    }
+                ],
+            }
+        ],
+        override_hint={"mode": "guided_relay_override"},
+    )
+
+    assert takeover == []
+    assert continuation_source == {
+        "source_instance": "x_src",
+        "source_module": "src_mod",
+        "source_instance_path": "top/x_src",
+    }
+    assert warning == ""
+
+
+def test_build_non_direct_child_advisory_tool_result_reports_retry_contract_and_candidates():
+    stages = make_stages()
+    parent, source, dst0, _ = make_parent_tree()
+    advisory = type(
+        "Advisory",
+        (),
+        {
+            "recommended_child": {"instance": "x_dst0", "module": "dst_mod", "path": "top/x_dst0"},
+            "advisory_path": [
+                {"instance": "x_mid", "module": "mid_mod", "path": "top/x_mid"},
+                {"instance": "x_dst0", "module": "dst_mod", "path": "top/x_dst0"},
+            ],
+            "skipped_children": [
+                {"instance": "x_mid", "module": "mid_mod", "path": "top/x_mid"},
+            ],
+            "reason": "heuristic relay path exists",
+        },
+    )()
+
+    result = stages._build_non_direct_child_advisory_tool_result(
+        source_child_node=source,
+        requested_child_node=dst0,
+        authoritative_candidates=[{"target_instance": "x_dst1", "target_module": "dst_mod"}],
+        advisory=advisory,
+    )
+    payload = json.loads(result.removeprefix("```json\n").removesuffix("\n```"))
+
+    assert payload["status"] == "advisory_non_direct_child"
+    assert payload["source_child"] == {"instance": "x_src", "module": "src_mod", "path": "top/x_src"}
+    assert payload["requested_child"] == {"instance": "x_dst0", "module": "dst_mod", "path": "top/x_dst0"}
+    assert payload["authoritative_candidates"] == [{"instance": "x_dst1", "module": "dst_mod"}]
+    assert payload["recommended_child"] == {"instance": "x_dst0", "module": "dst_mod", "path": "top/x_dst0"}
+    assert payload["retry_contract"].startswith("Repeat the same child once")
+
+
+def test_child_refs_match_treats_requested_and_recommended_same_child_as_equal():
+    stages = make_stages()
+
+    assert stages._child_refs_match(
+        {"instance": "x_dst0", "module": "dst_mod", "path": "top/x_dst0"},
+        {"instance": "x_dst0", "module": "dst_mod", "path": "top/x_dst0"},
+    )
+    assert stages._child_refs_match(
+        {"instance": "x_dst0", "module": "dst_mod"},
+        {"instance": "x_dst0", "module": "other_name"},
+    )
+    assert not stages._child_refs_match(
+        {"instance": "x_dst0", "module": "dst_mod", "path": "top/x_dst0"},
+        {"instance": "x_dst1", "module": "dst_mod", "path": "top/x_dst1"},
+    )
+
+
+def test_active_continuation_signature_changes_when_takeover_changes():
+    stages = make_stages()
+    parent, source, dst0, dst1 = make_parent_tree()
+    handoffs = [
+        {
+            "output_port": "out1",
+            "parent_wire": "shared_wire",
+            "resolutions": [
+                {
+                    "resolution_kind": "sibling_child",
+                    "target_instance": "x_dst0",
+                    "target_module": "dst_mod",
+                    "target_port": "in_a",
+                }
+            ],
+        }
+    ]
+    state_a = stages._build_active_continuation(
+        parent_node=parent,
+        source_child_node=source,
+        handoffs=handoffs,
+        source_payload={"lifecycle_context": "A"},
+        boundary_takeover=[{"input_port": "in_a", "value_condition": "out1", "behavior": "to dst0"}],
+    )
+    state_b = stages._build_active_continuation(
+        parent_node=parent,
+        source_child_node=source,
+        handoffs=handoffs,
+        source_payload={"lifecycle_context": "A"},
+        boundary_takeover=[{"input_port": "in_b", "value_condition": "out1", "behavior": "to dst1"}],
+    )
+
+    assert stages._compute_active_continuation_signature(state_a) != stages._compute_active_continuation_signature(
+        state_b
+    )
 
 
 def test_build_bridge_context_collects_candidate_children_and_parent_exits():

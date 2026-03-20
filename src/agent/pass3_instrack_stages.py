@@ -14,6 +14,7 @@ from .prompts import (
     PASS3_3_2_ORCHESTRATE_SYSTEM,
     PASS3_3_2_ORCHESTRATE_PROMPT,
 )
+from .pass3_instrack_takeover import Pass3InStrackTakeoverResolver
 
 
 class Pass3InStrackStages:
@@ -21,6 +22,7 @@ class Pass3InStrackStages:
 
     def __init__(self, generator: Any):
         self.g = generator
+        self._takeover_resolver = Pass3InStrackTakeoverResolver(generator)
 
     def build_pass3_3_orchestrate_input_hash(
         self,
@@ -753,125 +755,11 @@ class Pass3InStrackStages:
         source_child_node: Any,
         boundary_handoffs: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        source_path = source_child_node.get_path() if hasattr(source_child_node, "get_path") else source_child_node.instance_name
-        source_port_dirs = self._get_module_port_directions(source_child_node.module_name)
-        graphs = getattr(self.g.owner, "_graphs", None)
-        graph = graphs.get(parent_node.module_name) if isinstance(graphs, dict) else None
-        io_norm_to_label: Dict[str, str] = {}
-        if graph is not None:
-            for _, io_label in dict(getattr(graph, "io_ports", {}) or {}).items():
-                label = str(io_label or "").strip().lstrip("\\")
-                norm = self._normalize_signal_name(label)
-                if norm:
-                    io_norm_to_label.setdefault(norm, label)
-
-        enriched: List[Dict[str, Any]] = []
-        for item in boundary_handoffs or []:
-            if not isinstance(item, dict):
-                continue
-            handoff = dict(item)
-            output_port = str(handoff.get("output_port") or "").strip()
-            handoff["source_instance_path"] = source_path
-            handoff["source_module"] = source_child_node.module_name
-            handoff["source_instance"] = source_child_node.instance_name
-            handoff["handoff_id"] = f"{source_path}::{output_port}" if output_port else f"{source_path}::unknown"
-            handoff["source_direction"] = ""
-            handoff["parent_wire"] = ""
-            handoff["resolutions"] = []
-
-            if not output_port:
-                handoff["status"] = "invalid"
-                handoff["unknown"] = self._append_reason(str(handoff.get("unknown") or ""), "missing output_port")
-                enriched.append(handoff)
-                continue
-
-            if str(handoff.get("status") or "").strip() == "invalid":
-                enriched.append(handoff)
-                continue
-
-            port_dir = ""
-            for name, direction in source_port_dirs.items():
-                if self._normalize_signal_name(name) == self._normalize_signal_name(output_port):
-                    port_dir = direction
-                    break
-            handoff["source_direction"] = port_dir
-            if port_dir and port_dir != "output":
-                handoff["status"] = "invalid"
-                handoff["unknown"] = self._append_reason(
-                    str(handoff.get("unknown") or ""),
-                    f"output_port '{output_port}' is not an output port",
-                )
-                enriched.append(handoff)
-                continue
-
-            raw_wire = self._lookup_port_connection(source_child_node, output_port)
-            norm_wire = self._normalize_signal_name(raw_wire)
-            if not raw_wire or raw_wire.startswith("[") or not norm_wire:
-                handoff["status"] = "unresolved"
-                handoff["unknown"] = self._append_reason(
-                    str(handoff.get("unknown") or ""),
-                    f"no resolvable parent wire for output_port '{output_port}'",
-                )
-                enriched.append(handoff)
-                continue
-
-            handoff["parent_wire"] = norm_wire
-            resolutions: List[Dict[str, str]] = []
-            seen_resolution: Set[str] = set()
-            for sibling in parent_node.children.values():
-                sibling_path = sibling.get_path() if hasattr(sibling, "get_path") else sibling.instance_name
-                if sibling_path == source_path:
-                    continue
-                for target_port, target_wire in dict(getattr(sibling, "port_connections", {}) or {}).items():
-                    target_norm_wire = self._normalize_signal_name(str(target_wire or ""))
-                    if target_norm_wire != norm_wire:
-                        continue
-                    target_dir = self._find_port_direction(sibling.module_name, str(target_port or "").strip())
-                    if target_dir and target_dir != "input":
-                        continue
-                    key = f"sibling|{sibling.instance_name}|{target_port}|{norm_wire}"
-                    if key in seen_resolution:
-                        continue
-                    seen_resolution.add(key)
-                    resolutions.append(
-                        {
-                            "resolution_kind": "sibling_child",
-                            "parent_wire": norm_wire,
-                            "target_instance": sibling.instance_name,
-                            "target_module": sibling.module_name,
-                            "target_port": str(target_port or "").strip(),
-                            "match_policy": "exact_port",
-                        }
-                    )
-
-            if norm_wire in io_norm_to_label:
-                parent_port = io_norm_to_label[norm_wire]
-                key = f"parent|{parent_port}|{norm_wire}"
-                if key not in seen_resolution:
-                    resolutions.append(
-                        {
-                            "resolution_kind": "exit_parent",
-                            "parent_wire": norm_wire,
-                            "parent_port": parent_port,
-                            "match_policy": "exact_port",
-                        }
-                    )
-
-            handoff["resolutions"] = resolutions
-            if resolutions:
-                kinds = {str(r.get("resolution_kind") or "") for r in resolutions}
-                if kinds == {"exit_parent"}:
-                    handoff["status"] = "exit_parent"
-                else:
-                    handoff["status"] = "resolved"
-            else:
-                handoff["status"] = "unresolved"
-                handoff["unknown"] = self._append_reason(
-                    str(handoff.get("unknown") or ""),
-                    f"no strict boundary match for output_port '{output_port}' on wire '{norm_wire}'",
-                )
-            enriched.append(handoff)
-        return enriched
+        return self._takeover_resolver.resolve(
+            parent_node=parent_node,
+            source_child_node=source_child_node,
+            boundary_handoffs=boundary_handoffs,
+        ).resolved_handoffs
 
     @staticmethod
     def _append_reason(base: str, extra: str) -> str:
@@ -938,61 +826,7 @@ class Pass3InStrackStages:
         source_child_node: Optional[Any] = None,
     ) -> List[Dict[str, Any]]:
         del source_child_node
-        bundles: Dict[str, Dict[str, Any]] = {}
-
-        for item in handoffs or []:
-            if not isinstance(item, dict):
-                continue
-            output_port = str(item.get("output_port") or "").strip()
-            if not output_port:
-                continue
-            value_condition = self._boundary_handoff_display_text(item)
-            behavior = self._coerce_text_field(item.get("behavior"))
-
-            for resolution in list(item.get("resolutions") or []):
-                if not isinstance(resolution, dict):
-                    continue
-                if str(resolution.get("resolution_kind") or "").strip() != "sibling_child":
-                    continue
-                target_instance = str(resolution.get("target_instance") or "").strip()
-                target_module = str(resolution.get("target_module") or "").strip()
-                ingress_port = str(resolution.get("target_port") or "").strip()
-                if not ingress_port or not (target_instance or target_module):
-                    continue
-                bundle_key = f"{target_instance}|{target_module}"
-                bundle = bundles.get(bundle_key)
-                if bundle is None:
-                    bundle = {
-                        "target_instance": target_instance,
-                        "target_module": target_module,
-                        "boundary_takeover": [],
-                    }
-                    bundles[bundle_key] = bundle
-                takeover_item = {
-                    "input_port": ingress_port,
-                    "value_condition": value_condition,
-                    "behavior": behavior,
-                }
-                dedupe_key = "|".join(
-                    [
-                        self._normalize_signal_name(ingress_port),
-                        str(takeover_item.get("value_condition") or "").strip(),
-                        str(takeover_item.get("behavior") or "").strip(),
-                    ]
-                )
-                seen_takeovers = bundle.setdefault("_seen_takeovers", set())
-                if dedupe_key in seen_takeovers:
-                    continue
-                seen_takeovers.add(dedupe_key)
-                bundle["boundary_takeover"].append(takeover_item)
-
-        grouped: List[Dict[str, Any]] = []
-        for bundle in bundles.values():
-            bundle.pop("_seen_takeovers", None)
-            bundle["boundary_takeover"] = self._normalize_boundary_takeover(bundle.get("boundary_takeover") or [])
-            if bundle["boundary_takeover"]:
-                grouped.append(bundle)
-        return grouped
+        return self._takeover_resolver.group_boundary_takeover_bundles(handoffs)
 
     def _build_boundary_takeover(
         self,
@@ -1002,21 +836,12 @@ class Pass3InStrackStages:
         target_child_node: Any,
         handoffs: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        for bundle in self._group_boundary_takeover_bundles(
+        del parent_node
+        del source_child_node
+        return self._takeover_resolver.build_boundary_takeover_for_target(
             handoffs=handoffs,
-            source_child_node=source_child_node,
-        ):
-            target_instance = str(bundle.get("target_instance") or "").strip()
-            target_module = str(bundle.get("target_module") or "").strip()
-            if target_instance and target_instance == str(target_child_node.instance_name or "").strip():
-                return list(bundle.get("boundary_takeover") or [])[:8]
-            if not target_instance and target_module and target_module == str(target_child_node.module_name or "").strip():
-                return list(bundle.get("boundary_takeover") or [])[:8]
-            if not target_instance and not target_module:
-                continue
-            if target_module and target_module == str(target_child_node.module_name or "").strip():
-                return list(bundle.get("boundary_takeover") or [])[:8]
-        return []
+            target_child_node=target_child_node,
+        )
 
     def _prepare_child_continuation_inputs(
         self,
@@ -1026,6 +851,7 @@ class Pass3InStrackStages:
         target_child_node: Any,
         handoffs: List[Dict[str, Any]],
         bridge_context: Optional[Dict[str, Any]] = None,
+        override_hint: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, str], str]:
         child_boundary_takeover: List[Dict[str, Any]] = []
         child_continuation_source: Dict[str, str] = {}
@@ -1043,9 +869,9 @@ class Pass3InStrackStages:
             source_child_node,
             bridge_context,
         )
-        if not child_boundary_takeover:
+        if not child_boundary_takeover and not override_hint:
             warning = (
-                "No Python-validated boundary_takeover exists for "
+                "No graph-resolved boundary_takeover exists for "
                 f"{target_child_node.instance_name}({target_child_node.module_name}) in the current continuation; "
                 "proceeding with empty takeover bridge."
             )
@@ -1147,6 +973,163 @@ class Pass3InStrackStages:
             "unresolved": unresolved[:6],
         }
 
+    @staticmethod
+    def _build_child_ref(node: Any) -> Dict[str, str]:
+        path = node.get_path() if hasattr(node, "get_path") else node.instance_name
+        return {
+            "instance": str(getattr(node, "instance_name", "") or "").strip(),
+            "module": str(getattr(node, "module_name", "") or "").strip(),
+            "path": str(path or "").strip(),
+        }
+
+    @staticmethod
+    def _format_child_ref_debug(ref: Any) -> str:
+        if isinstance(ref, dict):
+            instance_name = str(ref.get("instance") or "").strip()
+            module_name = str(ref.get("module") or "").strip()
+            path = str(ref.get("path") or "").strip()
+        else:
+            instance_name = str(getattr(ref, "instance_name", "") or "").strip()
+            module_name = str(getattr(ref, "module_name", "") or "").strip()
+            if hasattr(ref, "get_path"):
+                path = str(ref.get_path() or "").strip()
+            else:
+                path = instance_name
+        head = instance_name or module_name or "unknown"
+        if instance_name and module_name:
+            head = f"{instance_name}({module_name})"
+        if path:
+            return f"{head} @ {path}"
+        return head
+
+    @staticmethod
+    def _child_refs_match(left: Any, right: Any) -> bool:
+        def _normalize(ref: Any) -> Dict[str, str]:
+            if isinstance(ref, dict):
+                return {
+                    "instance": str(ref.get("instance") or "").strip(),
+                    "module": str(ref.get("module") or "").strip(),
+                    "path": str(ref.get("path") or "").strip(),
+                }
+            path = ""
+            if hasattr(ref, "get_path"):
+                path = str(ref.get_path() or "").strip()
+            return {
+                "instance": str(getattr(ref, "instance_name", "") or "").strip(),
+                "module": str(getattr(ref, "module_name", "") or "").strip(),
+                "path": path,
+            }
+
+        left_ref = _normalize(left)
+        right_ref = _normalize(right)
+        left_path = str(left_ref.get("path") or "").strip()
+        right_path = str(right_ref.get("path") or "").strip()
+        if left_path and right_path:
+            return left_path == right_path
+        left_instance = str(left_ref.get("instance") or "").strip()
+        right_instance = str(right_ref.get("instance") or "").strip()
+        if left_instance and right_instance:
+            return left_instance == right_instance
+        left_module = str(left_ref.get("module") or "").strip()
+        right_module = str(right_ref.get("module") or "").strip()
+        return bool(left_module and right_module and left_module == right_module)
+
+    def _normalize_candidate_child_refs(self, candidates: Any) -> List[Dict[str, str]]:
+        normalized: List[Dict[str, str]] = []
+        for raw in list(candidates or [])[:8]:
+            if not isinstance(raw, dict):
+                continue
+            instance_name = str(raw.get("target_instance") or raw.get("instance") or "").strip()
+            module_name = str(raw.get("target_module") or raw.get("module") or "").strip()
+            if not (instance_name or module_name):
+                continue
+            normalized.append(
+                {
+                    "instance": instance_name,
+                    "module": module_name,
+                }
+            )
+        return normalized
+
+    def _build_non_direct_child_advisory_tool_result(
+        self,
+        *,
+        source_child_node: Any,
+        requested_child_node: Any,
+        authoritative_candidates: List[Dict[str, Any]],
+        advisory: Any,
+    ) -> str:
+        payload: Dict[str, Any] = {
+            "status": "advisory_non_direct_child",
+            "requested_child": self._build_child_ref(requested_child_node),
+            "source_child": self._build_child_ref(source_child_node),
+            "authoritative_candidates": self._normalize_candidate_child_refs(authoritative_candidates),
+            "recommended_child": dict(getattr(advisory, "recommended_child", {}) or {}),
+            "advisory_path": list(getattr(advisory, "advisory_path", []) or []),
+            "reason": str(getattr(advisory, "reason", "") or "").strip(),
+            "retry_contract": (
+                "Repeat the same child once to force the override, "
+                "or call the recommended child once to accept the relay suggestion."
+            ),
+        }
+        skipped_children = list(getattr(advisory, "skipped_children", []) or [])
+        if skipped_children:
+            payload["skipped_children"] = skipped_children[:8]
+        return f"```json\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n```"
+
+    def _build_non_direct_child_override_hint(self, advisory: Dict[str, Any], mode: str) -> Dict[str, Any]:
+        return {
+            "mode": str(mode or "").strip(),
+            "source_child": dict(advisory.get("source_child") or {}),
+            "requested_child": dict(advisory.get("requested_child") or {}),
+            "recommended_child": dict(advisory.get("recommended_child") or {}),
+            "advisory_path": list(advisory.get("advisory_path") or []),
+            "reason": str(advisory.get("reason") or "").strip(),
+        }
+
+    def _compute_active_continuation_signature(self, active_continuation: Dict[str, Any]) -> str:
+        source_child_node = active_continuation.get("source_child_node")
+        source_path = ""
+        if source_child_node is not None:
+            source_path = (
+                source_child_node.get_path() if hasattr(source_child_node, "get_path") else source_child_node.instance_name
+            )
+        handoff_summary: List[Dict[str, Any]] = []
+        for raw in list(active_continuation.get("handoffs") or [])[:16]:
+            if not isinstance(raw, dict):
+                continue
+            item = {
+                "output_port": str(raw.get("output_port") or "").strip(),
+                "status": str(raw.get("status") or "").strip(),
+                "parent_wire": str(raw.get("parent_wire") or "").strip(),
+                "targets": [],
+            }
+            for resolution in list(raw.get("resolutions") or [])[:8]:
+                if not isinstance(resolution, dict):
+                    continue
+                item["targets"].append(
+                    {
+                        "kind": str(resolution.get("resolution_kind") or "").strip(),
+                        "target_instance": str(resolution.get("target_instance") or "").strip(),
+                        "target_module": str(resolution.get("target_module") or "").strip(),
+                        "target_port": str(resolution.get("target_port") or "").strip(),
+                        "parent_port": str(resolution.get("parent_port") or "").strip(),
+                    }
+                )
+            handoff_summary.append(item)
+        payload = {
+            "source_path": str(source_path or "").strip(),
+            "boundary_takeover": self._normalize_boundary_takeover(active_continuation.get("boundary_takeover")),
+            "continuation_source": dict(active_continuation.get("continuation_source") or {}),
+            "bridge_context": {
+                "candidate_children": self._normalize_candidate_child_refs(
+                    dict(active_continuation.get("bridge_context") or {}).get("candidate_children") or []
+                ),
+                "resolved_handoffs": handoff_summary,
+            },
+        }
+        return self.g._hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
     def _build_active_continuation(
         self,
         *,
@@ -1158,6 +1141,7 @@ class Pass3InStrackStages:
         bridge_context: Optional[Dict[str, Any]] = None,
         boundary_takeover: Optional[List[Dict[str, Any]]] = None,
         continuation_source: Optional[Dict[str, Any]] = None,
+        override_hint: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         state = {
             "source_child_node": source_child_node,
@@ -1167,6 +1151,7 @@ class Pass3InStrackStages:
             "bridge_context": dict(bridge_context or {}),
             "boundary_takeover": self._normalize_boundary_takeover(boundary_takeover),
             "continuation_source": dict(continuation_source or {}),
+            "override_hint": dict(override_hint or {}),
         }
         if source_child_node is not None and not state["bridge_context"]:
             state["bridge_context"] = self._build_bridge_context(
@@ -1225,10 +1210,7 @@ class Pass3InStrackStages:
     ) -> Dict[str, Any]:
         out = dict(payload or {})
         out["boundary_takeover"] = self._normalize_boundary_takeover(boundary_takeover)
-        boundary_handoffs = self._validate_boundary_handoffs_against_module(
-            node,
-            list(out.get("boundary_handoffs") or []),
-        )
+        boundary_handoffs = list(out.get("boundary_handoffs") or [])
         if getattr(node, "parent", None) is not None and boundary_handoffs:
             resolved_handoffs = self._resolve_boundary_handoff_destinations(
                 parent_node=node.parent,
@@ -1236,7 +1218,10 @@ class Pass3InStrackStages:
                 boundary_handoffs=boundary_handoffs,
             )
         else:
-            resolved_handoffs = boundary_handoffs
+            resolved_handoffs = self._validate_boundary_handoffs_against_module(
+                node,
+                boundary_handoffs,
+            )
         out["boundary_handoffs"] = [
             self._normalize_public_boundary_handoff(item)
             for item in resolved_handoffs
@@ -1448,6 +1433,7 @@ class Pass3InStrackStages:
         bridge_context: Optional[Dict[str, Any]] = None,
         boundary_takeover: Optional[List[Dict[str, Any]]] = None,
         continuation_source: Optional[Dict[str, Any]] = None,
+        override_hint: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         node_path = node.get_path() if hasattr(node, "get_path") else node.instance_name
 
@@ -1462,6 +1448,7 @@ class Pass3InStrackStages:
             bridge_context=bridge_context,
             boundary_takeover=boundary_takeover,
             continuation_source=continuation_source,
+            override_hint=override_hint,
         )
         prompt = PASS3_3_2_ORCHESTRATE_PROMPT.format(
             instruction=instruction,
@@ -1472,6 +1459,7 @@ class Pass3InStrackStages:
                 boundary_takeover=list(active_continuation.get("boundary_takeover") or []),
                 lifecycle_context=list(active_continuation.get("lifecycle_context") or []),
                 continuation_source=dict(active_continuation.get("continuation_source") or {}),
+                override_hint=dict(active_continuation.get("override_hint") or {}),
             ),
             module_preview=self.get_module_preview(node.module_name),
             current_module_topology=current_module_topology,
@@ -1479,10 +1467,38 @@ class Pass3InStrackStages:
         )
 
         continuation_round_idx = 0
+        pending_non_direct_advisories: Dict[str, Dict[str, Any]] = {}
+        dispatch_override_info: Dict[str, Any] = {}
+
+        def _advisory_key(continuation_signature: str, requested_path: str) -> str:
+            return f"{continuation_signature}||{requested_path}"
+
+        def _consume_pending_non_direct_advisory(
+            continuation_signature: str,
+            child_node: Any,
+        ) -> Tuple[Optional[Dict[str, Any]], str]:
+            requested_path = child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
+            exact_key = _advisory_key(continuation_signature, str(requested_path or "").strip())
+            exact = pending_non_direct_advisories.pop(exact_key, None)
+            if exact is not None:
+                return exact, "forced_non_direct_override"
+
+            child_path = str(requested_path or "").strip()
+            for key, advisory in list(pending_non_direct_advisories.items()):
+                if str(advisory.get("continuation_signature") or "").strip() != continuation_signature:
+                    continue
+                recommended_path = str(
+                    dict(advisory.get("recommended_child") or {}).get("path") or ""
+                ).strip()
+                if recommended_path and recommended_path == child_path:
+                    pending_non_direct_advisories.pop(key, None)
+                    return advisory, "guided_relay_override"
+            return None, ""
 
         async def _tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
             nonlocal active_continuation
             nonlocal continuation_round_idx
+            nonlocal dispatch_override_info
             if tool_name == "readSource":
                 module = str(args.get("module") or "").strip()
                 scoped_node, scope_error = self.g._resolve_scope_node(node, module, child_only=False)
@@ -1498,18 +1514,28 @@ class Pass3InStrackStages:
             if tool_name in {"drawChild", "forkSubAgent"}:
                 module = str(args.get("module") or "").strip()
                 child_task = str(args.get("task") or "").strip()
+
                 async def _run_child_orchestration(child_node: Any, resolved_task: str) -> Dict[str, Any]:
                     nonlocal active_continuation
                     nonlocal continuation_round_idx
+                    nonlocal dispatch_override_info
 
                     child_path = (
                         child_node.get_path() if hasattr(child_node, "get_path") else child_node.instance_name
                     )
+                    override_info = dict(dispatch_override_info or {})
+                    dispatch_override_info = {}
                     cached_child = orchestrate_cache.get(child_path)
                     cache_hit = cached_child is not None
                     raw_handoffs = list(active_continuation.get("handoffs") or [])
                     active_source_node = active_continuation.get("source_child_node")
                     active_bridge_context = dict(active_continuation.get("bridge_context") or {})
+                    child_override_hint = {}
+                    if override_info:
+                        child_override_hint = self._build_non_direct_child_override_hint(
+                            override_info,
+                            str(override_info.get("mode") or "").strip(),
+                        )
                     child_boundary_takeover, child_continuation_source, takeover_warning = (
                         self._prepare_child_continuation_inputs(
                             parent_node=node,
@@ -1517,6 +1543,7 @@ class Pass3InStrackStages:
                             target_child_node=child_node,
                             handoffs=raw_handoffs,
                             bridge_context=active_bridge_context,
+                            override_hint=child_override_hint,
                         )
                     )
                     if takeover_warning:
@@ -1536,6 +1563,7 @@ class Pass3InStrackStages:
                             bridge_context=None,
                             boundary_takeover=child_boundary_takeover,
                             continuation_source=child_continuation_source,
+                            override_hint=child_override_hint,
                         )
                         orchestrate_cache[child_path] = cached_child
                     active_continuation = self._advance_active_continuation_from_child(
@@ -1553,6 +1581,7 @@ class Pass3InStrackStages:
                         boundary_takeover=list(active_continuation.get("boundary_takeover") or []),
                         lifecycle_context=list(active_continuation.get("lifecycle_context") or []),
                         continuation_source=dict(active_continuation.get("continuation_source") or {}),
+                        override_hint=dict(active_continuation.get("override_hint") or {}),
                     )
                     self.g._append_instrack_continuation_snapshot(
                         orchestrate_log_path,
@@ -1593,6 +1622,159 @@ class Pass3InStrackStages:
                         ),
                     }
 
+                child_node, _ = self.g._resolve_scope_node(node, module, child_only=True)
+                if child_node is not None and child_task:
+                    continuation_signature = self._compute_active_continuation_signature(active_continuation)
+                    matched_advisory, override_mode = _consume_pending_non_direct_advisory(
+                        continuation_signature,
+                        child_node,
+                    )
+                    if matched_advisory is not None:
+                        dispatch_override_info = dict(matched_advisory)
+                        dispatch_override_info["mode"] = override_mode
+                        print(
+                            "[DEBUG] pass3.3.2 non-direct child override: "
+                            f"mode={override_mode}; "
+                            f"source={self._format_child_ref_debug(matched_advisory.get('source_child') or {})}; "
+                            f"requested={self._format_child_ref_debug(matched_advisory.get('requested_child') or {})}; "
+                            f"recommended={self._format_child_ref_debug(matched_advisory.get('recommended_child') or {})}; "
+                            f"actual={self._format_child_ref_debug(child_node)}"
+                        )
+                        event_name = (
+                            "non_direct_child_recommended_dispatch"
+                            if override_mode == "guided_relay_override"
+                            else "non_direct_child_override_dispatch"
+                        )
+                        self.g._append_fork_trace(
+                            event_name,
+                            {
+                                "pass": "pass3_3_2_orchestrate",
+                                "prompt_style": "instrack_orchestrate",
+                                "parent_path": node_path,
+                                "parent_level": int(getattr(node, "depth", 0) or 0),
+                                "source_child": dict(matched_advisory.get("source_child") or {}),
+                                "requested_child": dict(matched_advisory.get("requested_child") or {}),
+                                "recommended_child": dict(matched_advisory.get("recommended_child") or {}),
+                                "actual_child": self._build_child_ref(child_node),
+                                "advisory_path": list(matched_advisory.get("advisory_path") or []),
+                                "reason": str(matched_advisory.get("reason") or "").strip(),
+                                "continuation_signature": continuation_signature,
+                            },
+                        )
+                    else:
+                        active_source_node = active_continuation.get("source_child_node")
+                        active_bridge_context = dict(active_continuation.get("bridge_context") or {})
+                        authoritative_candidates = list(active_bridge_context.get("candidate_children") or [])
+                        normalized_candidates = self._normalize_candidate_child_refs(authoritative_candidates)
+                        requested_ref = self._build_child_ref(child_node)
+                        is_candidate = any(
+                            (
+                                candidate.get("instance")
+                                and candidate.get("instance") == requested_ref.get("instance")
+                            )
+                            or (
+                                not candidate.get("instance")
+                                and candidate.get("module")
+                                and candidate.get("module") == requested_ref.get("module")
+                            )
+                            for candidate in normalized_candidates
+                        )
+                        if active_source_node is not None and not is_candidate:
+                            self.g._append_fork_trace(
+                                "fork_request",
+                                {
+                                    "parent_path": node_path,
+                                    "parent_instance": node.instance_name,
+                                    "parent_module": node.module_name,
+                                    "parent_level": node.depth,
+                                    "module_selector": module,
+                                    "task": child_task,
+                                    "prompt_style": "instrack_orchestrate",
+                                },
+                            )
+                            advisory = self._takeover_resolver.resolve_non_direct_child_advisory(
+                                parent_node=node,
+                                source_child_node=active_source_node,
+                                requested_child_node=child_node,
+                            )
+                            advisory_payload = {
+                                "status": "advisory_non_direct_child",
+                                "source_child": self._build_child_ref(active_source_node),
+                                "requested_child": requested_ref,
+                                "recommended_child": dict(advisory.recommended_child or {}),
+                                "advisory_path": list(advisory.advisory_path or []),
+                                "skipped_children": list(advisory.skipped_children or []),
+                                "reason": str(advisory.reason or "").strip(),
+                                "continuation_signature": continuation_signature,
+                            }
+                            advisory_path_text = " -> ".join(
+                                self._format_child_ref_debug(item)
+                                for item in list(advisory.advisory_path or [])[:8]
+                            )
+                            if self._child_refs_match(requested_ref, advisory.recommended_child or {}):
+                                print(
+                                    "[DEBUG] pass3.3.2 non-direct child auto-dispatch: "
+                                    f"source={self._format_child_ref_debug(active_source_node)}; "
+                                    f"requested={self._format_child_ref_debug(requested_ref)}; "
+                                    f"recommended={self._format_child_ref_debug(advisory.recommended_child or {})}; "
+                                    f"path={advisory_path_text or 'N/A'}; "
+                                    f"reason={str(advisory.reason or '').strip()}"
+                                )
+                                self.g._append_fork_trace(
+                                    "non_direct_child_auto_dispatch",
+                                    {
+                                        "pass": "pass3_3_2_orchestrate",
+                                        "prompt_style": "instrack_orchestrate",
+                                        "parent_path": node_path,
+                                        "parent_level": int(getattr(node, "depth", 0) or 0),
+                                        "source_child": advisory_payload["source_child"],
+                                        "requested_child": requested_ref,
+                                        "authoritative_candidates": normalized_candidates,
+                                        "recommended_child": dict(advisory.recommended_child or {}),
+                                        "advisory_path": list(advisory.advisory_path or []),
+                                        "skipped_children": list(advisory.skipped_children or []),
+                                        "graph_status": str(advisory.graph_status or "").strip(),
+                                        "reason": str(advisory.reason or "").strip(),
+                                        "continuation_signature": continuation_signature,
+                                    },
+                                )
+                            else:
+                                pending_non_direct_advisories[
+                                    _advisory_key(continuation_signature, requested_ref.get("path", ""))
+                                ] = dict(advisory_payload)
+                                print(
+                                    "[DEBUG] pass3.3.2 non-direct child advisory: "
+                                    f"source={self._format_child_ref_debug(active_source_node)}; "
+                                    f"requested={self._format_child_ref_debug(requested_ref)}; "
+                                    f"recommended={self._format_child_ref_debug(advisory.recommended_child or {})}; "
+                                    f"path={advisory_path_text or 'N/A'}; "
+                                    f"reason={str(advisory.reason or '').strip()}"
+                                )
+                                self.g._append_fork_trace(
+                                    "non_direct_child_advisory",
+                                    {
+                                        "pass": "pass3_3_2_orchestrate",
+                                        "prompt_style": "instrack_orchestrate",
+                                        "parent_path": node_path,
+                                        "parent_level": int(getattr(node, "depth", 0) or 0),
+                                        "source_child": advisory_payload["source_child"],
+                                        "requested_child": requested_ref,
+                                        "authoritative_candidates": normalized_candidates,
+                                        "recommended_child": dict(advisory.recommended_child or {}),
+                                        "advisory_path": list(advisory.advisory_path or []),
+                                        "skipped_children": list(advisory.skipped_children or []),
+                                        "graph_status": str(advisory.graph_status or "").strip(),
+                                        "reason": str(advisory.reason or "").strip(),
+                                        "continuation_signature": continuation_signature,
+                                    },
+                                )
+                                return self._build_non_direct_child_advisory_tool_result(
+                                    source_child_node=active_source_node,
+                                    requested_child_node=child_node,
+                                    authoritative_candidates=authoritative_candidates,
+                                    advisory=advisory,
+                                )
+
                 tool_result = await self.g._dispatch_direct_child_fork_subagent(
                     scope_node=node,
                     module_selector=module,
@@ -1602,7 +1784,11 @@ class Pass3InStrackStages:
                     parent_module=node.module_name,
                     parent_level=node.depth,
                     prompt_style="instrack_orchestrate",
-                    require_task=False,
+                    task_error_message=(
+                        "Error: drawChild requires a non-empty 'task'. "
+                        "The parent agent must define a free-form goal for the child orchestration."
+                    ),
+                    require_task=True,
                     runner=_run_child_orchestration,
                 )
                 return self._rewrite_orchestrate_draw_child_tool_text(tool_result)

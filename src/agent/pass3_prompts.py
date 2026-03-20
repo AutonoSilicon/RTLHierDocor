@@ -34,6 +34,7 @@ class Pass3Prompts:
         boundary_takeover: Optional[List[Dict[str, Any]]] = None,
         lifecycle_context: Optional[List[Dict[str, Any]]] = None,
         continuation_source: Optional[Dict[str, Any]] = None,
+        override_hint: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Build a bounded continuation-state JSON string for prompts."""
         payload: Dict[str, Any] = {
@@ -48,6 +49,8 @@ class Pass3Prompts:
             payload["lifecycle_context"] = lifecycle_context
         if isinstance(continuation_source, dict) and continuation_source:
             payload["continuation_source"] = continuation_source
+        if isinstance(override_hint, dict) and override_hint:
+            payload["override_hint"] = override_hint
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     def build_instrack_current_module_topology(self, module_name: str) -> str:
