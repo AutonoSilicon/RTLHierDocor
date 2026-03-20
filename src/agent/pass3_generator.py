@@ -323,8 +323,8 @@ class Pass3Generator:
 
     @staticmethod
     def _pass3_3_2_resume_enabled() -> bool:
-        """Pass 3.3.2 orchestration is intentionally rerun every time."""
-        return False
+        """Pass 3.3.2 orchestration artifacts follow normal cache reuse."""
+        return True
 
     @staticmethod
     def _instrack_datasheet_path() -> Path:
