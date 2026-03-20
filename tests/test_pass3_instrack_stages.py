@@ -185,6 +185,51 @@ def make_parent_tree():
     return parent, source, dst0, dst1
 
 
+def make_port_ingress_dot():
+    return r'''
+digraph "parent_mod" {
+label="parent_mod";
+rankdir="LR";
+n_in [ shape=octagon, label="top_in", color="black", fontcolor="black"];
+c_dst0 [ shape=record, label="{{<p5> in_a}|x_dst0\ndst_mod|{<p6> out}}",  ];
+c_dst1 [ shape=record, label="{{<p7> in_b}|x_dst1\ndst_mod|{<p8> out}}",  ];
+c_buf [ shape=record, label="{{<p10> A}|$1\n$buf|{<p11> Y}}",  ];
+x0 [shape=point, ];
+n_in:e -> c_buf:p10:w [color="black", fontcolor="black", label=""];
+c_buf:p11:e -> x0:w [color="black", fontcolor="black", label=""];
+x0:e -> c_dst0:p5:w [color="black", fontcolor="black", label=""];
+x0:e -> c_dst1:p7:w [color="black", fontcolor="black", label=""];
+}
+'''.strip()
+
+
+def make_port_ingress_unresolved_dot():
+    return r'''
+digraph "parent_mod" {
+label="parent_mod";
+rankdir="LR";
+n_in [ shape=octagon, label="top_in", color="black", fontcolor="black"];
+}
+'''.strip()
+
+
+def make_port_ingress_tree():
+    parent = FakeNode("parent_mod", "top")
+    dst0 = FakeNode(
+        "dst_mod",
+        "x_dst0",
+        parent=parent,
+        port_connections={"in_a": "\\shared_wire"},
+    )
+    dst1 = FakeNode(
+        "dst_mod",
+        "x_dst1",
+        parent=parent,
+        port_connections={"in_b": "\\shared_wire"},
+    )
+    return parent, dst0, dst1
+
+
 def test_extract_pass3_3_orchestrate_payload_ignores_takeover_fields_and_parses_boundary_handoffs():
     stages = make_stages()
     current = FakeNode("ct_mod", "x_ct_mod")
@@ -471,6 +516,83 @@ def test_prepare_child_continuation_inputs_suppresses_generic_warning_for_overri
         "source_instance_path": "top/x_src",
     }
     assert warning == ""
+
+
+def test_build_active_continuation_builds_port_ingress_bridge_context_for_first_child():
+    stages = make_stages(dot_map={"parent_mod": make_port_ingress_dot()})
+    parent, _, _ = make_port_ingress_tree()
+
+    state = stages._build_active_continuation(
+        parent_node=parent,
+        source_child_node=None,
+        handoffs=[],
+        source_payload={},
+        boundary_takeover=[{"input_port": "top_in", "behavior": "incoming fetch valid"}],
+        continuation_source={"source_instance": "x_upstream", "source_module": "up_mod"},
+    )
+
+    assert state["bridge_context"]["entry_mode"] == "parent_port_ingress"
+    assert state["bridge_context"]["candidate_children"] == [
+        {"target_instance": "x_dst0", "target_module": "dst_mod"},
+        {"target_instance": "x_dst1", "target_module": "dst_mod"},
+    ]
+    assert state["bridge_context"]["resolved_handoffs"][0]["input_port"] == "top_in"
+
+
+def test_prepare_child_continuation_inputs_projects_port_ingress_to_first_child():
+    stages = make_stages(dot_map={"parent_mod": make_port_ingress_dot()})
+    parent, dst0, _ = make_port_ingress_tree()
+    bridge_context = stages._build_port_ingress_bridge_context(
+        parent_node=parent,
+        boundary_takeover=[{"input_port": "top_in", "behavior": "incoming fetch valid"}],
+        continuation_source={"source_instance": "x_upstream", "source_module": "up_mod"},
+    )
+
+    takeover, continuation_source, warning = stages._prepare_child_continuation_inputs(
+        parent_node=parent,
+        source_child_node=None,
+        target_child_node=dst0,
+        handoffs=[],
+        bridge_context=bridge_context,
+    )
+
+    assert takeover == [
+        {
+            "input_port": "in_a",
+            "value_condition": "incoming fetch valid",
+            "behavior": "incoming fetch valid",
+        }
+    ]
+    assert continuation_source == {
+        "source_instance": "x_upstream",
+        "source_module": "up_mod",
+    }
+    assert warning == ""
+
+
+def test_prepare_child_continuation_inputs_warns_when_port_ingress_cannot_reach_child():
+    stages = make_stages(dot_map={"parent_mod": make_port_ingress_unresolved_dot()})
+    parent, dst0, _ = make_port_ingress_tree()
+    bridge_context = stages._build_port_ingress_bridge_context(
+        parent_node=parent,
+        boundary_takeover=[{"input_port": "top_in", "behavior": "incoming fetch valid"}],
+        continuation_source={"source_instance": "x_upstream", "source_module": "up_mod"},
+    )
+
+    takeover, continuation_source, warning = stages._prepare_child_continuation_inputs(
+        parent_node=parent,
+        source_child_node=None,
+        target_child_node=dst0,
+        handoffs=[],
+        bridge_context=bridge_context,
+    )
+
+    assert takeover == []
+    assert continuation_source == {
+        "source_instance": "x_upstream",
+        "source_module": "up_mod",
+    }
+    assert "No graph-resolved port-ingress boundary_takeover exists" in warning
 
 
 def test_build_non_direct_child_advisory_tool_result_reports_retry_contract_and_candidates():

@@ -78,6 +78,7 @@ def make_modules():
         ),
         "parent_seq_mod": FakeModule(
             [
+                FakeWire("\\top_in", port_input=True),
                 FakeWire("\\top_clk", port_input=True),
             ]
         ),
@@ -192,6 +193,63 @@ x0:e -> c_slow1:p7:w [color="black", fontcolor="black", label=""];
 c_fast:p6:e -> c_dst:p11:w [color="black", fontcolor="black", label=""];
 c_slow1:p8:e -> c_slow2:p9:w [color="black", fontcolor="black", label=""];
 c_slow2:p10:e -> c_dst:p12:w [color="black", fontcolor="black", label=""];
+}
+'''.strip()
+
+
+def make_parent_ingress_comb_dot():
+    return r'''
+digraph "parent_mod" {
+label="parent_mod";
+rankdir="LR";
+n_in [ shape=octagon, label="top_in", color="black", fontcolor="black"];
+c_dst [ shape=record, label="{{<p5> in_a}|x_dst0\ndst_mod|{<p6> out}}",  ];
+c_buf [ shape=record, label="{{<p10> A}|$1\n$buf|{<p11> Y}}",  ];
+n_in:e -> c_buf:p10:w [color="black", fontcolor="black", label=""];
+c_buf:p11:e -> c_dst:p5:w [color="black", fontcolor="black", label=""];
+}
+'''.strip()
+
+
+def make_parent_ingress_seq_dot():
+    return r'''
+digraph "parent_seq_mod" {
+label="parent_seq_mod";
+rankdir="LR";
+n_in [ shape=octagon, label="top_in", color="black", fontcolor="black"];
+n_clk [ shape=octagon, label="top_clk", color="black", fontcolor="black"];
+c_dst [ shape=record, label="{{<p5> in_a|<p6> in_b}|x_dst\ndst_mod|{<p7> out}}",  ];
+c_seq [ shape=record, label="{{<p10> CLK|<p11> D}|$2\n$dff|{<p12> Q}}",  ];
+x0 [shape=point, ];
+n_clk:e -> c_seq:p10:w [color="black", fontcolor="black", label=""];
+n_in:e -> c_seq:p11:w [color="black", fontcolor="black", label=""];
+c_seq:p12:e -> x0:w [color="black", fontcolor="black", label=""];
+x0:e -> c_dst:p5:w [color="black", fontcolor="black", label=""];
+x0:e -> c_dst:p6:w [color="black", fontcolor="black", label=""];
+}
+'''.strip()
+
+
+def make_parent_ingress_exit_dot():
+    return r'''
+digraph "parent_mod" {
+label="parent_mod";
+rankdir="LR";
+n_in [ shape=octagon, label="top_in", color="black", fontcolor="black"];
+n_out [ shape=octagon, label="top_out", color="black", fontcolor="black"];
+c_buf [ shape=record, label="{{<p10> A}|$1\n$buf|{<p11> Y}}",  ];
+n_in:e -> c_buf:p10:w [color="black", fontcolor="black", label=""];
+c_buf:p11:e -> n_out:w [color="black", fontcolor="black", label=""];
+}
+'''.strip()
+
+
+def make_parent_ingress_unresolved_dot():
+    return r'''
+digraph "parent_mod" {
+label="parent_mod";
+rankdir="LR";
+n_in [ shape=octagon, label="top_in", color="black", fontcolor="black"];
 }
 '''.strip()
 
@@ -381,6 +439,111 @@ def test_takeover_resolver_reports_seed_unresolved_when_dot_omits_source_port():
     assert result.resolved_handoffs[0]["status"] == "unresolved"
     assert "seed_unresolved" in result.resolved_handoffs[0]["unknown"]
     assert result.debug_report["handoffs"][0]["stop_reasons"] == ["seed_unresolved"]
+
+
+def test_parent_ingress_resolver_reaches_target_through_comb_and_reports_debug():
+    resolver = Pass3InStrackTakeoverResolver(make_generator({"parent_mod": make_parent_ingress_comb_dot()}))
+    parent = FakeNode("parent_mod", "top")
+    target = FakeNode("dst_mod", "x_dst0", parent=parent, port_connections={"in_a": "\\shared_wire"})
+
+    result = resolver.resolve_parent_ingress(
+        parent_node=parent,
+        boundary_takeover=[{"input_port": "top_in", "behavior": "incoming fetch valid"}],
+        target_child_node=target,
+    )
+
+    assert result.resolved_handoffs[0]["status"] == "resolved"
+    assert result.boundary_takeover_for_target == [
+        {
+            "input_port": "in_a",
+            "value_condition": "incoming fetch valid",
+            "behavior": "incoming fetch valid",
+        }
+    ]
+    assert result.takeover_bundles == [
+        {
+            "target_instance": "x_dst0",
+            "target_module": "dst_mod",
+            "source_ports": ["top_in"],
+            "boundary_takeover": [
+                {
+                    "input_port": "in_a",
+                    "value_condition": "incoming fetch valid",
+                    "behavior": "incoming fetch valid",
+                }
+            ],
+        }
+    ]
+    assert result.debug_report["ingress"][0]["seed"]["port_name"] == "top_in"
+    assert result.debug_report["ingress"][0]["target_hits"][0]["target_instance"] == "x_dst0"
+
+
+def test_parent_ingress_resolver_crosses_seq_and_collects_all_target_ports():
+    resolver = Pass3InStrackTakeoverResolver(make_generator({"parent_seq_mod": make_parent_ingress_seq_dot()}))
+    parent = FakeNode("parent_seq_mod", "top")
+    target = FakeNode(
+        "dst_mod",
+        "x_dst",
+        parent=parent,
+        port_connections={"in_a": "\\stage_wire_a", "in_b": "\\stage_wire_b"},
+    )
+
+    result = resolver.resolve_parent_ingress(
+        parent_node=parent,
+        boundary_takeover=[{"input_port": "top_in", "behavior": "port ingress"}],
+        target_child_node=target,
+    )
+
+    assert result.resolved_handoffs[0]["status"] == "resolved"
+    assert result.boundary_takeover_for_target == [
+        {
+            "input_port": "in_a",
+            "value_condition": "port ingress",
+            "behavior": "port ingress",
+        },
+        {
+            "input_port": "in_b",
+            "value_condition": "port ingress",
+            "behavior": "port ingress",
+        },
+    ]
+
+
+def test_parent_ingress_resolver_records_parent_exit_when_no_child_hit():
+    resolver = Pass3InStrackTakeoverResolver(make_generator({"parent_mod": make_parent_ingress_exit_dot()}))
+    parent = FakeNode("parent_mod", "top")
+    FakeNode("dst_mod", "x_dst0", parent=parent, port_connections={"in_a": "\\shared_wire"})
+
+    result = resolver.resolve_parent_ingress(
+        parent_node=parent,
+        boundary_takeover=[{"input_port": "top_in", "behavior": "port ingress"}],
+        target_child_node=None,
+    )
+
+    assert result.resolved_handoffs[0]["status"] == "exit_parent"
+    assert result.exits_parent == [
+        {
+            "parent_port": "top_out",
+            "parent_wire": "top_in",
+            "source_port": "top_in",
+        }
+    ]
+
+
+def test_parent_ingress_resolver_reports_unresolved_when_no_child_or_exit_hit():
+    resolver = Pass3InStrackTakeoverResolver(make_generator({"parent_mod": make_parent_ingress_unresolved_dot()}))
+    parent = FakeNode("parent_mod", "top")
+    FakeNode("dst_mod", "x_dst0", parent=parent, port_connections={"in_a": "\\shared_wire"})
+
+    result = resolver.resolve_parent_ingress(
+        parent_node=parent,
+        boundary_takeover=[{"input_port": "top_in", "behavior": "port ingress"}],
+        target_child_node=None,
+    )
+
+    assert result.resolved_handoffs[0]["status"] == "unresolved"
+    assert "seed_unresolved" in result.resolved_handoffs[0]["unknown"]
+    assert result.debug_report["ingress"][0]["stop_reasons"] == ["seed_unresolved"]
 
 
 def test_non_direct_child_advisory_returns_shortest_relay_path():

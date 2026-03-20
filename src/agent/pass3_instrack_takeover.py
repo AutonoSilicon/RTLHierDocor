@@ -260,46 +260,179 @@ class Pass3InStrackTakeoverResolver:
 
             enriched.append(handoff)
 
-        takeover_bundles = self.group_boundary_takeover_bundles(enriched)
-        boundary_takeover_for_target = self.build_boundary_takeover_for_target(
-            handoffs=enriched,
+        return self._finalize_resolution_result(
+            resolved_items=enriched,
             target_child_node=target_child_node,
-        )
-        exits_parent: List[Dict[str, str]] = []
-        unresolved: List[str] = []
-        seen_exit_ports: Set[str] = set()
-        for item in enriched:
-            if not isinstance(item, dict):
-                continue
-            output_port = str(item.get("output_port") or "").strip()
-            if str(item.get("status") or "").strip() in {"invalid", "unresolved"}:
-                label = output_port or self._boundary_handoff_display_text(item) or "unknown"
-                if label and label not in unresolved:
-                    unresolved.append(label)
-            for resolution in list(item.get("resolutions") or []):
-                if not isinstance(resolution, dict):
-                    continue
-                if str(resolution.get("resolution_kind") or "").strip() != "exit_parent":
-                    continue
-                parent_port = str(resolution.get("parent_port") or "").strip()
-                if not parent_port or parent_port in seen_exit_ports:
-                    continue
-                seen_exit_ports.add(parent_port)
-                exits_parent.append(
-                    {
-                        "parent_port": parent_port,
-                        "parent_wire": str(resolution.get("parent_wire") or item.get("parent_wire") or "").strip(),
-                        "source_port": output_port,
-                    }
-                )
-
-        return TakeoverResolutionResult(
-            resolved_handoffs=enriched,
-            takeover_bundles=takeover_bundles,
-            boundary_takeover_for_target=boundary_takeover_for_target,
-            exits_parent=exits_parent[:8],
-            unresolved=unresolved[:6],
             debug_report=debug_report,
+            port_key="output_port",
+        )
+
+    def resolve_parent_ingress(
+        self,
+        *,
+        parent_node: Any,
+        boundary_takeover: List[Dict[str, Any]],
+        target_child_node: Optional[Any] = None,
+    ) -> TakeoverResolutionResult:
+        parent_module = str(getattr(parent_node, "module_name", "") or "").strip()
+        debug_report: Dict[str, Any] = {
+            "parent_module": parent_module,
+            "target_instance": str(getattr(target_child_node, "instance_name", "") or "").strip(),
+            "target_module": str(getattr(target_child_node, "module_name", "") or "").strip(),
+            "graph_status": "unknown",
+            "ingress": [],
+        }
+
+        graph_bundle = self._get_parent_graph(parent_module)
+        if graph_bundle is None:
+            debug_report["graph_status"] = "graph_unavailable"
+        else:
+            debug_report["graph_status"] = "ready"
+
+        parent_port_dirs = self._get_module_port_directions(parent_module)
+        normalized_dirs = {
+            self._normalize_signal_name(name): direction
+            for name, direction in parent_port_dirs.items()
+            if self._normalize_signal_name(name)
+        }
+
+        enriched: List[Dict[str, Any]] = []
+        seen_ports: Set[str] = set()
+        for raw_item in boundary_takeover or []:
+            if not isinstance(raw_item, dict):
+                continue
+
+            ingress = self._normalize_public_boundary_takeover(raw_item)
+            input_port = str(ingress.get("input_port") or "").strip()
+            norm_port = self._normalize_signal_name(input_port)
+            debug_entry: Dict[str, Any] = {
+                "input_port": input_port,
+                "seed": None,
+                "visited_count": 0,
+                "target_hits": [],
+                "sibling_hits": [],
+                "exit_parent_hits": [],
+                "stop_reasons": [],
+            }
+            debug_report["ingress"].append(debug_entry)
+
+            ingress["parent_wire"] = norm_port
+            ingress["resolutions"] = []
+
+            if not input_port:
+                ingress["status"] = "invalid"
+                ingress["unknown"] = self._append_reason(
+                    str(ingress.get("unknown") or ""),
+                    "missing input_port",
+                )
+                enriched.append(ingress)
+                continue
+
+            port_dir = normalized_dirs.get(norm_port, "")
+            if not port_dir:
+                ingress["status"] = "invalid"
+                ingress["unknown"] = self._append_reason(
+                    str(ingress.get("unknown") or ""),
+                    f"input_port '{input_port}' is not a declared port of module '{parent_module}'",
+                )
+                debug_entry["stop_reasons"].append("invalid_input_port")
+                enriched.append(ingress)
+                continue
+
+            if port_dir != "input":
+                ingress["status"] = "invalid"
+                ingress["unknown"] = self._append_reason(
+                    str(ingress.get("unknown") or ""),
+                    f"input_port '{input_port}' is not an input port",
+                )
+                debug_entry["stop_reasons"].append("non_input_port")
+                enriched.append(ingress)
+                continue
+
+            if norm_port in seen_ports:
+                ingress["status"] = "invalid"
+                ingress["unknown"] = self._append_reason(
+                    str(ingress.get("unknown") or ""),
+                    f"duplicate boundary_takeover for input_port '{input_port}'",
+                )
+                debug_entry["stop_reasons"].append("duplicate_input_port")
+                enriched.append(ingress)
+                continue
+            seen_ports.add(norm_port)
+
+            if graph_bundle is None:
+                ingress["status"] = "unresolved"
+                ingress["unknown"] = self._append_reason(
+                    str(ingress.get("unknown") or ""),
+                    f"graph_unavailable: unable to build raw DOT graph for module '{parent_module}'",
+                )
+                debug_entry["stop_reasons"].append("graph_unavailable")
+                enriched.append(ingress)
+                continue
+
+            seed_node, seed_edges = self._build_parent_input_seed_edges(graph_bundle, input_port)
+            if seed_node is None or not seed_edges:
+                ingress["status"] = "unresolved"
+                ingress["unknown"] = self._append_reason(
+                    str(ingress.get("unknown") or ""),
+                    (
+                        "seed_unresolved: unable to locate a forward edge from "
+                        f"input port '{input_port}' in module '{parent_module}'"
+                    ),
+                )
+                debug_entry["stop_reasons"].append("seed_unresolved")
+                if seed_node is not None:
+                    debug_entry["seed"] = {
+                        "node_id": seed_node.node_id,
+                        "port_name": input_port,
+                    }
+                enriched.append(ingress)
+                continue
+
+            debug_entry["seed"] = {
+                "node_id": seed_node.node_id,
+                "port_name": input_port,
+            }
+            resolutions, walk_debug = self._walk_forward(
+                graph_bundle=graph_bundle,
+                parent_node=parent_node,
+                source_child_node=None,
+                source_parent_wire=norm_port,
+                seed_edges=seed_edges,
+                target_child_node=target_child_node,
+            )
+            ingress["resolutions"] = resolutions
+            debug_entry["visited_count"] = int(walk_debug.get("visited_count", 0) or 0)
+            debug_entry["target_hits"] = list(walk_debug.get("target_hits") or [])
+            debug_entry["sibling_hits"] = list(walk_debug.get("sibling_hits") or [])
+            debug_entry["exit_parent_hits"] = list(walk_debug.get("exit_parent_hits") or [])
+            debug_entry["stop_reasons"] = list(walk_debug.get("stop_reasons") or [])
+
+            if resolutions:
+                kinds = {str(item.get("resolution_kind") or "") for item in resolutions}
+                if kinds == {"exit_parent"}:
+                    ingress["status"] = "exit_parent"
+                else:
+                    ingress["status"] = "resolved"
+            else:
+                ingress["status"] = "unresolved"
+                ingress["unknown"] = self._append_reason(
+                    str(ingress.get("unknown") or ""),
+                    (
+                        "graph_forward search did not reach any direct child input or parent output for "
+                        f"input_port '{input_port}'"
+                    ),
+                )
+                if "no_boundary_hit" not in debug_entry["stop_reasons"]:
+                    debug_entry["stop_reasons"].append("no_boundary_hit")
+
+            enriched.append(ingress)
+
+        return self._finalize_resolution_result(
+            resolved_items=enriched,
+            target_child_node=target_child_node,
+            debug_report=debug_report,
+            port_key="input_port",
         )
 
     def resolve_non_direct_child_advisory(
@@ -390,8 +523,8 @@ class Pass3InStrackTakeoverResolver:
         for item in handoffs or []:
             if not isinstance(item, dict):
                 continue
-            output_port = str(item.get("output_port") or "").strip()
-            if not output_port:
+            source_port = str(item.get("output_port") or item.get("input_port") or "").strip()
+            if not source_port:
                 continue
             value_condition = self._boundary_handoff_display_text(item)
             behavior = self._coerce_text_field(item.get("behavior"))
@@ -412,9 +545,13 @@ class Pass3InStrackTakeoverResolver:
                     bundle = {
                         "target_instance": target_instance,
                         "target_module": target_module,
+                        "source_ports": [],
                         "boundary_takeover": [],
                     }
                     bundles[bundle_key] = bundle
+                source_ports = bundle.setdefault("source_ports", [])
+                if source_port and source_port not in source_ports:
+                    source_ports.append(source_port)
                 takeover_item = {
                     "input_port": ingress_port,
                     "value_condition": value_condition,
@@ -459,6 +596,16 @@ class Pass3InStrackTakeoverResolver:
             if target_module and target_module == str(target_child_node.module_name or "").strip():
                 return list(bundle.get("boundary_takeover") or [])[:8]
         return []
+
+    def _build_parent_input_seed_edges(
+        self,
+        bundle: _ParentGraphBundle,
+        input_port: str,
+    ) -> Tuple[Optional[_GraphNodeInfo], List[DotEdge]]:
+        seed_node = self._find_io_port_node(bundle, input_port)
+        if seed_node is None:
+            return None, []
+        return seed_node, list(bundle.circuit.adj_out.get(seed_node.node_id, []))
 
     def _get_parent_graph(self, module_name: str) -> Optional[_ParentGraphBundle]:
         if module_name in self._parent_graph_cache:
@@ -510,6 +657,21 @@ class Pass3InStrackTakeoverResolver:
             "module": str(getattr(node, "module_name", "") or "").strip(),
             "path": str(path or "").strip(),
         }
+
+    def _find_io_port_node(
+        self,
+        bundle: _ParentGraphBundle,
+        port_name: str,
+    ) -> Optional[_GraphNodeInfo]:
+        normalized_port = self._normalize_signal_name(port_name)
+        if not normalized_port:
+            return None
+        for node_id, node in bundle.parser.nodes.items():
+            if getattr(node, "node_type", "") != "io_port":
+                continue
+            if self._normalize_signal_name(getattr(node, "label", "")) == normalized_port:
+                return bundle.node_info.get(node_id)
+        return None
 
     def _find_submodule_node(
         self,
@@ -637,7 +799,7 @@ class Pass3InStrackTakeoverResolver:
         *,
         graph_bundle: _ParentGraphBundle,
         parent_node: Any,
-        source_child_node: Any,
+        source_child_node: Optional[Any],
         source_parent_wire: str,
         seed_edges: List[DotEdge],
         target_child_node: Optional[Any],
@@ -762,6 +924,56 @@ class Pass3InStrackTakeoverResolver:
         if not resolutions and "no_boundary_hit" not in debug["stop_reasons"]:
             debug["stop_reasons"].append("no_boundary_hit")
         return resolutions, debug
+
+    def _finalize_resolution_result(
+        self,
+        *,
+        resolved_items: List[Dict[str, Any]],
+        target_child_node: Optional[Any],
+        debug_report: Dict[str, Any],
+        port_key: str,
+    ) -> TakeoverResolutionResult:
+        takeover_bundles = self.group_boundary_takeover_bundles(resolved_items)
+        boundary_takeover_for_target = self.build_boundary_takeover_for_target(
+            handoffs=resolved_items,
+            target_child_node=target_child_node,
+        )
+        exits_parent: List[Dict[str, str]] = []
+        unresolved: List[str] = []
+        seen_exit_ports: Set[str] = set()
+        for item in resolved_items:
+            if not isinstance(item, dict):
+                continue
+            source_port = str(item.get(port_key) or "").strip()
+            if str(item.get("status") or "").strip() in {"invalid", "unresolved"}:
+                label = source_port or self._boundary_handoff_display_text(item) or "unknown"
+                if label and label not in unresolved:
+                    unresolved.append(label)
+            for resolution in list(item.get("resolutions") or []):
+                if not isinstance(resolution, dict):
+                    continue
+                if str(resolution.get("resolution_kind") or "").strip() != "exit_parent":
+                    continue
+                parent_port = str(resolution.get("parent_port") or "").strip()
+                if not parent_port or parent_port in seen_exit_ports:
+                    continue
+                seen_exit_ports.add(parent_port)
+                exits_parent.append(
+                    {
+                        "parent_port": parent_port,
+                        "parent_wire": str(resolution.get("parent_wire") or item.get("parent_wire") or "").strip(),
+                        "source_port": source_port,
+                    }
+                )
+
+        return TakeoverResolutionResult(
+            resolved_handoffs=resolved_items,
+            takeover_bundles=takeover_bundles,
+            boundary_takeover_for_target=boundary_takeover_for_target,
+            exits_parent=exits_parent[:8],
+            unresolved=unresolved[:6],
+            debug_report=debug_report,
+        )
 
     def _get_backend(self) -> Any:
         resolver = getattr(getattr(self.g, "owner", None), "resolver", None)

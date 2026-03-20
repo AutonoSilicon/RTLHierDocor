@@ -75,6 +75,7 @@ Working rules:
 - You may call `drawChild(module, task)` only for a direct child. Never jump across levels. Every `drawChild` call must include a non-empty free-form `task`. `drawChild` is deduplicated; if a child was already orchestrated and returns `reject`, reuse the existing child summary.
 - Use the minimum necessary expansion. First try to complete the main path from current-module evidence.
 - Treat `Continuation State.boundary_takeover` as the authoritative continuation entry when it exists. Use `Continuation State.continuation_source` only as provenance for empty-takeover parent bridges.
+- If the current module entered through parent-port `boundary_takeover` and then needs a first `drawChild`, preserve that ingress continuity: the chosen direct child should inherit the projected port takeover instead of dropping to an empty bridge.
 - If `drawChild` returns `status = advisory_non_direct_child`, do not treat that as a child summary. Immediately choose exactly one next step: repeat the same child once with a non-empty `task` to force the override, or call the recommended child once with a non-empty `task` to accept the relay suggestion.
 - After `advisory_non_direct_child`, do not probe a third sibling child in the same continuation round.
 - Call `drawChild` only when current-module evidence is insufficient, Python has identified the next child/takeover boundary, or a critical PROC/COMB fact exists only inside one direct child.
@@ -159,6 +160,7 @@ PASS3_3_2_ORCHESTRATE_PROMPT = """
 - Treat `Continuation State.lifecycle_context` as Python-maintained direct-child visit history for the current module. Use it only as high-level upstream behavior context, not as a schema you need to reproduce.
 - If `Continuation State.boundary_takeover` is empty but `Continuation State.continuation_source` is present, treat that as an empty-takeover parent bridge. Preserve the source provenance, but do not invent ingress ports.
 - If `Continuation State.override_hint` is present while `boundary_takeover` is empty, treat it as an explicit advisory override. Preserve that provenance and relay context, but do not reinterpret it as a real ingress takeover.
+- If you investigate a first direct child before any same-module child-to-child continuation exists, Python may project the current module's parent-port `boundary_takeover` onto that child. Treat the resulting child ingress exactly like any other authoritative `boundary_takeover`.
 - If the latest child result points to another same-module direct child, including via `next_children` or sibling-child handoffs, continue into that child instead of stopping at the interconnect.
 - `Continuation State.boundary_takeover` is a Python-generated projection of the previous module handoff onto this module's real ingress boundary. Do not regenerate it, rename it, or guess extra takeover items in the output JSON.
 - If an advisory override was used to enter this child, acknowledge the upstream relay/provenance from `override_hint` and keep confidence appropriately conservative when exact ingress semantics are still unverified.

@@ -26,6 +26,7 @@ def test_orchestrate_prompt_requires_continuing_same_module_child_to_child_hando
     assert "`Continuation State.override_hint`" in prompt_text
     assert "`boundary_takeover`" in prompt_text
     assert "authoritative continuation entry" in prompt_text
+    assert "parent-port `boundary_takeover`" in prompt_text
     assert "Same-module facts must be verified from the current prompt context." in prompt_text
     assert "`gated_clk_cell`" in prompt_text
     assert "`lifecycle_context` must be one concise string" in prompt_text

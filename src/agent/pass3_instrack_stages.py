@@ -819,6 +819,40 @@ class Pass3InStrackStages:
                 payload[key] = str(bridge.get(key) or "").strip()
         return {key: value for key, value in payload.items() if value}
 
+    @staticmethod
+    def _build_continuation_source_from_bridge_context(
+        bridge_context: Optional[Dict[str, Any]],
+    ) -> Dict[str, str]:
+        bridge = dict(bridge_context or {})
+        payload = {
+            "source_instance": str(bridge.get("source_instance") or "").strip(),
+            "source_module": str(bridge.get("source_module") or "").strip(),
+            "source_instance_path": str(bridge.get("source_instance_path") or "").strip(),
+        }
+        return {key: value for key, value in payload.items() if value}
+
+    @staticmethod
+    def _build_boundary_takeover_from_bundles(
+        bridge_context: Optional[Dict[str, Any]],
+        target_child_node: Any,
+    ) -> List[Dict[str, Any]]:
+        bridge = dict(bridge_context or {})
+        bundles = list(bridge.get("takeover_bundles") or [])
+        target_instance = str(getattr(target_child_node, "instance_name", "") or "").strip()
+        target_module = str(getattr(target_child_node, "module_name", "") or "").strip()
+        for bundle in bundles:
+            if not isinstance(bundle, dict):
+                continue
+            bundle_instance = str(bundle.get("target_instance") or "").strip()
+            bundle_module = str(bundle.get("target_module") or "").strip()
+            if bundle_instance and bundle_instance == target_instance:
+                return list(bundle.get("boundary_takeover") or [])[:8]
+            if not bundle_instance and bundle_module and bundle_module == target_module:
+                return list(bundle.get("boundary_takeover") or [])[:8]
+            if bundle_module and bundle_module == target_module:
+                return list(bundle.get("boundary_takeover") or [])[:8]
+        return []
+
     def _group_boundary_takeover_bundles(
         self,
         *,
@@ -843,6 +877,79 @@ class Pass3InStrackStages:
             target_child_node=target_child_node,
         )
 
+    def _build_port_ingress_bridge_context(
+        self,
+        *,
+        parent_node: Any,
+        boundary_takeover: List[Dict[str, Any]],
+        continuation_source: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        result = self._takeover_resolver.resolve_parent_ingress(
+            parent_node=parent_node,
+            boundary_takeover=boundary_takeover,
+            target_child_node=None,
+        )
+        candidate_children = [
+            {
+                "target_instance": str(bundle.get("target_instance") or "").strip(),
+                "target_module": str(bundle.get("target_module") or "").strip(),
+            }
+            for bundle in list(result.takeover_bundles or [])[:8]
+        ]
+        resolved_ingress: List[Dict[str, Any]] = []
+        for item in list(result.resolved_handoffs or [])[:12]:
+            if not isinstance(item, dict):
+                continue
+            input_port = str(item.get("input_port") or "").strip()
+            value_condition = self._coerce_text_field(item.get("value_condition"))
+            behavior = self._coerce_text_field(item.get("behavior"))
+            status = str(item.get("status") or "").strip()
+            parent_wire = str(item.get("parent_wire") or "").strip()
+            targets: List[Dict[str, str]] = []
+            for resolution in list(item.get("resolutions") or []):
+                if not isinstance(resolution, dict):
+                    continue
+                if str(resolution.get("resolution_kind") or "").strip() != "sibling_child":
+                    continue
+                target_instance = str(resolution.get("target_instance") or "").strip()
+                target_module = str(resolution.get("target_module") or "").strip()
+                target_port = str(resolution.get("target_port") or "").strip()
+                if target_instance or target_module or target_port:
+                    targets.append(
+                        {
+                            "target_instance": target_instance,
+                            "target_module": target_module,
+                            "target_port": target_port,
+                            "parent_wire": str(resolution.get("parent_wire") or parent_wire).strip(),
+                        }
+                    )
+            if input_port or value_condition or behavior:
+                entry: Dict[str, Any] = {
+                    "input_port": input_port,
+                    "value_condition": value_condition,
+                    "behavior": behavior,
+                    "status": status,
+                    "parent_wire": parent_wire,
+                }
+                if targets:
+                    entry["targets"] = targets
+                resolved_ingress.append(entry)
+
+        source_info = dict(continuation_source or {})
+        return {
+            "source_instance": str(source_info.get("source_instance") or "").strip(),
+            "source_module": str(source_info.get("source_module") or "").strip(),
+            "source_instance_path": str(source_info.get("source_instance_path") or "").strip(),
+            "parent_module": str(parent_node.module_name or "").strip(),
+            "entry_mode": "parent_port_ingress",
+            "candidate_children": candidate_children,
+            "takeover_bundles": list(result.takeover_bundles or []),
+            "resolved_handoffs": resolved_ingress,
+            "exits_parent": list(result.exits_parent or [])[:8],
+            "unresolved": list(result.unresolved or [])[:6],
+            "debug_report": dict(result.debug_report or {}),
+        }
+
     def _prepare_child_continuation_inputs(
         self,
         *,
@@ -857,6 +964,22 @@ class Pass3InStrackStages:
         child_continuation_source: Dict[str, str] = {}
         warning = ""
         if source_child_node is None:
+            bridge = dict(bridge_context or {})
+            child_boundary_takeover = self._build_boundary_takeover_from_bundles(
+                bridge,
+                target_child_node,
+            )
+            child_continuation_source = self._build_continuation_source_from_bridge_context(bridge)
+            if (
+                str(bridge.get("entry_mode") or "").strip() == "parent_port_ingress"
+                and not child_boundary_takeover
+                and not override_hint
+            ):
+                warning = (
+                    "No graph-resolved port-ingress boundary_takeover exists for "
+                    f"{target_child_node.instance_name}({target_child_node.module_name}) in the current continuation; "
+                    "proceeding with empty takeover bridge."
+                )
             return child_boundary_takeover, child_continuation_source, warning
 
         child_boundary_takeover = self._build_boundary_takeover(
@@ -983,6 +1106,15 @@ class Pass3InStrackStages:
         }
 
     @staticmethod
+    def _build_child_ref_from_source_payload(source_payload: Optional[Dict[str, Any]]) -> Dict[str, str]:
+        payload = dict(source_payload or {})
+        return {
+            "instance": str(payload.get("source_instance") or "").strip(),
+            "module": str(payload.get("source_module") or "").strip(),
+            "path": str(payload.get("source_instance_path") or "").strip(),
+        }
+
+    @staticmethod
     def _format_child_ref_debug(ref: Any) -> str:
         if isinstance(ref, dict):
             instance_name = str(ref.get("instance") or "").strip()
@@ -1051,18 +1183,47 @@ class Pass3InStrackStages:
             )
         return normalized
 
+    def _resolve_candidate_child_ref(
+        self,
+        parent_node: Any,
+        candidate: Dict[str, Any],
+    ) -> Dict[str, str]:
+        instance_name = str(candidate.get("target_instance") or candidate.get("instance") or "").strip()
+        module_name = str(candidate.get("target_module") or candidate.get("module") or "").strip()
+        if instance_name and instance_name in getattr(parent_node, "children", {}):
+            return self._build_child_ref(parent_node.children[instance_name])
+        if module_name:
+            matches = [
+                child
+                for child in getattr(parent_node, "children", {}).values()
+                if str(getattr(child, "module_name", "") or "").strip() == module_name
+            ]
+            if len(matches) == 1:
+                return self._build_child_ref(matches[0])
+        return {
+            "instance": instance_name,
+            "module": module_name,
+            "path": "",
+        }
+
     def _build_non_direct_child_advisory_tool_result(
         self,
         *,
-        source_child_node: Any,
+        source_child_node: Optional[Any],
         requested_child_node: Any,
         authoritative_candidates: List[Dict[str, Any]],
         advisory: Any,
+        source_child_ref: Optional[Dict[str, Any]] = None,
     ) -> str:
+        source_child = (
+            self._build_child_ref(source_child_node)
+            if source_child_node is not None
+            else self._build_child_ref_from_source_payload(source_child_ref)
+        )
         payload: Dict[str, Any] = {
             "status": "advisory_non_direct_child",
             "requested_child": self._build_child_ref(requested_child_node),
-            "source_child": self._build_child_ref(source_child_node),
+            "source_child": source_child,
             "authoritative_candidates": self._normalize_candidate_child_refs(authoritative_candidates),
             "recommended_child": dict(getattr(advisory, "recommended_child", {}) or {}),
             "advisory_path": list(getattr(advisory, "advisory_path", []) or []),
@@ -1160,9 +1321,23 @@ class Pass3InStrackStages:
                 handoffs=list(handoffs or []),
                 source_payload=dict(source_payload or {}),
             )
+        elif (
+            source_child_node is None
+            and not state["bridge_context"]
+            and state["boundary_takeover"]
+        ):
+            state["bridge_context"] = self._build_port_ingress_bridge_context(
+                parent_node=parent_node,
+                boundary_takeover=list(state["boundary_takeover"] or []),
+                continuation_source=state.get("continuation_source"),
+            )
         if not state["continuation_source"] and source_child_node is not None:
             state["continuation_source"] = self._build_continuation_source(
                 source_child_node,
+                state.get("bridge_context"),
+            )
+        elif not state["continuation_source"] and state["bridge_context"]:
+            state["continuation_source"] = self._build_continuation_source_from_bridge_context(
                 state.get("bridge_context"),
             )
         if source_child_node is not None:
@@ -1450,6 +1625,26 @@ class Pass3InStrackStages:
             continuation_source=continuation_source,
             override_hint=override_hint,
         )
+        active_bridge_context = dict(active_continuation.get("bridge_context") or {})
+        if (
+            source_child_for_handoff is None
+            and list(active_continuation.get("boundary_takeover") or [])
+            and str(active_bridge_context.get("entry_mode") or "").strip() == "parent_port_ingress"
+        ):
+            self.g._append_fork_trace(
+                "port_ingress_bridge_context",
+                {
+                    "pass": "pass3_3_2_orchestrate",
+                    "prompt_style": "instrack_orchestrate",
+                    "parent_path": node_path,
+                    "parent_level": int(getattr(node, "depth", 0) or 0),
+                    "candidate_children": list(active_bridge_context.get("candidate_children") or []),
+                    "resolved_handoffs": list(active_bridge_context.get("resolved_handoffs") or []),
+                    "exits_parent": list(active_bridge_context.get("exits_parent") or []),
+                    "unresolved": list(active_bridge_context.get("unresolved") or []),
+                    "continuation_source": dict(active_continuation.get("continuation_source") or {}),
+                },
+            )
         prompt = PASS3_3_2_ORCHESTRATE_PROMPT.format(
             instruction=instruction,
             instruction_datasheet=instruction_datasheet,
@@ -1546,6 +1741,29 @@ class Pass3InStrackStages:
                             override_hint=child_override_hint,
                         )
                     )
+                    if (
+                        active_source_node is None
+                        and str(active_bridge_context.get("entry_mode") or "").strip() == "parent_port_ingress"
+                    ):
+                        event_name = (
+                            "port_ingress_child_dispatch"
+                            if child_boundary_takeover
+                            else "port_ingress_unresolved"
+                        )
+                        self.g._append_fork_trace(
+                            event_name,
+                            {
+                                "pass": "pass3_3_2_orchestrate",
+                                "prompt_style": "instrack_orchestrate",
+                                "parent_path": node_path,
+                                "parent_level": int(getattr(node, "depth", 0) or 0),
+                                "child_instance": child_node.instance_name,
+                                "child_module": child_node.module_name,
+                                "boundary_takeover": list(child_boundary_takeover or []),
+                                "continuation_source": dict(child_continuation_source or {}),
+                                "warning": str(takeover_warning or "").strip(),
+                            },
+                        )
                     if takeover_warning:
                         print(f"[WARN] {takeover_warning}")
                     if cached_child is None:
@@ -1664,9 +1882,17 @@ class Pass3InStrackStages:
                     else:
                         active_source_node = active_continuation.get("source_child_node")
                         active_bridge_context = dict(active_continuation.get("bridge_context") or {})
+                        port_ingress_mode = (
+                            str(active_bridge_context.get("entry_mode") or "").strip() == "parent_port_ingress"
+                        )
                         authoritative_candidates = list(active_bridge_context.get("candidate_children") or [])
                         normalized_candidates = self._normalize_candidate_child_refs(authoritative_candidates)
                         requested_ref = self._build_child_ref(child_node)
+                        source_child_ref = (
+                            self._build_child_ref(active_source_node)
+                            if active_source_node is not None
+                            else self._build_child_ref_from_source_payload(active_bridge_context)
+                        )
                         is_candidate = any(
                             (
                                 candidate.get("instance")
@@ -1679,7 +1905,7 @@ class Pass3InStrackStages:
                             )
                             for candidate in normalized_candidates
                         )
-                        if active_source_node is not None and not is_candidate:
+                        if (active_source_node is not None or port_ingress_mode) and not is_candidate:
                             self.g._append_fork_trace(
                                 "fork_request",
                                 {
@@ -1692,14 +1918,44 @@ class Pass3InStrackStages:
                                     "prompt_style": "instrack_orchestrate",
                                 },
                             )
-                            advisory = self._takeover_resolver.resolve_non_direct_child_advisory(
-                                parent_node=node,
-                                source_child_node=active_source_node,
-                                requested_child_node=child_node,
-                            )
+                            if active_source_node is not None:
+                                advisory = self._takeover_resolver.resolve_non_direct_child_advisory(
+                                    parent_node=node,
+                                    source_child_node=active_source_node,
+                                    requested_child_node=child_node,
+                                )
+                            else:
+                                recommended_child = (
+                                    self._resolve_candidate_child_ref(node, normalized_candidates[0])
+                                    if normalized_candidates
+                                    else {}
+                                )
+                                reason = (
+                                    "The requested child is not supported by the current authoritative "
+                                    "parent-port continuation. Try the first reachable ingress child instead."
+                                )
+                                if not recommended_child:
+                                    reason = (
+                                        "The requested child is not supported by the current authoritative "
+                                        "parent-port continuation, and no reachable ingress child was identified."
+                                    )
+                                advisory = type(
+                                    "IngressAdvisory",
+                                    (),
+                                    {
+                                        "recommended_child": recommended_child,
+                                        "advisory_path": [recommended_child] if recommended_child else [],
+                                        "skipped_children": [],
+                                        "reason": reason,
+                                        "graph_status": str(
+                                            dict(active_bridge_context.get("debug_report") or {}).get("graph_status")
+                                            or "ready"
+                                        ).strip(),
+                                    },
+                                )()
                             advisory_payload = {
                                 "status": "advisory_non_direct_child",
-                                "source_child": self._build_child_ref(active_source_node),
+                                "source_child": source_child_ref,
                                 "requested_child": requested_ref,
                                 "recommended_child": dict(advisory.recommended_child or {}),
                                 "advisory_path": list(advisory.advisory_path or []),
@@ -1714,7 +1970,7 @@ class Pass3InStrackStages:
                             if self._child_refs_match(requested_ref, advisory.recommended_child or {}):
                                 print(
                                     "[DEBUG] pass3.3.2 non-direct child auto-dispatch: "
-                                    f"source={self._format_child_ref_debug(active_source_node)}; "
+                                    f"source={self._format_child_ref_debug(source_child_ref)}; "
                                     f"requested={self._format_child_ref_debug(requested_ref)}; "
                                     f"recommended={self._format_child_ref_debug(advisory.recommended_child or {})}; "
                                     f"path={advisory_path_text or 'N/A'}; "
@@ -1744,7 +2000,7 @@ class Pass3InStrackStages:
                                 ] = dict(advisory_payload)
                                 print(
                                     "[DEBUG] pass3.3.2 non-direct child advisory: "
-                                    f"source={self._format_child_ref_debug(active_source_node)}; "
+                                    f"source={self._format_child_ref_debug(source_child_ref)}; "
                                     f"requested={self._format_child_ref_debug(requested_ref)}; "
                                     f"recommended={self._format_child_ref_debug(advisory.recommended_child or {})}; "
                                     f"path={advisory_path_text or 'N/A'}; "
@@ -1773,6 +2029,7 @@ class Pass3InStrackStages:
                                     requested_child_node=child_node,
                                     authoritative_candidates=authoritative_candidates,
                                     advisory=advisory,
+                                    source_child_ref=source_child_ref,
                                 )
 
                 tool_result = await self.g._dispatch_direct_child_fork_subagent(
