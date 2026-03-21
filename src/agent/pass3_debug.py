@@ -113,6 +113,8 @@ class Pass3Debug:
                     stage_tag = "pass3.3.2/orchestrate"
                 elif pass_name == "pass3_3_3_render":
                     stage_tag = "pass3.3.3/render"
+                elif pass_name == "pass3_3_3_apv":
+                    stage_tag = "pass3.3.3/apv"
                 elif prompt_style.startswith("instrack"):
                     stage_tag = f"pass3.3/{prompt_style}"
 

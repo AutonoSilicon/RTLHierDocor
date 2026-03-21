@@ -68,6 +68,10 @@ from .pass3_3_instrack import (
     PASS3_3_2_ORCHESTRATE_SYSTEM,
     PASS3_3_2_ORCHESTRATE_PROMPT,
 )
+from .pass3_3_apv import (
+    PASS3_3_3_APV_SYSTEM,
+    PASS3_3_3_APV_PROMPT,
+)
 
 __all__ = [
     # Block-level
@@ -127,4 +131,6 @@ __all__ = [
     "PASS3_3_1_SEARCH_PROMPT",
     "PASS3_3_2_ORCHESTRATE_SYSTEM",
     "PASS3_3_2_ORCHESTRATE_PROMPT",
+    "PASS3_3_3_APV_SYSTEM",
+    "PASS3_3_3_APV_PROMPT",
 ]

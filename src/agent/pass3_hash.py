@@ -16,6 +16,8 @@ from .prompts import (
     PASS3_3_1_SEARCH_PROMPT,
     PASS3_3_2_ORCHESTRATE_SYSTEM,
     PASS3_3_2_ORCHESTRATE_PROMPT,
+    PASS3_3_3_APV_SYSTEM,
+    PASS3_3_3_APV_PROMPT,
 )
 
 
@@ -112,6 +114,44 @@ class Pass3Hash:
             "top_module": top_module,
             "instruction": instruction,
             "orchestration_json_hash": hash_text(orchestration_json_text),
+        }
+        return hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    def build_pass3_3_apv_index_input_hash(
+        self,
+        top_module: str,
+        instruction: str,
+        start_module: str,
+        orchestration_json_text: str,
+    ) -> str:
+        """Build cache key for pass3.3.3 APV instruction index."""
+        payload = {
+            "version": "pass3_3_instrack_apv_index_cache_v6",
+            "top_module": top_module,
+            "instruction": instruction,
+            "start_module": start_module,
+            "system_prompt": PASS3_3_3_APV_SYSTEM,
+            "prompt_template": PASS3_3_3_APV_PROMPT,
+            "orchestration_json_hash": hash_text(orchestration_json_text),
+        }
+        return hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+    def build_pass3_3_apv_item_input_hash(
+        self,
+        top_module: str,
+        instruction: str,
+        item_json_text: str,
+        previous_leaf_json_text: str,
+    ) -> str:
+        """Build cache key for one pass3.3.3 APV module item."""
+        payload = {
+            "version": "pass3_3_instrack_apv_item_cache_v6",
+            "top_module": top_module,
+            "instruction": instruction,
+            "system_prompt": PASS3_3_3_APV_SYSTEM,
+            "prompt_template": PASS3_3_3_APV_PROMPT,
+            "item_json_hash": hash_text(item_json_text),
+            "previous_leaf_json_hash": hash_text(previous_leaf_json_text),
         }
         return hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 

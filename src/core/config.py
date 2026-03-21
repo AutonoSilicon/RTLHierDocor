@@ -190,7 +190,7 @@ class ProjectConfig:
     pass2_enabled: bool = True  # Enable Pass 1.5 + Pass 2.x generation
     pass3_enabled: bool = True  # Enable Pass 3 (chip-level overview & subsystem docs)
     pass3_3_enabled: bool = True  # Enable Pass 3.3 (instrack)
-    pass3_3_3_enabled: bool = True  # Enable Pass 3.3.3 render (.mmd generation)
+    pass3_3_3_enabled: bool = True  # Enable Pass 3.3.3 APV YAML generation
     isa_profile: str = "c910"  # Instruction profile: c910|rv64i|rv64gc
     isa_instructions: List[str] = field(default_factory=list)  # Explicit instruction list override
     instrack_single_instruction: Optional[str] = None  # Run only one instruction when set

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .pass3_instrack_stages import Pass3InStrackStages
+from .pass3_instrack_apv import Pass3InStrackAPV
 from .pass3_partition_helpers import Pass3PartitionHelpers
 from .pass3_debug import Pass3Debug
 from .pass3_hash import Pass3Hash
@@ -50,6 +51,7 @@ class Pass3Generator:
 
         # Helper objects for delegation
         self._instrack_stages = Pass3InStrackStages(self)
+        self._instrack_apv = Pass3InStrackAPV(self)
         self._partition_helpers = Pass3PartitionHelpers(self)
         self._debug = Pass3Debug(self)
         self._hash = Pass3Hash(self)
@@ -1464,9 +1466,9 @@ class Pass3Generator:
             out_md = instruction_dir / f"{slug}.md"
             out_json = instruction_dir / f"{slug}.json"
             artifact_orchestrate_index_json = f"instrack/{slug}/artifacts/orchestrate_index.json"
-            artifact_render_index_json = f"instrack/{slug}/artifacts/render_index.json"
+            artifact_apv_index_json = f"instrack/{slug}/artifacts/apv_index.json"
             orchestrate_index_path = artifacts_dir / "orchestrate_index.json"
-            render_index_path = artifacts_dir / "render_index.json"
+            apv_index_path = artifacts_dir / "apv_index.json"
             instruction_datasheet = self._extract_instruction_datasheet_excerpt(datasheet_text, instruction)
 
             search_input_hash = self._build_pass3_3_search_input_hash(
@@ -1699,65 +1701,57 @@ class Pass3Generator:
                 )
 
             orchestrate_index_text = orchestrate_index_path.read_text(encoding="utf-8")
-            render_enabled = bool(getattr(self.owner, "pass3_3_3_enabled", True))
-            render_input_hash = self._instrack_stages.build_pass3_3_render_input_hash(
+            apv_enabled = bool(getattr(self.owner, "pass3_3_3_enabled", True))
+            apv_items: List[Dict[str, Any]] = []
+            apv_index_input_hash = self._hash.build_pass3_3_apv_index_input_hash(
                 top_module=top_node.module_name,
                 instruction=instruction,
+                start_module=str(parsed_search.get("start_module") or "").strip(),
                 orchestration_json_text=orchestrate_index_text,
             )
-            render_items: List[Dict[str, Any]] = []
-            if render_enabled:
+            cached_apv_items: List[Dict[str, Any]] = []
+            if apv_enabled and apv_index_path.exists():
+                try:
+                    apv_payload = json.loads(apv_index_path.read_text(encoding="utf-8"))
+                    if isinstance(apv_payload, dict):
+                        loaded_items = apv_payload.get("items")
+                        if isinstance(loaded_items, list):
+                            cached_apv_items = loaded_items
+                except Exception:
+                    cached_apv_items = []
+
+            if apv_enabled:
                 if self.owner.project_tracker.is_done(
-                    artifact_render_index_json,
-                    str(render_index_path),
-                    expected_input_hash=render_input_hash,
+                    artifact_apv_index_json,
+                    str(apv_index_path),
+                    expected_input_hash=apv_index_input_hash,
                 ):
-                    try:
-                        render_payload = json.loads(render_index_path.read_text(encoding="utf-8"))
-                        if isinstance(render_payload, dict):
-                            loaded_items = render_payload.get("items")
-                            if isinstance(loaded_items, list):
-                                render_items = loaded_items
-                    except Exception:
-                        render_items = []
-
-                if not render_items:
+                    apv_items = list(cached_apv_items)
+                else:
                     self.owner.project_tracker.mark_running(
-                        artifact_render_index_json,
-                        input_hash=render_input_hash,
-                        meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_3_render"},
+                        artifact_apv_index_json,
+                        input_hash=apv_index_input_hash,
+                        meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_3_apv"},
                     )
-                    render_items = []
-                    for item in orchestrate_items:
-                        module_slug = self._safe_slug(str(item.get("module") or "unknown")).lower()
-                        instance_slug = self._safe_slug(str(item.get("instance") or "inst")).lower()
-                        path_slug = self._safe_slug(
-                            str(item.get("path") or f"{module_slug}__{instance_slug}").replace("/", "__")
-                        ).lower()
-                        mermaid_rel = f"instrack/{slug}/artifacts/{path_slug}.mmd"
-                        mermaid_abs = artifacts_dir / f"{path_slug}.mmd"
-                        mermaid_text = self._instrack_stages.render_orchestration_item_mermaid(item)
-                        mermaid_abs.write_text(mermaid_text, encoding="utf-8")
-                        render_items.append({
-                            "module": str(item.get("module") or "").strip(),
-                            "instance": str(item.get("instance") or "").strip(),
-                            "path": str(item.get("path") or "").strip(),
-                            "artifact_mermaid": mermaid_rel,
-                        })
-
-                    render_index_payload = {
-                        "instruction": instruction,
-                        "start_module": parsed_search.get("start_module", ""),
-                        "schema_version": "pass3_3_3_render_index_v1",
-                        "items": render_items,
-                    }
-                    render_index_text = json.dumps(render_index_payload, ensure_ascii=False, indent=2)
-                    render_index_path.write_text(render_index_text, encoding="utf-8")
+                    apv_result = await self._instrack_apv.generate_instruction_apv(
+                        top_node=top_node,
+                        instruction=instruction,
+                        instruction_slug=slug,
+                        instruction_datasheet=instruction_datasheet,
+                        parsed_search=parsed_search,
+                        orchestrate_items=orchestrate_items,
+                        orchestrate_index_text=orchestrate_index_text,
+                        artifacts_dir=artifacts_dir,
+                        cached_items=cached_apv_items,
+                    )
+                    apv_items = list(apv_result.get("items") or [])
+                    apv_index_text = str(apv_result.get("index_text") or "")
+                    apv_index_path.write_text(apv_index_text, encoding="utf-8")
                     self.owner.project_tracker.update(
-                        artifact_render_index_json,
-                        render_index_text,
-                        input_hash=render_input_hash,
-                        meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_3_render"},
+                        artifact_apv_index_json,
+                        apv_index_text,
+                        input_hash=apv_index_input_hash,
+                        meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3_3_apv"},
                     )
 
             lifecycle_modules: List[str] = []
@@ -1774,11 +1768,14 @@ class Pass3Generator:
                 "## Orchestrate Artifact",
                 f"- `instrack/{slug}/artifacts/orchestrate_index.json`",
                 "",
-                "## Render Artifacts",
+                "## APV Artifacts",
             ]
-            if render_items:
-                for item in render_items:
-                    md_lines.append(f"- `{item.get('artifact_mermaid', '')}`")
+            if apv_items:
+                for item in apv_items:
+                    md_lines.append(
+                        f"- `{item.get('artifact_yaml', '')}`"
+                        f" (status={item.get('status', 'partial')}, tasks={item.get('task_count', 0)})"
+                    )
             else:
                 md_lines.append("- (none)")
             md_text = "\n".join(md_lines).strip() + "\n"
@@ -1787,15 +1784,15 @@ class Pass3Generator:
             self.owner.project_tracker.update(
                 artifact_md,
                 md_text,
-                input_hash=render_input_hash,
+                input_hash=apv_index_input_hash if apv_enabled else orchestrate_input_hash,
                 meta={"top_module": top_node.module_name, "instruction": instruction, "pass": "pass3_3"},
             )
 
             json_payload = {
                 **parsed_search,
-                "schema_version": "pass3_3_2_orchestrate_v1",
+                "schema_version": "pass3_3_instrack_apv_v1",
                 "orchestrate_index_artifact_json": artifact_orchestrate_index_json,
-                "render_index_artifact_json": artifact_render_index_json if render_enabled else "",
+                "apv_index_artifact_json": artifact_apv_index_json if apv_enabled else "",
                 "lifecycle_modules": lifecycle_modules,
             }
             json_text = json.dumps(json_payload, ensure_ascii=False, indent=2)
@@ -1803,8 +1800,8 @@ class Pass3Generator:
             self.owner.project_tracker.update(
                 artifact_json,
                 json_text,
-                input_hash=orchestrate_input_hash,
-                meta={"source": artifact_md, "parser": "instrack_orchestrate_v1"},
+                input_hash=apv_index_input_hash if apv_enabled else orchestrate_input_hash,
+                meta={"source": artifact_md, "parser": "instrack_apv_v1"},
             )
 
             index_entries.append({
@@ -1821,7 +1818,7 @@ class Pass3Generator:
                 "key_register_line_range": parsed_search.get("key_register_line_range", {"start_line": 0, "end_line": 0}),
                 "search_confidence": parsed_search.get("confidence", "low"),
                 "orchestrate_index_artifact_json": artifact_orchestrate_index_json,
-                "render_index_artifact_json": artifact_render_index_json if render_enabled else "",
+                "apv_index_artifact_json": artifact_apv_index_json if apv_enabled else "",
                 "lifecycle_modules": lifecycle_modules,
             })
 

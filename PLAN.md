@@ -47,17 +47,17 @@
 
 **APV 输出约束**
 - 每个 module item 的一次 LLM 调用输出一个 JSON 中间协议，至少包含：`status`（`complete|partial`）、`tasks`、`unknown`。其中 `tasks` 只描述当前 item 对应的 APV 内容。
-- 每个 task item 至少包含：`task_name`、`condition_lines`、`capture_signals`、`logging_lines`、`match_mode`、`max_match`，以及可选的依赖占位描述。
+- 每个 task item 至少包含：`ref_name`、`task_name`、`condition_lines`、`capture_signals`、`logging_lines`、`match_mode`、`max_match`。
 - 每个 YAML 文件由 Python 根据当前 item 的 JSON 中间协议写出；文件内允许包含一个或多个属于该 item 的 task。
 - task id 由 Python 统一生成为稳定格式，如 `s00_<instance_slug>`、`s01_<instance_slug>`。Python 同时维护线性的全局 task 注册表，并把每个 module item 的最后一个 task 记录为该 item 的 `leaf_task_id`。
 - `scope` 与信号名的最终形态由 Python 中间转换层统一决定。模型只需要表达当前 module item 的信号语义；Python 负责把这些引用规范化为相对未来 APV 根 `scope` 的层级路径，例如去掉顶层 RTL module 名后的 `x_ct_top_0.x_ct_core...signal`。v1 仍不使用 task-level `scope`。
-- 模型不直接输出最终 `$dep.<task_id>.<signal>`。模型只输出依赖占位信息：
-- 第一个 task 若依赖上游 module，则用 `dep_source = "prev_module_leaf"` 并给出 `dep_leaf_name`。
-- 同一 module 内后续 task 若依赖前一个 task，则用 `dep_source = "prev_task_in_item"` 并给出 `dep_leaf_name`。
-- 如果条件中需要引用依赖信号，模型在 `condition_lines` 里使用占位形式 `$dep_leaf.<leaf_name>`；Python 在 task id 分配完成后，把它统一改写成最终 `$dep.<task_id>.<signal>`。
+- 模型不直接输出最终 `$dep.<task_id>.<signal>`，而是通过 `$dep.<ref_name>.<signal>` 引用上游 task 暴露出来的 capture 信号。
+- 每个 task 都显式声明一个稳定的 `ref_name`；后续 task 可以在同一个 raw JSON 中用 `$dep.<ref_name>.<signal>` 回指更早声明的 task。
+- 对跨 module 的依赖，Python 在 prompt 的 `Visible Upstream Dep Handles` 中提供候选列表，至少包含 `ref_name`、`task_id`、`capture_names`、`module`、`instance`、`path`。
+- Python 根据 `ref_name` 校验依赖引用、回填 `dependsOn`，并在 task id 分配完成后把 raw `$dep.<ref_name>.<signal>` 统一改写成最终 `$dep.<task_id>.<signal>`。
 - `leaf task` 在 v1 中定义为当前 module item 归一化后 task 列表中的最后一个 task。
 - `condition` 与 `logging` 最终由 Python 写成 YAML list 形式；不把大段自然语言直接塞进 `condition`。
-- `task_name`、`condition_lines`、`capture_signals` 非空；`match_mode` 必须属于 Python 允许集合；`max_match >= 0`；若声明 `dep_source`，则 `dep_leaf_name` 必须非空且和 `condition_lines` 中的占位引用一致。
+- `ref_name`、`task_name`、`condition_lines`、`capture_signals` 非空；`match_mode` 必须属于 Python 允许集合；`max_match >= 0`；若使用 `$dep.<ref_name>.<signal>`，则同一个 task 中只能引用一个唯一 `ref_name`，且该 `ref_name` 与 `signal` 必须能在可见 dep 符号表中解析。
 
 **产物调整**
 - `instrack/<inst>/artifacts/<path_slug>.apv.yaml`：当前 module item 对应的 APV YAML 文件。
@@ -71,8 +71,8 @@
 - 覆盖“每个 module item 只发起一次 LLM 调用”的约束测试，确认 3.3.3 不注册 tool、不进入多轮交互、不触发 fork。
 - 用构造好的 search + orchestrate mock 覆盖至少 3 类场景：module item 正常生成 YAML、module item 因路线图缺口生成 `partial`、模型输出结构非法被拒绝。
 - 覆盖“直接复用既有路线图”的测试：3.3.3 只消费 3.3.2 item 列表和 item-level route context，不在运行时重新选择 child / parent 路径。
-- 覆盖串行 `$dep` 规则：当前 module 的第一个 task 只能回指上一个 module 的 leaf task；同 module 内后续 task 只能回指前一个 task；非法引用必须被拒绝。
-- 覆盖 Python `$dep` 回填：模型只输出依赖占位，Python 在 task id 分配后写成最终 `$dep.<task_id>.<signal>`，并正确更新 `apv_index.json` 中的 `leaf_task_id`。
+- 覆盖串行 `$dep` 规则：当前 module 的第一个 task 只能回指 `Visible Upstream Dep Handles` 中给出的上游 candidate；同 module 内后续 task 只能回指已声明的前序 `ref_name`；非法引用、前向引用、重复 `ref_name` 都必须被拒绝。
+- 覆盖 Python `$dep` 回填：模型只输出 raw `$dep.<ref_name>.<signal>`，Python 在 task id 分配后写成最终 `$dep.<task_id>.<signal>`，并正确更新 `apv_index.json` 中的 `leaf_task_id` / `leaf_ref_name`。
 - 对每个生成的 `<path_slug>.apv.yaml` 做最小包装 YAML 校验；如果本地 APV validator 可用，再额外跑一次 validator 校验。
 - 选一条真实指令先做 `ADD` 端到端冒烟：search -> orchestrate -> apv，检查多个 module item 都各自产生 YAML artifact，且状态可解释。
 - 回归验证 `pass3_3_3_enabled=false` 时完全跳过 3.3.3；旧 render hash 不会误命中新 APV hash；旧 `.mmd` 输出不再被 Markdown/JSON 索引引用。
