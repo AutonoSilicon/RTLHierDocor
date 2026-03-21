@@ -114,13 +114,22 @@ def _prime_cached_search_and_orchestrate(generator, top_node, instruction, searc
     )
 
 
-def _build_generator(tmp_path, llm):
+def _structured_topology_block(*signals):
+    joined = ", ".join(f"{signal}(port)" for signal in signals)
+    return f"# Topology\n\nInputs from blocks: {joined}\n"
+
+
+def _build_generator(tmp_path, llm, topology_blocks=None):
     owner = FakeOwner(tmp_path, llm)
     generator = Pass3Generator(owner)
     generator._resolve_instrack_instructions = lambda: ["ADD"]
     generator._load_instrack_datasheet = lambda: "ADD datasheet excerpt"
     generator._extract_instruction_datasheet_excerpt = lambda text, instruction: text
-    generator._build_pass2_style_topology_block = lambda module_name: f"topology for {module_name}"
+    topology_blocks = dict(topology_blocks or {})
+    generator._build_pass2_style_topology_block = lambda module_name: topology_blocks.get(
+        module_name,
+        f"topology for {module_name}",
+    )
     return generator
 
 
@@ -131,11 +140,18 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
 {"status":"complete","tasks":[{"ref_name":"ifu_entry","task_name":"ifu entry","condition_lines":["fetch_vld && !flush"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"match_mode":"single","max_match":1}],"unknown":[]}
 ```""",
             """```json
-{"status":"complete","tasks":[{"ref_name":"decode_accept","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["decode accepted"],"match_mode":"first","max_match":1},{"ref_name":"issue_fire","task_name":"issue fire","condition_lines":["$dep.decode_accept.dispatch_vld && issue_en"],"capture_signals":["issue_pkt_vld"],"logging_lines":["issue fired"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"decode_accept","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld == dispatch_vld_i","dispatch_vld_i && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["decode accepted"],"match_mode":"first","max_match":1},{"ref_name":"issue_fire","task_name":"issue fire","condition_lines":["$dep.decode_accept.dispatch_vld == issue_en"],"capture_signals":["issue_pkt_vld"],"logging_lines":["issue fired"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
-    generator = _build_generator(tmp_path, llm)
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={
+            "ifu_mod": _structured_topology_block("fetch_vld", "flush"),
+            "idu_mod": _structured_topology_block("dispatch_vld_i", "decode_ready", "dispatch_vld", "issue_en", "issue_pkt_vld"),
+        },
+    )
     top_node = FakeNode("top_mod", "top")
 
     search_payload = {
@@ -194,10 +210,13 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
     assert "## Previous Item Summary" not in llm.calls[1]["prompt"]
     assert "## Next Item Summary" not in llm.calls[1]["prompt"]
     assert "## Current Module Context" in llm.calls[1]["prompt"]
+    assert "## Local Signal Guidance" not in llm.calls[1]["prompt"]
     assert '"instruction_state": {' in llm.calls[1]["prompt"]
     assert '"lifecycle_context": "accepts decode handoff and prepares issue packet"' in llm.calls[1]["prompt"]
     assert '"boundary_takeover": [' in llm.calls[1]["prompt"]
     assert '"boundary_handoffs": []' in llm.calls[1]["prompt"]
+    assert '"preferred_local_anchor_names": [' not in llm.calls[1]["prompt"]
+    assert '"dispatch_vld_i"' in llm.calls[1]["prompt"]
 
     slug = generator._safe_slug("ADD").lower()
     ifu_yaml = (tmp_path / "chip" / "instrack" / slug / "artifacts" / "top__x_ifu.apv.yaml").read_text(encoding="utf-8")
@@ -211,13 +230,14 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
     assert 'matchMode: "first"' in ifu_yaml
     assert '"x_ifu.fetch_vld && !x_ifu.flush"' in ifu_yaml
     assert 'dependsOn: "s00_t00_x_ifu"' in idu_yaml
-    assert '"$dep.s00_t00_x_ifu.fetch_vld && x_idu.decode_ready"' in idu_yaml
-    assert '"$dep.s01_t00_x_idu.dispatch_vld && x_idu.issue_en"' in idu_yaml
+    assert '"$dep.s00_t00_x_ifu.fetch_vld == x_idu.dispatch_vld_i"' in idu_yaml
+    assert '"$dep.s01_t00_x_idu.dispatch_vld == x_idu.issue_en"' in idu_yaml
     assert apv_index["schema_version"] == "pass3_3_3_apv_index_v1"
     assert apv_index["items"][0]["leaf_task_id"] == "s00_t00_x_ifu"
     assert apv_index["items"][0]["leaf_ref_name"] == "ifu_entry"
     assert apv_index["items"][1]["leaf_task_id"] == "s01_t01_x_idu"
     assert apv_index["items"][1]["leaf_ref_name"] == "issue_fire"
+    assert apv_index["items"][1]["status"] == "complete"
     assert summary_json["schema_version"] == "pass3_3_instrack_apv_v1"
     assert summary_json["apv_index_artifact_json"] == f"instrack/{slug}/artifacts/apv_index.json"
     assert "top__x_ifu.apv.yaml" in summary_md
@@ -651,3 +671,134 @@ def test_run_pass3_3_rejects_forward_dep_ref_name(tmp_path):
     apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
     assert apv_index["items"][0]["status"] == "partial"
     assert any("forward-references `ref_name=issue_fire`" in reason for reason in apv_index["items"][0]["unknown"])
+
+
+def test_run_pass3_3_rejects_unknown_local_signal_when_topology_catalog_is_trusted(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"bad_local","task_name":"bad local","condition_lines":["ghost_sig == real_vld"],"capture_signals":["real_vld"],"logging_lines":["bad local"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+        ]
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={
+            "ifu_mod": _structured_topology_block("real_vld", "real_data"),
+        },
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [{"output_port": "real_vld", "value_condition": "real_vld", "behavior": "forward valid"}],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "simple local signal check",
+                "confidence": "high",
+                "unknown": "",
+            },
+        }
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    slug = generator._safe_slug("ADD").lower()
+    apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
+
+    assert apv_index["items"][0]["status"] == "partial"
+    assert any("unknown local signal(s)" in reason and "ghost_sig" in reason for reason in apv_index["items"][0]["unknown"])
+
+
+def test_run_pass3_3_marks_partial_when_complete_lacks_same_line_anchor_relation(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"ifu_entry","task_name":"ifu entry","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+            """```json
+{"status":"complete","tasks":[{"ref_name":"decode_accept","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld","dispatch_vld_i","decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["weak continuity"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+        ]
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={
+            "ifu_mod": _structured_topology_block("fetch_vld"),
+            "idu_mod": _structured_topology_block("dispatch_vld_i", "decode_ready", "dispatch_vld"),
+        },
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [{"output_port": "fetch_vld", "value_condition": "fetch_vld", "behavior": "forward valid"}],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "fetch stage",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+        {
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+            "orchestrator_role": "parent_module",
+            "orchestration": {
+                "boundary_takeover": [{"input_port": "dispatch_vld_i", "value_condition": "dispatch_vld_i", "behavior": "accept upstream valid"}],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "decode stage",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    slug = generator._safe_slug("ADD").lower()
+    apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
+
+    assert apv_index["items"][0]["status"] == "complete"
+    assert apv_index["items"][1]["status"] == "partial"
+    assert any("same-line continuity-preserving relation" in reason for reason in apv_index["items"][1]["unknown"])

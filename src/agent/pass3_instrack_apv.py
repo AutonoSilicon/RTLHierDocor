@@ -3,7 +3,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .prompts import PASS3_3_3_APV_PROMPT, PASS3_3_3_APV_SYSTEM
 
@@ -40,6 +40,24 @@ class Pass3InStrackAPV:
         "False",
         "None",
     }
+    _TOPOLOGY_NOISE_TOKENS = {
+        "topology",
+        "module",
+        "inputs",
+        "outputs",
+        "blocks",
+        "block",
+        "from",
+        "to",
+        "source",
+        "code",
+        "none",
+        "port",
+        "proc",
+        "submodule",
+    }
+    _SIGNAL_GUIDANCE_MARKERS = ("(port)", "->", "Inputs from blocks:", "Outputs to blocks:", "[Source code]")
+    _ANCHOR_HINT_TOKENS = ("pc", "vpc", "data", "inst", "dispatch", "issue", "valid", "vld")
 
     def __init__(self, generator: Any):
         self.g = generator
@@ -122,6 +140,14 @@ class Pass3InStrackAPV:
         yaml_path = artifacts_dir / f"{path_slug}.apv.yaml"
         raw_path = artifacts_dir / f"{path_slug}.apv.raw.md"
 
+        module_name = str(item.get("module") or "").strip()
+        current_module_topology = self.g._prompts.build_instrack_current_module_topology(module_name)
+        local_signal_guidance = self._build_local_signal_guidance(
+            item=item,
+            current_module_topology=current_module_topology,
+            previous_leaf_context=previous_leaf_context,
+        )
+        local_signal_guidance_text = json.dumps(local_signal_guidance, ensure_ascii=False, indent=2)
         item_json_text = json.dumps(self._build_current_item_context(item), ensure_ascii=False, indent=2)
         visible_dep_payload = self._build_visible_dep_payload(previous_leaf_context)
         visible_dep_text = json.dumps(visible_dep_payload, ensure_ascii=False, indent=2)
@@ -130,6 +156,8 @@ class Pass3InStrackAPV:
             instruction=instruction,
             item_json_text=item_json_text,
             previous_leaf_json_text=visible_dep_text,
+            current_module_topology_text=current_module_topology,
+            local_signal_guidance_json_text=local_signal_guidance_text,
         )
 
         cached_ok = False
@@ -142,8 +170,6 @@ class Pass3InStrackAPV:
         if cached_ok:
             return self._normalize_cached_entry(cached_entry, artifact_yaml, artifact_raw)
 
-        module_name = str(item.get("module") or "").strip()
-        current_module_topology = self.g._prompts.build_instrack_current_module_topology(module_name)
         prompt = PASS3_3_3_APV_PROMPT.format(
             instruction=instruction,
             instruction_datasheet=instruction_datasheet or "Instruction unavailable",
@@ -205,9 +231,20 @@ class Pass3InStrackAPV:
             item_index=item_index,
             raw_tasks=list(parsed_payload.get("tasks") or []),
             previous_leaf_context=previous_leaf_context,
+            local_signal_guidance=local_signal_guidance,
         )
         if task_errors:
             unknown.extend(task_errors)
+            status = "partial"
+        quality_errors = self._quality_gate_tasks(
+            tasks=tasks,
+            item=item,
+            status=status,
+            previous_leaf_context=previous_leaf_context,
+            local_signal_guidance=local_signal_guidance,
+        )
+        if quality_errors:
+            unknown.extend(quality_errors)
             status = "partial"
         if status == "complete" and not tasks:
             unknown.append("Model returned complete without any valid tasks.")
@@ -282,12 +319,15 @@ class Pass3InStrackAPV:
         item_index: int,
         raw_tasks: List[Dict[str, Any]],
         previous_leaf_context: Optional[Dict[str, Any]],
+        local_signal_guidance: Optional[Dict[str, Any]] = None,
     ) -> (List[Dict[str, Any]], List[str]):
         scope_prefix = self._scope_prefix(item_path=self._item_path(item), top_node=top_node)
         root_prefixes = self._root_prefixes(top_node)
         tasks: List[Dict[str, Any]] = []
         errors: List[str] = []
         dep_symbols: Dict[str, Dict[str, Any]] = {}
+        trusted_local_signal_catalog = bool((local_signal_guidance or {}).get("trusted_local_signal_catalog"))
+        allowed_local_signals = set((local_signal_guidance or {}).get("allowed_local_signals") or [])
         if previous_leaf_context:
             upstream_ref_name = str(previous_leaf_context.get("ref_name") or "").strip()
             upstream_task_id = str(previous_leaf_context.get("task_id") or "").strip()
@@ -460,6 +500,19 @@ class Pass3InStrackAPV:
                 self._normalize_signal_expression(signal, scope_prefix, root_prefixes)
                 for signal in capture_signals
             ]
+            if trusted_local_signal_catalog and allowed_local_signals:
+                missing_local_signals = sorted(
+                    (
+                        self._extract_local_signal_names(normalized_conditions)
+                        | self._extract_local_signal_names(normalized_capture)
+                    )
+                    - allowed_local_signals
+                )
+                if missing_local_signals:
+                    errors.append(
+                        f"Task `{task_name}` references unknown local signal(s) for this module item: {', '.join(missing_local_signals)}."
+                    )
+                    continue
             capture_names = self._capture_names(normalized_capture)
             if not capture_names:
                 errors.append(f"Task `{task_name}` does not expose any usable capture names.")
@@ -487,6 +540,166 @@ class Pass3InStrackAPV:
             )
 
         return tasks, errors
+
+    def _quality_gate_tasks(
+        self,
+        *,
+        tasks: List[Dict[str, Any]],
+        item: Dict[str, Any],
+        status: str,
+        previous_leaf_context: Optional[Dict[str, Any]],
+        local_signal_guidance: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        if status != "complete" or not tasks or not previous_leaf_context:
+            return []
+
+        previous_task_id = str(previous_leaf_context.get("task_id") or "").strip()
+        if not previous_task_id:
+            return []
+
+        upstream_anchor_names = set((local_signal_guidance or {}).get("preferred_upstream_anchor_names") or [])
+        local_anchor_names = set((local_signal_guidance or {}).get("preferred_local_anchor_names") or [])
+        if not upstream_anchor_names or not local_anchor_names:
+            return []
+
+        for task in tasks:
+            if str(task.get("depends_on") or "").strip() != previous_task_id:
+                continue
+            for condition in task.get("condition_lines") or []:
+                dep_anchors = {
+                    dep_signal
+                    for dep_task_id, dep_signal in self._DEP_REFERENCE_RE.findall(str(condition or ""))
+                    if dep_task_id == previous_task_id and dep_signal in upstream_anchor_names
+                }
+                if not dep_anchors:
+                    continue
+                local_signals = self._extract_local_signal_names(str(condition or ""))
+                if local_signals & local_anchor_names:
+                    return []
+
+        local_anchor_preview = ", ".join(sorted(local_anchor_names)[:4])
+        upstream_anchor_preview = ", ".join(sorted(upstream_anchor_names)[:4])
+        module_name = str(item.get("module") or "").strip() or "<unknown>"
+        return [
+            (
+                f"Module `{module_name}` was marked complete without any same-line continuity-preserving relation "
+                f"between upstream anchor(s) [{upstream_anchor_preview}] and local anchor(s) [{local_anchor_preview}]."
+            )
+        ]
+
+    def _build_local_signal_guidance(
+        self,
+        *,
+        item: Dict[str, Any],
+        current_module_topology: str,
+        previous_leaf_context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        payload = dict(item.get("orchestration") or {})
+        structured_topology = self._has_structured_signal_catalog(current_module_topology)
+        allowed_local_signals = self._extract_topology_signal_catalog(current_module_topology)
+
+        for entry in list(payload.get("boundary_takeover") or []):
+            input_port = str((entry or {}).get("input_port") or "").strip()
+            if input_port:
+                allowed_local_signals.add(input_port)
+        for entry in list(payload.get("boundary_handoffs") or []):
+            output_port = str((entry or {}).get("output_port") or "").strip()
+            if output_port:
+                allowed_local_signals.add(output_port)
+
+        preferred_local_anchor_names = sorted(
+            {
+                name
+                for name in allowed_local_signals
+                if self._is_anchor_like_name(name)
+            }
+        )
+        preferred_upstream_anchor_names = sorted(
+            {
+                str(name or "").strip()
+                for name in list((previous_leaf_context or {}).get("capture_names") or [])
+                if self._is_anchor_like_name(str(name or "").strip())
+            }
+        )
+        packed_bus_signals = sorted(
+            {
+                name
+                for name in allowed_local_signals
+                if "_data" in name or name.endswith("_pkt") or name.endswith("_bus")
+            }
+        )
+
+        guidance = {
+            "trusted_local_signal_catalog": bool(structured_topology and allowed_local_signals),
+            "allowed_local_signals": sorted(allowed_local_signals),
+            "preferred_local_anchor_names": preferred_local_anchor_names,
+            "preferred_upstream_anchor_names": preferred_upstream_anchor_names,
+            "packed_bus_signals": packed_bus_signals,
+        }
+        if guidance["trusted_local_signal_catalog"]:
+            guidance["notes"] = [
+                "Use only these real local signal names for this module item.",
+                "If a needed value only exists inside a packed bus, express it with a slice on that real bus.",
+            ]
+        else:
+            guidance["notes"] = [
+                "No trusted local signal catalog could be extracted from topology text for this item.",
+                "Do not invent new local alias signals; prefer explicit ports and topology-visible names only.",
+            ]
+        return guidance
+
+    def _has_structured_signal_catalog(self, topology_text: str) -> bool:
+        text = str(topology_text or "")
+        return any(marker in text for marker in self._SIGNAL_GUIDANCE_MARKERS)
+
+    def _extract_topology_signal_catalog(self, topology_text: str) -> Set[str]:
+        text = str(topology_text or "")
+        if not self._has_structured_signal_catalog(text):
+            return set()
+
+        names: Set[str] = set()
+        for match in self._SIGNAL_TOKEN_RE.finditer(text):
+            token = match.group(0)
+            if match.start() > 0 and text[match.start() - 1] in {"$", "'"}:
+                continue
+            token = self._INDEX_RE.sub("", token)
+            name = token.split(".")[-1].strip()
+            if not name:
+                continue
+            if name in self._RESERVED_TOKENS or name.lower() in self._RESERVED_TOKENS:
+                continue
+            if self._CONST_TOKEN_RE.fullmatch(name):
+                continue
+            if name.lower() in self._TOPOLOGY_NOISE_TOKENS:
+                continue
+            names.add(name)
+        return names
+
+    def _extract_local_signal_names(self, values: Any) -> Set[str]:
+        expressions = values if isinstance(values, list) else [values]
+        names: Set[str] = set()
+        for value in expressions:
+            text = self._DEP_REFERENCE_RE.sub("", str(value or ""))
+            for match in self._SIGNAL_TOKEN_RE.finditer(text):
+                token = match.group(0)
+                if match.start() > 0 and text[match.start() - 1] in {"$", "'"}:
+                    continue
+                token = self._INDEX_RE.sub("", token)
+                name = token.split(".")[-1].strip()
+                if not name:
+                    continue
+                if name in self._RESERVED_TOKENS or name.lower() in self._RESERVED_TOKENS:
+                    continue
+                if self._CONST_TOKEN_RE.fullmatch(name):
+                    continue
+                names.add(name)
+        return names
+
+    def _is_anchor_like_name(self, name: str) -> bool:
+        lowered = str(name or "").strip().lower()
+        if not lowered:
+            return False
+        return any(token in lowered for token in self._ANCHOR_HINT_TOKENS)
 
     def _render_yaml(self, *, item: Dict[str, Any], status: str, unknown: List[str], tasks: List[Dict[str, Any]]) -> str:
         lines = [

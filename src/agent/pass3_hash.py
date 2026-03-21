@@ -142,16 +142,20 @@ class Pass3Hash:
         instruction: str,
         item_json_text: str,
         previous_leaf_json_text: str,
+        current_module_topology_text: str = "",
+        local_signal_guidance_json_text: str = "",
     ) -> str:
         """Build cache key for one pass3.3.3 APV module item."""
         payload = {
-            "version": "pass3_3_instrack_apv_item_cache_v6",
+            "version": "pass3_3_instrack_apv_item_cache_v7",
             "top_module": top_module,
             "instruction": instruction,
             "system_prompt": PASS3_3_3_APV_SYSTEM,
             "prompt_template": PASS3_3_3_APV_PROMPT,
             "item_json_hash": hash_text(item_json_text),
             "previous_leaf_json_hash": hash_text(previous_leaf_json_text),
+            "current_module_topology_hash": hash_text(current_module_topology_text),
+            "local_signal_guidance_hash": hash_text(local_signal_guidance_json_text),
         }
         return hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 

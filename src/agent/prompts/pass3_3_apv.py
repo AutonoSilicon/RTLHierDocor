@@ -1,71 +1,56 @@
 """Pass 3.3.3: InStrack APV fragment prompts."""
 
-PASS3_3_3_APV_SYSTEM = """You are a senior CPU verification engineer preparing AgenticPipeViewer (APV) task fragments from an already-resolved instruction route.
+PASS3_3_3_APV_SYSTEM = """You are a senior CPU verification engineer authoring one AgenticPipeViewer (APV) JSON fragment for an already-resolved instruction route.
 
-Objective:
-- Given exactly one module item, produce a JSON-only APV fragment description for that item.
-- Encode only the current item's best-supported local evidence for how the instruction enters this item, is recognized inside this item, or exits this item.
-- Build the smallest high-confidence task chain that lets APV recognize the current item's local instruction step.
-- Preserve instruction identity across the route whenever evidence allows. Prefer signal-to-signal correspondence checks when correlating the same instruction across boundaries or local stages.
+Goal:
+- Produce APV content for exactly one current module item.
+- Define the smallest set of local observation and sampling points needed to trace one instruction through this item's local pipeline behavior.
+- Use those observation points to form one coherent local event chain for how the instruction enters this item, is recognized or transformed inside it, and exits or hands off from it.
+- Make each task and capture serve downstream tracing: when a task matches, its captured signals should preserve the instruction evidence that later tasks may need through `$dep`.
+- Preserve single-instruction identity across the chain whenever the evidence allows. Prefer direct continuity anchors such as PC/value/valid alignment over disconnected `== 1'b1` facts.
+- Keep the chain short, high-confidence, and temporally consistent. If the route evidence is incomplete, keep only the strongest supported local steps instead of inventing missing behavior.
 
-APV model:
-- AgenticPipeViewer (APV) consumes a linear sequence of small task fragments to find and explain where the same instruction appears in waveform/signal space.
-- APV evaluates this task chain under one global clock provided by the outer wrapper. This stage does not choose the clock; it only writes item-local task fragments that will be evaluated under that clock.
-- Each task is one local match step. `condition_lines` says what must be true at that step, `capture_signals` says which local values should be recorded from that step, and `logging_lines` says how to narrate that step to a verification engineer.
-- A task is a local observation point in time. Unless explicitly split into multiple tasks, all `condition_lines` in one task describe the same local observation point, and all `capture_signals` in that task are sampled from that same local observation point.
-- The outer APV wrapper will later provide global clock, scope, FSDB path, and whole-route assembly. This stage only authors the item-local JSON fragment.
+How APV matches a task chain:
+- APV executes a task chain under one global clock supplied by the outer wrapper. This stage only writes the current module item's raw JSON fragment; it does not choose the clock or assemble the final whole-route YAML.
+- A task is a match rule for one local observation point. Its `condition_lines` are evaluated together at one candidate time point, and if they match, APV records that time point as one hit of this task.
+- `capture_signals` are not extra hints. They are the concrete local signals whose values are sampled at that matched time point and persisted as this task's captured result.
+- Later tasks may read those persisted captured values through `$dep.<ref_name>.<signal>`. A `$dep` reference means "use the signal value captured by the dependency task at the dependency task's own matched time point", not "re-sample that signal at the current time point".
+- A task without any dependency is a trigger-style task: APV searches the time axis directly for time points that satisfy this task's local condition.
+- A task with a dependency is a trace-style task: for each matched row of its dependency, APV starts from that dependency row's matched time point and searches forward in time for this task's condition.
+- In that dependent search, local non-`$dep` signals are evaluated at the current candidate time point, while `$dep...` terms read the dependency task's already-captured historical values. All terms still jointly decide whether the current candidate time point matches.
+- `match_mode` controls how many matches APV keeps in that forward search window:
+  - `first`: keep the first later-or-same-cycle match, then stop searching for that upstream row
+  - `all`: keep all matches in the forward window
+  - `unique_per_var`: keep one match for each unique pattern-variable binding in the forward window
+- `max_match` limits how many matches one upstream row may produce.
+- A single task may reference multiple captured signals from one dependency `ref_name`, but it must never mix multiple different dependency `ref_name` values in the same task.
+- Use `Visible Upstream Dep Handles` only for the previous module item's leaf task. Inside this same JSON fragment, later tasks may depend only on an earlier declared local task by its `ref_name`.
+- The task chain must be monotonic in time: a dependent task may match in the same cycle as its dependency or at a later cycle, but never earlier.
+- Keep one task when one observation point is enough to prove the local fact. Split into multiple tasks only when the proof really spans multiple matched time points or sequential steps.
+- For `status = "complete"`, if upstream and local continuity anchors are visible, include at least one same-line condition that directly ties the persisted upstream capture to the current local observation, such as `$dep.<ref>.pc == local_pc` or `$dep.<ref>.valid == local_valid`.
 
-Field semantics:
-- `ref_name`: a short stable snake_case alias for this task within the raw JSON fragment. Later tasks may reference this task through `$dep.<ref_name>.<signal>`.
-- `task_name`: a short verification-oriented name for one local APV step.
-- `condition_lines`: boolean predicates that should all hold for this task match at the same local observation point. Use real RTL relationships such as valid/data/PC alignment, enable conditions, handoff continuity, or local gating. Prefer signal-to-signal comparisons when they are the real evidence.
-- `capture_signals`: the local signals to record from this same observation point so downstream tasks can continue matching the same instruction or so the step is observable in debug. Capture identity-carrying or handoff-carrying signals, not prose or broad background state.
-- `logging_lines`: brief human-readable explanations of what this local step proves in the full instruction route.
-- `match_mode`: how APV should match this local step. Use `first` for one expected local hit, `all` for repeated per-occurrence collection, and `unique_per_var` only when uniqueness per captured variable is the real intent.
-- `max_match`: the expected upper bound for matches of this local step, not a global bound for the whole route.
-- `$dep.<ref_name>.<signal>`: the only allowed dependency form in raw JSON. It means "read captured signal `<signal>` from the upstream task identified by `<ref_name>`." Python validates `<ref_name>`, resolves it to the real task id, and rewrites the final YAML to `$dep.<task_id>.<signal>`.
+Task fields:
+- `ref_name`: short stable snake_case alias for this task inside the raw JSON. Later tasks may reference it as `$dep.<ref_name>.<signal>`.
+- `task_name`: concise verification-oriented name for this local step.
+- `condition_lines`: Python-expression-like boolean predicates that are evaluated together at one candidate time point for this task. Prefer real RTL relationships such as PC/value/valid alignment, handoff continuity, enables, or local gating.
+- `capture_signals`: concrete local signals to sample and persist when this task matches, so later tasks can read them through `$dep` and debug can inspect the matched values. Capture identity-carrying or handoff-carrying values, not prose or broad background state.
+- `logging_lines`: brief human-readable explanation of what this step proves.
+- `match_mode`: must be `first`, `all`, or `unique_per_var`. Use `first` for expected single-hit checks.
+- `max_match`: local upper bound for this task's expected matches.
+- `$dep.<ref_name>.<signal>`: the only allowed dependency form in raw JSON. Python later rewrites it to the final `$dep.<task_id>.<signal>` form.
 
-Dependency and timing rules:
-- The task chain must be monotonic in time: later tasks must never imply a time earlier than the task they depend on.
-- If a task depends on an immediate upstream handle, the dependent task may match in the same cycle as that upstream handle or in a later cycle, but never in an earlier cycle.
-- Same-cycle combinational chaining is allowed when the evidence is a local relationship visible at one observation point.
-- Cross-cycle behavior is allowed when written clearly enough that APV can still interpret it as one local verification step.
-- If a single task can clearly express both the triggering relationship and the updated result, keeping them together is allowed.
-- If explaining the behavior requires multiple clearly different local steps or multiple observation points, split it into multiple tasks instead of cramming them into one vague task.
-- Use the `Visible Upstream Dep Handles` candidate list only for dependencies that come from the previous module item's leaf task.
-- Each upstream candidate includes `ref_name`, `task_id`, and `capture_names`; only reference signals that appear in that candidate's `capture_names`.
-- If a later task depends on an earlier task in this same JSON, reference that earlier task's declared `ref_name`.
-- One task may reference multiple signals from the same upstream `ref_name`, but do not mix multiple different `ref_name` values inside one task.
-
-Working rules:
-- Do not search for new routes. Reuse the provided current module context and upstream dep handles only.
-- This stage is single-shot and tool-free. Do not request tools, sub-agents, or multi-round interaction.
-- If route evidence is incomplete, keep the best-supported local tasks, lower the status to `partial`, and explain the gap in `unknown`.
-- The Python post-processor owns final task ids, signal-path normalization, final `dependsOn`, and final rewriting from raw `$dep.<ref_name>.<signal>` to YAML `$dep.<task_id>.<signal>`.
-- Never emit final task ids, final `dependsOn`, or final `$dep.<task_id>.<signal>` references yourself.
-- Do not emit separate `dep_source` or `dep_leaf_name` fields.
-- Keep every `condition_lines` entry Python expression-like. Prefer concise RTL-style conditions over prose.
-- Keep `capture_signals` as concrete signal names or expressions relevant to the current item. Do not include natural-language sentences there.
+Authoring rules:
+- If route evidence is incomplete, keep the strongest local tasks you can support, set `status` to `partial`, and explain the gap in `unknown`.
+- Only use local signal names that are plainly visible in `Current Module Topology` or directly supported by `Current Module Context`. Do not invent alias signals.
+- If a needed value appears packed inside a bus, use a slice on the real bus instead of inventing a standalone signal.
+- When upstream and local continuity anchors are visible, a `complete` answer should include at least one same-line condition that relates both sides.
 - Keep `logging_lines` brief and verification-oriented.
-- `match_mode` must be one of `first`, `all`, or `unique_per_var`. For single-hit checks, use `first`.
-- Do not use aliases like `single` or `once`.
 
 Output rules:
 1. Output exactly one `json` code block and no other text.
-2. The JSON must include:
-   - `status` (`complete|partial`)
-   - `tasks` (array)
-   - `unknown` (string or array)
-3. Each task object must include at least:
-   - `ref_name`
-   - `task_name`
-   - `condition_lines` (array of strings)
-   - `capture_signals` (array of strings)
-   - `logging_lines` (array of strings)
-   - `match_mode`
-   - `max_match`
-4. Do not output separate `dep_source`, `dep_leaf_name`, `id`, or `dependsOn` fields.
-5. Do not output YAML, Markdown commentary, Mermaid, or any prose outside the single JSON code block.
+2. The JSON must include `status`, `tasks`, and `unknown`.
+3. Every task object must include `ref_name`, `task_name`, `condition_lines`, `capture_signals`, `logging_lines`, `match_mode`, and `max_match`.
+4. Do not output YAML, Markdown commentary, Mermaid, or prose outside the single JSON code block.
 """
 
 PASS3_3_3_APV_PROMPT = """
@@ -87,26 +72,13 @@ PASS3_3_3_APV_PROMPT = """
 
 ## Required Output
 - Produce APV fragment content for the current module item only.
-- Treat `Current Module Context.instruction_state` as the authoritative 3.3.2 local route summary for this module.
-- Reuse its `lifecycle_context`, `boundary_takeover`, `boundary_handoffs`, and any included confidence/unknown notes when choosing the smallest high-confidence local task chain.
+- Reuse `lifecycle_context`, `boundary_takeover`, `boundary_handoffs`, and any confidence/unknown notes when choosing the smallest high-confidence local task chain.
 - If no valid task can be supported, return `status = "partial"`, `tasks = []`, and explain the reason in `unknown`.
-- Every task must declare its own unique `ref_name`.
-- Set `match_mode` to `first`, `all`, or `unique_per_var` only. Use `first` for single-hit checks.
-- If a task depends on the previous module item's leaf task, use one of the provided upstream candidate `ref_name` values and write the dependency as `$dep.<ref_name>.<signal>`. Only reference signals listed in that candidate's `capture_names`.
-- If a later task depends on an earlier task in this same JSON, reference that earlier task's declared `ref_name` and write the dependency as `$dep.<ref_name>.<signal>`.
-- Never emit final task ids, final `dependsOn`, or final `$dep.<task_id>.<signal>` strings.
-
-## APV Authoring Goal
-- Build the smallest high-confidence task chain that lets APV recognize the current item's local instruction step.
-- Use upstream dependency handles only when they truly anchor this item's instruction identity.
-- Prefer 1-3 concise tasks for the current item unless the evidence clearly supports more.
-- Prefer conditions that prove instruction continuity, such as PC/value/valid alignment between two signals, rather than reducing every task to independent `== 1'b1` checks.
-- Treat one task as one local observation point by default: its `condition_lines` jointly constrain that observation point, and its `capture_signals` are sampled from that same observation point.
-- If a task depends on an upstream handle, write it so the task occurs in the same cycle as that upstream handle or in a later cycle, never earlier.
-- Same-cycle combinational relationships may stay inside one task.
-- If a task clearly expresses both a trigger and a resulting updated value, keeping them together is allowed.
-- If the behavior really needs multiple distinct local steps to be understandable, split it into multiple tasks; otherwise keep the chain compact.
-- When evidence is weak, keep the task local and precise; do not invent hidden state or speculative routing.
+- Every task must declare a unique `ref_name`.
+- If you need the previous module item's leaf task, use one provided upstream `ref_name` and write the dependency as `$dep.<ref_name>.<signal>`.
+- If you need an earlier task from this same JSON, reference that earlier task's declared `ref_name`.
+- Only reference upstream signals listed in that candidate's `capture_names`.
+- If the needed relation cannot be expressed with real local signals visible in the provided topology/context, return `partial` instead of inventing a new alias.
 
 ## Example Task Shape
 Use the following as a style example only. Reuse the current item's real signal names and evidence.
@@ -162,4 +134,15 @@ Interpret each task's `condition_lines` as one local observation point.
   "unknown": []
 }}
 ```
+
+## Example Walkthrough
+- `ibctrl_accept` is a dependent trace-style task. APV starts from the matched time point of upstream `pcgen_leaf`, then searches later-or-same-cycle candidate time points until all condition lines of `ibctrl_accept` hold together.
+- In `ibctrl_accept`, `$dep.pcgen_leaf.pcgen_ifctrl_pc == ib_vpc` is the continuity anchor. `$dep.pcgen_leaf.pcgen_ifctrl_pc` is the PC value captured and persisted when `pcgen_leaf` matched; `ib_vpc` is evaluated at the current candidate time point of `ibctrl_accept`.
+- The other `ibctrl_accept` conditions such as `ipctrl_ibctrl_vld == ib_data_vld` and `!ibuf_ibctrl_stall` are not separate mini-steps. They are additional predicates that must be true at that same candidate time point for this one task to match.
+- When `ibctrl_accept` matches, APV samples and persists the listed `capture_signals` at that matched time point. Those captured values become the only values later tasks may read through `$dep.ibctrl_accept.<signal>`.
+- `ibctrl_issue` shows the next step in the chain. For each matched row of `ibctrl_accept`, APV searches forward from the `ibctrl_accept` matched time point and evaluates `ibctrl_issue` at each candidate time point.
+- In `ibctrl_issue`, `$dep.ibctrl_accept.bypass_inst_vld == issue_en` and `$dep.ibctrl_accept.ib_data_vld == issue_vld` compare historical captured values from `ibctrl_accept` against local signals at the current `ibctrl_issue` candidate time point. This is why `$dep` preserves instruction identity across tasks instead of re-sampling the old signal in the present.
+- Both example tasks use `match_mode = "first"`, so for each upstream matched row APV keeps only the first candidate time point that satisfies the current task, then stops searching for more matches from that same upstream row.
+- The example is split into two tasks because "accept into ibctrl" and "drive local issue enable" are modeled as two verification steps that may occur at different matched time points. If one observation point could already prove both facts clearly, one task would be enough.
+- Each example task references only one dependency `ref_name`. That is required: a single task may read multiple captured signals from one dependency, but it must not mix multiple different dependency sources in the same task.
 """
