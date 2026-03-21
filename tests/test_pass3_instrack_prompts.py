@@ -78,13 +78,18 @@ def test_apv_prompt_is_single_shot_and_uses_dep_placeholders_only():
     prompt_text = PASS3_3_3_APV_SYSTEM + "\n" + PASS3_3_3_APV_PROMPT
 
     assert "Define the smallest set of local observation and sampling points" in prompt_text
+    assert "starting from this module item's `boundary_takeover` and ending at its `boundary_handoffs`" in prompt_text
     assert "trace one instruction through this item's local pipeline behavior" in prompt_text
     assert "form one coherent local event chain" in prompt_text
+    assert "Fill in the key signal points along that route" in prompt_text
+    assert "remove instruction-identity ambiguity rather than generic valid-bit snapshots" in prompt_text
+    assert "branch, buffer, out-of-order, crossbar, arbitration, or FSM-controlled ambiguity point" in prompt_text
     assert "Make each task and capture serve downstream tracing" in prompt_text
     assert "captured signals should preserve the instruction evidence that later tasks may need through `$dep`" in prompt_text
     assert "Preserve single-instruction identity across the chain" in prompt_text
     assert "Keep the chain short, high-confidence, and temporally consistent" in prompt_text
     assert "How APV matches a task chain:" in prompt_text
+    assert "instruction-relevant route from `boundary_takeover` ingress to `boundary_handoffs` egress" in prompt_text
     assert "under one global clock supplied by the outer wrapper" in prompt_text
     assert "A task is a match rule for one local observation point" in prompt_text
     assert "condition_lines` are evaluated together at one candidate time point" in prompt_text
@@ -95,6 +100,7 @@ def test_apv_prompt_is_single_shot_and_uses_dep_placeholders_only():
     assert "task with a dependency is a trace-style task" in prompt_text
     assert "starts from that dependency row's matched time point and searches forward in time" in prompt_text
     assert "local non-`$dep` signals are evaluated at the current candidate time point" in prompt_text
+    assert "task graph inside one module item is allowed to be tree-shaped, not only linear" in prompt_text
     assert "`match_mode` controls how many matches APV keeps" in prompt_text
     assert "`first`: keep the first later-or-same-cycle match" in prompt_text
     assert "`all`: keep all matches in the forward window" in prompt_text
@@ -102,8 +108,11 @@ def test_apv_prompt_is_single_shot_and_uses_dep_placeholders_only():
     assert "`max_match` limits how many matches one upstream row may produce" in prompt_text
     assert "must never mix multiple different dependency `ref_name` values" in prompt_text
     assert "may depend only on an earlier declared local task by its `ref_name`" in prompt_text
+    assert "Multiple later tasks may depend on the same earlier local `ref_name`" in prompt_text
+    assert "Such sibling branch tasks must use different conditions" in prompt_text
     assert "The task chain must be monotonic in time" in prompt_text
     assert "Keep one task when one observation point is enough" in prompt_text
+    assert "If the current item ends in multiple non-reconverged terminal branches, do not mark it `complete`" in prompt_text
     assert "final `$dep.<task_id>.<signal>`" in prompt_text
     assert "`ref_name`" in prompt_text
     assert "$dep.<ref_name>.<signal>" in prompt_text
@@ -128,8 +137,15 @@ def test_apv_prompt_is_single_shot_and_uses_dep_placeholders_only():
     assert "`match_mode`: must be `first`, `all`, or `unique_per_var`" in prompt_text
     assert "Prefer conditions that prove instruction continuity" in prompt_text
     assert "## APV Authoring Goal" in prompt_text
+    assert "Start from `boundary_takeover` as the authoritative ingress of this item and end at this item's instruction-relevant `boundary_handoffs`." in prompt_text
+    assert "Prefer event points that remove instruction-identity ambiguity over generic valid-only snapshots." in prompt_text
+    assert "The local event chain is not necessarily a single linear chain." in prompt_text
+    assert "each sibling task must use conditions that explicitly distinguish that path" in prompt_text
+    assert "`complete` means all resolved instruction-relevant paths in this item's current context are represented" in prompt_text
+    assert "return `partial` rather than pretending current v1 cross-item propagation can export multiple downstream leaves" in prompt_text
     assert "## Example Task Shape" in prompt_text
     assert "## Example Walkthrough" in prompt_text
+    assert "## Branching Walkthrough" in prompt_text
     assert "Interpret each task's `condition_lines` as one local observation point" in prompt_text
     assert "`ibctrl_accept` is a dependent trace-style task" in prompt_text
     assert "searches later-or-same-cycle candidate time points" in prompt_text
@@ -141,6 +157,10 @@ def test_apv_prompt_is_single_shot_and_uses_dep_placeholders_only():
     assert 'Both example tasks use `match_mode = "first"`' in prompt_text
     assert 'The example is split into two tasks because "accept into ibctrl" and "drive local issue enable"' in prompt_text
     assert "it must not mix multiple different dependency sources in the same task" in prompt_text
+    assert "The local event chain is not necessarily a single linear chain. If the current module can route the same instruction through multiple local channels or selector-controlled paths" in prompt_text
+    assert "a parent `dispatch_entry` task may branch into `to_buf0` and `to_buf1`" in prompt_text
+    assert "Both depend on `dispatch_entry`, but one uses `buf_sel == 2'b00` and the other uses `buf_sel == 2'b01`." in prompt_text
+    assert "If both sibling branches remain terminal exits of the current item and do not reconverge into one transferable downstream continuation, return `partial` in v1" in prompt_text
     assert '"ref_name": "ibctrl_accept"' in prompt_text
     assert '"task_name": "ibctrl_pc_match_and_bypass_activate"' in prompt_text
     assert '"$dep.pcgen_leaf.pcgen_ifctrl_pc == ib_vpc"' in prompt_text

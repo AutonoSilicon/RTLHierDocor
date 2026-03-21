@@ -246,6 +246,20 @@ class Pass3InStrackAPV:
         if quality_errors:
             unknown.extend(quality_errors)
             status = "partial"
+        terminal_tasks = self._terminal_tasks(tasks)
+        leaf_task = terminal_tasks[0] if len(terminal_tasks) == 1 else None
+        if status == "complete" and len(terminal_tasks) > 1:
+            terminal_preview = ", ".join(
+                str(task.get("ref_name") or task.get("id") or "").strip()
+                for task in terminal_tasks[:4]
+                if str(task.get("ref_name") or task.get("id") or "").strip()
+            )
+            unknown.append(
+                "Model returned complete with multiple terminal task branches"
+                + (f" ({terminal_preview})" if terminal_preview else "")
+                + ". Current pass3.3.3 exports only one downstream leaf and cannot represent multiple non-reconverged terminal branches."
+            )
+            status = "partial"
         if status == "complete" and not tasks:
             unknown.append("Model returned complete without any valid tasks.")
             status = "partial"
@@ -277,9 +291,9 @@ class Pass3InStrackAPV:
             "task_ids": [task["id"] for task in tasks],
             "task_count": len(tasks),
             "first_task_id": tasks[0]["id"] if tasks else "",
-            "leaf_task_id": tasks[-1]["id"] if tasks else "",
-            "leaf_ref_name": str(tasks[-1].get("ref_name") or "").strip() if tasks else "",
-            "leaf_capture_names": list(tasks[-1].get("capture_names") or []) if tasks else [],
+            "leaf_task_id": str(leaf_task.get("id") or "").strip() if leaf_task else "",
+            "leaf_ref_name": str(leaf_task.get("ref_name") or "").strip() if leaf_task else "",
+            "leaf_capture_names": list(leaf_task.get("capture_names") or []) if leaf_task else [],
             "input_hash": item_input_hash,
             "token_stats": dict(token_stats or {}),
         }
@@ -905,6 +919,23 @@ class Pass3InStrackAPV:
             "instance": str(item.get("instance") or "").strip(),
             "path": self._item_path(item),
         }
+
+    @staticmethod
+    def _terminal_tasks(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not tasks:
+            return []
+
+        depended_on_ids = {
+            str(task.get("depends_on") or "").strip()
+            for task in tasks
+            if str(task.get("depends_on") or "").strip()
+        }
+        return [
+            task
+            for task in tasks
+            if str(task.get("id") or "").strip()
+            and str(task.get("id") or "").strip() not in depended_on_ids
+        ]
 
     def _build_leaf_context_from_entry(self, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         task_id = str(entry.get("leaf_task_id") or "").strip()
