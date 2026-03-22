@@ -11,6 +11,8 @@ from .prompts import PASS3_3_3_APV_PROMPT, PASS3_3_3_APV_SYSTEM
 class Pass3InStrackAPV:
     """Helper object encapsulating pass3.3.3 APV generation."""
 
+    _MAX_VISIBLE_DEP_CANDIDATES = 16
+    _UPSTREAM_CANDIDATE_OVERFLOW_LIMIT = 8
     _ALLOWED_MATCH_MODES = {"first", "all", "unique_per_var"}
     _MATCH_MODE_ALIASES = {
         "single": "first",
@@ -81,8 +83,39 @@ class Pass3InStrackAPV:
             if isinstance(item, dict)
         }
 
+        duplicate_paths = self._find_duplicate_item_paths(orchestrate_items)
+        if duplicate_paths:
+            error = (
+                "Duplicate `item.path` detected in one instruction route during pass3.3.3: "
+                + ", ".join(duplicate_paths)
+                + ". Multi-leaf v2 requires every route item path to be unique so artifact/cache keys do not collide."
+            )
+            index_payload = {
+                "instruction": instruction,
+                "start_module": parsed_search.get("start_module", ""),
+                "schema_version": "pass3_3_3_apv_index_v2",
+                "status": "failed",
+                "error": error,
+                "items": [],
+            }
+            index_text = json.dumps(index_payload, ensure_ascii=False, indent=2)
+            input_hash = self.g._hash.build_pass3_3_apv_index_input_hash(
+                top_module=top_node.module_name,
+                instruction=instruction,
+                start_module=str(parsed_search.get("start_module") or "").strip(),
+                orchestration_json_text=orchestrate_index_text,
+            )
+            return {
+                "items": [],
+                "index_payload": index_payload,
+                "index_text": index_text,
+                "input_hash": input_hash,
+                "status": "failed",
+                "error": error,
+            }
+
         items: List[Dict[str, Any]] = []
-        previous_leaf_context: Optional[Dict[str, Any]] = None
+        previous_leaf_contexts: List[Dict[str, Any]] = []
 
         for item_index, item in enumerate(orchestrate_items):
             path_key = self._item_path(item)
@@ -93,17 +126,17 @@ class Pass3InStrackAPV:
                 instruction_datasheet=instruction_datasheet,
                 item=item,
                 item_index=item_index,
-                previous_leaf_context=previous_leaf_context,
+                previous_leaf_contexts=previous_leaf_contexts,
                 artifacts_dir=artifacts_dir,
                 cached_entry=cached_by_path.get(path_key),
             )
             items.append(result)
-            previous_leaf_context = self._build_leaf_context_from_entry(result)
+            previous_leaf_contexts = self._build_leaf_contexts_from_entry(result)
 
         index_payload = {
             "instruction": instruction,
             "start_module": parsed_search.get("start_module", ""),
-            "schema_version": "pass3_3_3_apv_index_v1",
+            "schema_version": "pass3_3_3_apv_index_v2",
             "items": items,
         }
         index_text = json.dumps(index_payload, ensure_ascii=False, indent=2)
@@ -129,7 +162,7 @@ class Pass3InStrackAPV:
         instruction_datasheet: str,
         item: Dict[str, Any],
         item_index: int,
-        previous_leaf_context: Optional[Dict[str, Any]],
+        previous_leaf_contexts: Optional[List[Dict[str, Any]]],
         artifacts_dir: Path,
         cached_entry: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
@@ -142,14 +175,15 @@ class Pass3InStrackAPV:
 
         module_name = str(item.get("module") or "").strip()
         current_module_topology = self.g._prompts.build_instrack_current_module_topology(module_name)
+        normalized_previous_leaf_contexts = self._normalize_leaf_context_list(previous_leaf_contexts)
         local_signal_guidance = self._build_local_signal_guidance(
             item=item,
             current_module_topology=current_module_topology,
-            previous_leaf_context=previous_leaf_context,
+            previous_leaf_contexts=normalized_previous_leaf_contexts,
         )
         local_signal_guidance_text = json.dumps(local_signal_guidance, ensure_ascii=False, indent=2)
         item_json_text = json.dumps(self._build_current_item_context(item), ensure_ascii=False, indent=2)
-        visible_dep_payload = self._build_visible_dep_payload(previous_leaf_context)
+        visible_dep_payload = self._build_visible_dep_payload(normalized_previous_leaf_contexts)
         visible_dep_text = json.dumps(visible_dep_payload, ensure_ascii=False, indent=2)
         item_input_hash = self.g._hash.build_pass3_3_apv_item_input_hash(
             top_module=top_node.module_name,
@@ -169,6 +203,34 @@ class Pass3InStrackAPV:
             )
         if cached_ok:
             return self._normalize_cached_entry(cached_entry, artifact_yaml, artifact_raw)
+
+        overflow_reason = self._detect_candidate_overflow(normalized_previous_leaf_contexts)
+        if overflow_reason:
+            yaml_text = self._render_yaml(item=item, status="partial", unknown=[overflow_reason], tasks=[])
+            yaml_path.write_text(yaml_text, encoding="utf-8")
+            self.g.owner.project_tracker.update(
+                artifact_yaml,
+                yaml_text,
+                input_hash=item_input_hash,
+                meta={
+                    "top_module": top_node.module_name,
+                    "instruction": instruction,
+                    "module": module_name,
+                    "instance": str(item.get("instance") or "").strip(),
+                    "path": item_path,
+                    "pass": "pass3_3_3_apv",
+                },
+            )
+            return self._build_item_entry(
+                item=item,
+                status="partial",
+                unknown=[overflow_reason],
+                artifact_yaml=artifact_yaml,
+                artifact_raw=artifact_raw,
+                tasks=[],
+                input_hash=item_input_hash,
+                token_stats={},
+            )
 
         prompt = PASS3_3_3_APV_PROMPT.format(
             instruction=instruction,
@@ -230,7 +292,7 @@ class Pass3InStrackAPV:
             item=item,
             item_index=item_index,
             raw_tasks=list(parsed_payload.get("tasks") or []),
-            previous_leaf_context=previous_leaf_context,
+            previous_leaf_contexts=normalized_previous_leaf_contexts,
             local_signal_guidance=local_signal_guidance,
         )
         if task_errors:
@@ -240,25 +302,11 @@ class Pass3InStrackAPV:
             tasks=tasks,
             item=item,
             status=status,
-            previous_leaf_context=previous_leaf_context,
+            previous_leaf_contexts=normalized_previous_leaf_contexts,
             local_signal_guidance=local_signal_guidance,
         )
         if quality_errors:
             unknown.extend(quality_errors)
-            status = "partial"
-        terminal_tasks = self._terminal_tasks(tasks)
-        leaf_task = terminal_tasks[0] if len(terminal_tasks) == 1 else None
-        if status == "complete" and len(terminal_tasks) > 1:
-            terminal_preview = ", ".join(
-                str(task.get("ref_name") or task.get("id") or "").strip()
-                for task in terminal_tasks[:4]
-                if str(task.get("ref_name") or task.get("id") or "").strip()
-            )
-            unknown.append(
-                "Model returned complete with multiple terminal task branches"
-                + (f" ({terminal_preview})" if terminal_preview else "")
-                + ". Current pass3.3.3 exports only one downstream leaf and cannot represent multiple non-reconverged terminal branches."
-            )
             status = "partial"
         if status == "complete" and not tasks:
             unknown.append("Model returned complete without any valid tasks.")
@@ -279,25 +327,16 @@ class Pass3InStrackAPV:
                 "pass": "pass3_3_3_apv",
             },
         )
-
-        entry = {
-            "module": module_name,
-            "instance": str(item.get("instance") or "").strip(),
-            "path": item_path,
-            "status": status,
-            "unknown": unknown,
-            "artifact_yaml": artifact_yaml,
-            "artifact_raw": artifact_raw,
-            "task_ids": [task["id"] for task in tasks],
-            "task_count": len(tasks),
-            "first_task_id": tasks[0]["id"] if tasks else "",
-            "leaf_task_id": str(leaf_task.get("id") or "").strip() if leaf_task else "",
-            "leaf_ref_name": str(leaf_task.get("ref_name") or "").strip() if leaf_task else "",
-            "leaf_capture_names": list(leaf_task.get("capture_names") or []) if leaf_task else [],
-            "input_hash": item_input_hash,
-            "token_stats": dict(token_stats or {}),
-        }
-        return entry
+        return self._build_item_entry(
+            item=item,
+            status=status,
+            unknown=unknown,
+            artifact_yaml=artifact_yaml,
+            artifact_raw=artifact_raw,
+            tasks=tasks,
+            input_hash=item_input_hash,
+            token_stats=token_stats,
+        )
 
     def _parse_model_payload(self, text: str) -> Dict[str, Any]:
         json_text = self.g._extract_json_code(text or "") or str(text or "").strip()
@@ -332,7 +371,7 @@ class Pass3InStrackAPV:
         item: Dict[str, Any],
         item_index: int,
         raw_tasks: List[Dict[str, Any]],
-        previous_leaf_context: Optional[Dict[str, Any]],
+        previous_leaf_contexts: Optional[List[Dict[str, Any]]],
         local_signal_guidance: Optional[Dict[str, Any]] = None,
     ) -> (List[Dict[str, Any]], List[str]):
         scope_prefix = self._scope_prefix(item_path=self._item_path(item), top_node=top_node)
@@ -340,14 +379,23 @@ class Pass3InStrackAPV:
         tasks: List[Dict[str, Any]] = []
         errors: List[str] = []
         dep_symbols: Dict[str, Dict[str, Any]] = {}
+        normalized_previous_leaf_contexts = self._normalize_leaf_context_list(previous_leaf_contexts)
+        multiple_upstream_candidates = len(normalized_previous_leaf_contexts) > 1
         trusted_local_signal_catalog = bool((local_signal_guidance or {}).get("trusted_local_signal_catalog"))
         allowed_local_signals = set((local_signal_guidance or {}).get("allowed_local_signals") or [])
-        if previous_leaf_context:
+        for previous_leaf_context in normalized_previous_leaf_contexts:
             upstream_ref_name = str(previous_leaf_context.get("ref_name") or "").strip()
             upstream_task_id = str(previous_leaf_context.get("task_id") or "").strip()
             upstream_capture_names = list(previous_leaf_context.get("capture_names") or [])
             if upstream_ref_name and upstream_task_id and upstream_capture_names:
-                dep_symbols[upstream_ref_name] = dict(previous_leaf_context)
+                dep_symbols[upstream_ref_name] = self._build_dep_symbol(
+                    ref_name=upstream_ref_name,
+                    task_id=upstream_task_id,
+                    capture_names=upstream_capture_names,
+                    branch_tags=dict(previous_leaf_context.get("branch_tags") or {}),
+                    item=previous_leaf_context,
+                    source="upstream",
+                )
 
         for task_index, raw_task in enumerate(raw_tasks):
             task_errors: List[str] = []
@@ -376,6 +424,7 @@ class Pass3InStrackAPV:
             match_mode = self._MATCH_MODE_ALIASES.get(raw_match_mode, raw_match_mode)
             legacy_dep_source = str(raw_task.get("dep_source") or "").strip()
             legacy_dep_leaf_name = str(raw_task.get("dep_leaf_name") or "").strip()
+            branch_tags, branch_tag_errors = self._normalize_branch_tags(raw_task.get("branch_tags"))
 
             try:
                 max_match = int(raw_task.get("max_match", 0))
@@ -411,6 +460,7 @@ class Pass3InStrackAPV:
                 )
             if max_match < 0:
                 task_errors.append(f"Task `{task_name or task_index}` uses negative `max_match`.")
+            task_errors.extend(branch_tag_errors)
 
             if task_errors:
                 errors.extend(task_errors)
@@ -478,6 +528,24 @@ class Pass3InStrackAPV:
                         task_errors.append(
                             f"Task `{task_name}` is missing the resolved upstream task id for `ref_name={dep_ref_name}`."
                         )
+                    dep_source = str(dep_symbol.get("source") or "").strip()
+                    dep_branch_tags = dict(dep_symbol.get("branch_tags") or {})
+                    if dep_source == "upstream" and multiple_upstream_candidates:
+                        if not dep_branch_tags:
+                            task_errors.append(
+                                f"Task `{task_name}` depends on upstream candidate `ref_name={dep_ref_name}` "
+                                "but that visible candidate is missing `branch_tags`, so branch identity is ambiguous."
+                            )
+                        elif not branch_tags:
+                            task_errors.append(
+                                f"Task `{task_name}` must declare non-empty `branch_tags` when selecting one of multiple "
+                                f"upstream dep candidates; selected candidate `ref_name={dep_ref_name}` has {self._format_branch_tags(dep_branch_tags)}."
+                            )
+                        elif branch_tags != dep_branch_tags:
+                            task_errors.append(
+                                f"Task `{task_name}` declares `branch_tags={self._format_branch_tags(branch_tags)}` "
+                                f"but selected upstream candidate `ref_name={dep_ref_name}` uses {self._format_branch_tags(dep_branch_tags)}."
+                            )
                 if legacy_dep_source:
                     task_errors.append(
                         f"Task `{task_name}` must not emit legacy `dep_source={legacy_dep_source}`; use `$dep.<ref_name>.<signal>` references only."
@@ -544,13 +612,16 @@ class Pass3InStrackAPV:
                     "match_mode": match_mode,
                     "max_match": max_match,
                     "capture_names": capture_names,
+                    "branch_tags": branch_tags,
                 }
             )
             dep_symbols[ref_name] = self._build_dep_symbol(
                 ref_name=ref_name,
                 task_id=task_id,
                 capture_names=capture_names,
+                branch_tags=branch_tags,
                 item=item,
+                source="local",
             )
 
         return tasks, errors
@@ -561,52 +632,84 @@ class Pass3InStrackAPV:
         tasks: List[Dict[str, Any]],
         item: Dict[str, Any],
         status: str,
-        previous_leaf_context: Optional[Dict[str, Any]],
+        previous_leaf_contexts: Optional[List[Dict[str, Any]]],
         local_signal_guidance: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
-        if status != "complete" or not tasks or not previous_leaf_context:
+        if status != "complete" or not tasks:
             return []
 
-        previous_task_id = str(previous_leaf_context.get("task_id") or "").strip()
-        if not previous_task_id:
-            return []
+        errors: List[str] = []
+        terminal_tasks = self._terminal_tasks(tasks)
+        if len(terminal_tasks) > 1:
+            seen_branch_tags: Set[str] = set()
+            for task in terminal_tasks:
+                capture_names = list(task.get("capture_names") or [])
+                if not capture_names:
+                    errors.append(
+                        f"Terminal task `{str(task.get('task_name') or task.get('ref_name') or task.get('id') or '<unknown>').strip()}` "
+                        "does not expose any capture names and cannot be exported as a downstream leaf."
+                    )
+                    continue
+                branch_tags = dict(task.get("branch_tags") or {})
+                if not branch_tags:
+                    errors.append(
+                        f"Terminal task `{str(task.get('task_name') or task.get('ref_name') or task.get('id') or '<unknown>').strip()}` "
+                        "must declare non-empty `branch_tags` when the current item exports multiple terminal leaves."
+                    )
+                    continue
+                branch_key = self._branch_tags_key(branch_tags)
+                if branch_key in seen_branch_tags:
+                    errors.append(
+                        f"Terminal task `{str(task.get('task_name') or task.get('ref_name') or task.get('id') or '<unknown>').strip()}` "
+                        f"reuses duplicate `branch_tags={self._format_branch_tags(branch_tags)}` within one multi-leaf item."
+                    )
+                    continue
+                seen_branch_tags.add(branch_key)
 
-        upstream_anchor_names = set((local_signal_guidance or {}).get("preferred_upstream_anchor_names") or [])
+        leaf_contexts = self._normalize_leaf_context_list(previous_leaf_contexts)
+        upstream_anchor_map = dict((local_signal_guidance or {}).get("preferred_upstream_anchor_names_by_task_id") or {})
         local_anchor_names = set((local_signal_guidance or {}).get("preferred_local_anchor_names") or [])
-        if not upstream_anchor_names or not local_anchor_names:
-            return []
-
+        if not leaf_contexts or not local_anchor_names:
+            return errors
         for task in tasks:
-            if str(task.get("depends_on") or "").strip() != previous_task_id:
+            dep_task_id = str(task.get("depends_on") or "").strip()
+            if not dep_task_id or dep_task_id not in upstream_anchor_map:
+                continue
+            upstream_anchor_names = set(upstream_anchor_map.get(dep_task_id) or [])
+            if not upstream_anchor_names:
                 continue
             for condition in task.get("condition_lines") or []:
                 dep_anchors = {
                     dep_signal
                     for dep_task_id, dep_signal in self._DEP_REFERENCE_RE.findall(str(condition or ""))
-                    if dep_task_id == previous_task_id and dep_signal in upstream_anchor_names
+                    if dep_task_id == str(task.get("depends_on") or "").strip() and dep_signal in upstream_anchor_names
                 }
                 if not dep_anchors:
                     continue
                 local_signals = self._extract_local_signal_names(str(condition or ""))
                 if local_signals & local_anchor_names:
-                    return []
+                    break
+            else:
+                local_anchor_preview = ", ".join(sorted(local_anchor_names)[:4])
+                upstream_anchor_preview = ", ".join(sorted(upstream_anchor_names)[:4])
+                module_name = str(item.get("module") or "").strip() or "<unknown>"
+                task_name = str(task.get("task_name") or task.get("ref_name") or task.get("id") or "<unknown>").strip()
+                errors.append(
+                    (
+                        f"Module `{module_name}` task `{task_name}` was marked complete without any same-line "
+                        f"continuity-preserving relation between upstream anchor(s) [{upstream_anchor_preview}] "
+                        f"and local anchor(s) [{local_anchor_preview}] for its selected upstream candidate."
+                    )
+                )
 
-        local_anchor_preview = ", ".join(sorted(local_anchor_names)[:4])
-        upstream_anchor_preview = ", ".join(sorted(upstream_anchor_names)[:4])
-        module_name = str(item.get("module") or "").strip() or "<unknown>"
-        return [
-            (
-                f"Module `{module_name}` was marked complete without any same-line continuity-preserving relation "
-                f"between upstream anchor(s) [{upstream_anchor_preview}] and local anchor(s) [{local_anchor_preview}]."
-            )
-        ]
+        return errors
 
     def _build_local_signal_guidance(
         self,
         *,
         item: Dict[str, Any],
         current_module_topology: str,
-        previous_leaf_context: Optional[Dict[str, Any]],
+        previous_leaf_contexts: Optional[List[Dict[str, Any]]],
     ) -> Dict[str, Any]:
         payload = dict(item.get("orchestration") or {})
         structured_topology = self._has_structured_signal_catalog(current_module_topology)
@@ -628,13 +731,20 @@ class Pass3InStrackAPV:
                 if self._is_anchor_like_name(name)
             }
         )
-        preferred_upstream_anchor_names = sorted(
-            {
-                str(name or "").strip()
-                for name in list((previous_leaf_context or {}).get("capture_names") or [])
-                if self._is_anchor_like_name(str(name or "").strip())
-            }
-        )
+        preferred_upstream_anchor_names_by_task_id: Dict[str, List[str]] = {}
+        preferred_upstream_anchor_names: Set[str] = set()
+        for previous_leaf_context in self._normalize_leaf_context_list(previous_leaf_contexts):
+            task_id = str(previous_leaf_context.get("task_id") or "").strip()
+            anchor_names = sorted(
+                {
+                    str(name or "").strip()
+                    for name in list(previous_leaf_context.get("capture_names") or [])
+                    if self._is_anchor_like_name(str(name or "").strip())
+                }
+            )
+            if task_id and anchor_names:
+                preferred_upstream_anchor_names_by_task_id[task_id] = anchor_names
+                preferred_upstream_anchor_names.update(anchor_names)
         packed_bus_signals = sorted(
             {
                 name
@@ -647,7 +757,8 @@ class Pass3InStrackAPV:
             "trusted_local_signal_catalog": bool(structured_topology and allowed_local_signals),
             "allowed_local_signals": sorted(allowed_local_signals),
             "preferred_local_anchor_names": preferred_local_anchor_names,
-            "preferred_upstream_anchor_names": preferred_upstream_anchor_names,
+            "preferred_upstream_anchor_names": sorted(preferred_upstream_anchor_names),
+            "preferred_upstream_anchor_names_by_task_id": preferred_upstream_anchor_names_by_task_id,
             "packed_bus_signals": packed_bus_signals,
         }
         if guidance["trusted_local_signal_catalog"]:
@@ -888,20 +999,24 @@ class Pass3InStrackAPV:
             "instruction_state": instruction_state,
         }
 
-    def _build_visible_dep_payload(self, previous_leaf_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        if not previous_leaf_context:
-            return {"candidates": []}
-        candidate = {
-            "ref_name": str(previous_leaf_context.get("ref_name") or "").strip(),
-            "task_id": str(previous_leaf_context.get("task_id") or "").strip(),
-            "capture_names": list(previous_leaf_context.get("capture_names") or []),
-            "module": str(previous_leaf_context.get("module") or "").strip(),
-            "instance": str(previous_leaf_context.get("instance") or "").strip(),
-            "path": str(previous_leaf_context.get("path") or "").strip(),
+    def _build_visible_dep_payload(self, previous_leaf_contexts: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        normalized = self._normalize_leaf_context_list(previous_leaf_contexts)
+        candidates = [
+            {
+                "ref_name": str(candidate.get("ref_name") or "").strip(),
+                "task_id": str(candidate.get("task_id") or "").strip(),
+                "capture_names": list(candidate.get("capture_names") or []),
+                "branch_tags": dict(candidate.get("branch_tags") or {}),
+                "module": str(candidate.get("module") or "").strip(),
+                "instance": str(candidate.get("instance") or "").strip(),
+                "path": str(candidate.get("path") or "").strip(),
+            }
+            for candidate in normalized[: self._MAX_VISIBLE_DEP_CANDIDATES]
+        ]
+        return {
+            "candidates": candidates,
+            "total_candidates": len(normalized),
         }
-        if not candidate["ref_name"] or not candidate["task_id"] or not candidate["capture_names"]:
-            return {"candidates": []}
-        return {"candidates": [candidate]}
 
     def _build_dep_symbol(
         self,
@@ -909,15 +1024,19 @@ class Pass3InStrackAPV:
         ref_name: str,
         task_id: str,
         capture_names: List[str],
+        branch_tags: Optional[Dict[str, str]],
         item: Dict[str, Any],
+        source: str,
     ) -> Dict[str, Any]:
         return {
             "ref_name": str(ref_name or "").strip(),
             "task_id": str(task_id or "").strip(),
             "capture_names": list(capture_names or []),
+            "branch_tags": dict(branch_tags or {}),
             "module": str(item.get("module") or "").strip(),
             "instance": str(item.get("instance") or "").strip(),
             "path": self._item_path(item),
+            "source": str(source or "").strip(),
         }
 
     @staticmethod
@@ -937,20 +1056,27 @@ class Pass3InStrackAPV:
             and str(task.get("id") or "").strip() not in depended_on_ids
         ]
 
-    def _build_leaf_context_from_entry(self, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _build_leaf_contexts_from_entry(self, entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+        leaf_contexts = self._normalize_leaf_context_list(entry.get("leaf_contexts") or [])
+        if leaf_contexts:
+            return leaf_contexts
+
         task_id = str(entry.get("leaf_task_id") or "").strip()
         ref_name = str(entry.get("leaf_ref_name") or "").strip()
         capture_names = list(entry.get("leaf_capture_names") or [])
         if not task_id or not ref_name or not capture_names:
-            return None
-        return {
-            "ref_name": ref_name,
-            "task_id": task_id,
-            "capture_names": capture_names,
-            "module": str(entry.get("module") or "").strip(),
-            "instance": str(entry.get("instance") or "").strip(),
-            "path": str(entry.get("path") or "").strip(),
-        }
+            return []
+        return [
+            {
+                "ref_name": ref_name,
+                "task_id": task_id,
+                "capture_names": capture_names,
+                "branch_tags": {},
+                "module": str(entry.get("module") or "").strip(),
+                "instance": str(entry.get("instance") or "").strip(),
+                "path": str(entry.get("path") or "").strip(),
+            }
+        ]
 
     @staticmethod
     def _normalize_cached_entry(entry: Dict[str, Any], artifact_yaml: str, artifact_raw: str) -> Dict[str, Any]:
@@ -962,10 +1088,149 @@ class Pass3InStrackAPV:
         cached.setdefault("task_ids", [])
         cached.setdefault("task_count", len(list(cached.get("task_ids") or [])))
         cached.setdefault("first_task_id", "")
+        cached.setdefault("leaf_contexts", [])
         cached.setdefault("leaf_task_id", "")
         cached.setdefault("leaf_ref_name", "")
         cached.setdefault("leaf_capture_names", [])
+        if not cached.get("leaf_contexts") and cached.get("leaf_task_id") and cached.get("leaf_ref_name"):
+            cached["leaf_contexts"] = [
+                {
+                    "task_id": str(cached.get("leaf_task_id") or "").strip(),
+                    "ref_name": str(cached.get("leaf_ref_name") or "").strip(),
+                    "capture_names": list(cached.get("leaf_capture_names") or []),
+                    "branch_tags": {},
+                    "module": str(cached.get("module") or "").strip(),
+                    "instance": str(cached.get("instance") or "").strip(),
+                    "path": str(cached.get("path") or "").strip(),
+                }
+            ]
         return cached
+
+    def _build_item_entry(
+        self,
+        *,
+        item: Dict[str, Any],
+        status: str,
+        unknown: List[str],
+        artifact_yaml: str,
+        artifact_raw: str,
+        tasks: List[Dict[str, Any]],
+        input_hash: str,
+        token_stats: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        leaf_contexts = self._build_leaf_contexts_from_tasks(item=item, tasks=tasks)
+        single_leaf_context = leaf_contexts[0] if len(leaf_contexts) == 1 else None
+        return {
+            "module": str(item.get("module") or "").strip(),
+            "instance": str(item.get("instance") or "").strip(),
+            "path": self._item_path(item),
+            "status": status,
+            "unknown": list(unknown or []),
+            "artifact_yaml": artifact_yaml,
+            "artifact_raw": artifact_raw,
+            "task_ids": [task["id"] for task in tasks],
+            "task_count": len(tasks),
+            "first_task_id": tasks[0]["id"] if tasks else "",
+            "leaf_contexts": leaf_contexts,
+            "leaf_task_id": str(single_leaf_context.get("task_id") or "").strip() if single_leaf_context else "",
+            "leaf_ref_name": str(single_leaf_context.get("ref_name") or "").strip() if single_leaf_context else "",
+            "leaf_capture_names": list(single_leaf_context.get("capture_names") or []) if single_leaf_context else [],
+            "input_hash": input_hash,
+            "token_stats": dict(token_stats or {}),
+        }
+
+    def _build_leaf_contexts_from_tasks(self, *, item: Dict[str, Any], tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        leaf_contexts: List[Dict[str, Any]] = []
+        for task in self._terminal_tasks(tasks):
+            task_id = str(task.get("id") or "").strip()
+            ref_name = str(task.get("ref_name") or "").strip()
+            capture_names = list(task.get("capture_names") or [])
+            if not task_id or not ref_name or not capture_names:
+                continue
+            leaf_contexts.append(
+                {
+                    "task_id": task_id,
+                    "ref_name": ref_name,
+                    "capture_names": capture_names,
+                    "branch_tags": dict(task.get("branch_tags") or {}),
+                    "module": str(item.get("module") or "").strip(),
+                    "instance": str(item.get("instance") or "").strip(),
+                    "path": self._item_path(item),
+                }
+            )
+        return leaf_contexts
+
+    def _normalize_leaf_context_list(self, leaf_contexts: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for entry in list(leaf_contexts or []):
+            if not isinstance(entry, dict):
+                continue
+            task_id = str(entry.get("task_id") or "").strip()
+            ref_name = str(entry.get("ref_name") or "").strip()
+            capture_names = self._coerce_string_list(entry.get("capture_names"))
+            branch_tags, _ = self._normalize_branch_tags(entry.get("branch_tags"))
+            if not task_id or not ref_name or not capture_names:
+                continue
+            normalized.append(
+                {
+                    "task_id": task_id,
+                    "ref_name": ref_name,
+                    "capture_names": capture_names,
+                    "branch_tags": branch_tags,
+                    "module": str(entry.get("module") or "").strip(),
+                    "instance": str(entry.get("instance") or "").strip(),
+                    "path": str(entry.get("path") or "").strip(),
+                }
+            )
+        return normalized
+
+    def _normalize_branch_tags(self, value: Any) -> (Dict[str, str], List[str]):
+        if value is None or value == "":
+            return {}, []
+        if not isinstance(value, dict):
+            return {}, ["`branch_tags` must be a flat string map when provided."]
+
+        branch_tags: Dict[str, str] = {}
+        errors: List[str] = []
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip()
+            if not key:
+                errors.append("`branch_tags` keys must be non-empty strings.")
+                continue
+            if isinstance(raw_value, (dict, list, tuple, set)):
+                errors.append(f"`branch_tags.{key}` must be a string value, not a nested object.")
+                continue
+            val = str(raw_value or "").strip()
+            if not val:
+                errors.append(f"`branch_tags.{key}` must be a non-empty string.")
+                continue
+            branch_tags[key] = val
+        return branch_tags, errors
+
+    def _detect_candidate_overflow(self, previous_leaf_contexts: Optional[List[Dict[str, Any]]]) -> str:
+        count = len(self._normalize_leaf_context_list(previous_leaf_contexts))
+        if count <= self._UPSTREAM_CANDIDATE_OVERFLOW_LIMIT:
+            return ""
+        return (
+            f"Upstream candidate overflow: previous item exported {count} leaf_contexts, exceeding the supported "
+            f"limit of {self._UPSTREAM_CANDIDATE_OVERFLOW_LIMIT}. Current item is forced to partial."
+        )
+
+    def _find_duplicate_item_paths(self, orchestrate_items: List[Dict[str, Any]]) -> List[str]:
+        counts: Dict[str, int] = {}
+        for item in list(orchestrate_items or []):
+            path = self._item_path(item)
+            if not path:
+                continue
+            counts[path] = counts.get(path, 0) + 1
+        return sorted(path for path, count in counts.items() if count > 1)
+
+    @staticmethod
+    def _branch_tags_key(branch_tags: Dict[str, str]) -> str:
+        return json.dumps(dict(branch_tags or {}), ensure_ascii=False, sort_keys=True)
+
+    def _format_branch_tags(self, branch_tags: Dict[str, str]) -> str:
+        return self._branch_tags_key(branch_tags)
 
     def _build_task_id(self, *, item: Dict[str, Any], item_index: int, task_index: int) -> str:
         instance_slug = self.g._safe_slug(str(item.get("instance") or item.get("module") or "inst")).lower()

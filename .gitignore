@@ -1,6 +1,7 @@
 __pycache__
 
 .venv
+.humanize
 .rtl_cache
 rtl_docs
 target

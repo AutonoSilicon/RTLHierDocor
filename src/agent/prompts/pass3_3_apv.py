@@ -28,13 +28,25 @@ How APV matches a task chain:
   - `unique_per_var`: keep one match for each unique pattern-variable binding in the forward window
 - `max_match` limits how many matches one upstream row may produce.
 - A single task may reference multiple captured signals from one dependency `ref_name`, but it must never mix multiple different dependency `ref_name` values in the same task.
-- Use `Visible Upstream Dep Handles` only for the previous module item's leaf task. Inside this same JSON fragment, later tasks may depend only on an earlier declared local task by its `ref_name`.
+- Use `Visible Upstream Dep Handles` only for the previous module item's exported `leaf_contexts`. Inside this same JSON fragment, later tasks may depend only on an earlier declared local task by its `ref_name`.
 - Multiple later tasks may depend on the same earlier local `ref_name` when they represent different candidate paths, channels, selector outcomes, buffer slots, reorder cases, crossbar routes, or FSM outcomes.
 - Such sibling branch tasks must use different conditions that make the path distinction explicit.
+- A local task must be declared before any later task may reference it. Do not reference an undeclared local `ref_name`.
+- If multiple sibling tasks share one local ingress or relay observation, declare that ingress task first, then let the sibling tasks branch from it.
 - The task chain must be monotonic in time: a dependent task may match in the same cycle as its dependency or at a later cycle, but never earlier.
 - Keep one task when one observation point is enough to prove the local fact. Split into multiple tasks only when the proof really spans multiple matched time points or sequential steps.
-- For `status = "complete"`, if upstream and local continuity anchors are visible, include at least one same-line condition that directly ties the persisted upstream capture to the current local observation, such as `$dep.<ref>.pc == local_pc` or `$dep.<ref>.valid == local_valid`.
-- Current v1 cross-item propagation still exports only one downstream leaf. If the current item ends in multiple non-reconverged terminal branches, do not mark it `complete`.
+- Every `$dep.<ref_name>.<signal>` must resolve to one visible upstream candidate or one earlier declared local task, and that `<signal>` must already appear in that dependency's `capture_names` or declared `capture_signals`.
+- For `status = "complete"`, if upstream and local continuity anchors are visible, include at least one same-line condition that directly ties the persisted upstream capture to the current local observation, such as `$dep.<ref>.pc == local_pc` or `$dep.<ref>.inst == local_inst`.
+- Continuity anchor priority is `pc`, then `inst`, then packed data bus or bit slice, then `valid` or `vld`.
+- If local `pc`, `inst`, or data anchors are visible, a valid-only relation may assist a task but cannot by itself justify `complete`.
+- Raw task objects may include optional `branch_tags`, which must be a flat string map such as `{{"slot":"0","channel":"bypass"}}`. Do not use nested objects or arrays.
+- `branch_tags` must be authored in raw JSON task objects, later persisted in `apv_index` `leaf_contexts`, and never materialized into runtime YAML.
+- A single task may still reference only one dependency `ref_name`; `branch_tags` identify branch selection, but they do not authorize mixing multiple upstream dependency sources in one task.
+- `complete` means every resolved terminal path in the current item is covered by an exported terminal task that can continue downstream, not merely that the strongest main path looks good.
+- If the current item has multiple terminal tasks, every terminal task must declare non-empty `branch_tags`, and sibling terminal tasks must use unique `branch_tags`.
+- If multiple visible upstream dep candidates are provided, every task that directly depends on one upstream candidate must declare `branch_tags` that exactly match that selected candidate.
+- If the visible upstream candidate you need is missing branch identity in `Visible Upstream Dep Handles`, return `partial` instead of forcing a guessed `complete` tree.
+- Visible upstream candidates may be truncated by the wrapper; use only the candidates shown in `Visible Upstream Dep Handles`.
 
 Task fields:
 - `ref_name`: short stable snake_case alias for this task inside the raw JSON. Later tasks may reference it as `$dep.<ref_name>.<signal>`.
@@ -44,6 +56,7 @@ Task fields:
 - `logging_lines`: brief human-readable explanation of what this step proves.
 - `match_mode`: must be `first`, `all`, or `unique_per_var`. Use `first` for expected single-hit checks.
 - `max_match`: local upper bound for this task's expected matches.
+- `branch_tags`: optional flat string map used to preserve branch identity for multi-leaf export and multi-candidate upstream selection.
 - `$dep.<ref_name>.<signal>`: the only allowed dependency form in raw JSON. Python later rewrites it to the final `$dep.<task_id>.<signal>` form.
 
 Authoring rules:
@@ -84,18 +97,30 @@ PASS3_3_3_APV_PROMPT = """
 - If no valid task can be supported, return `status = "partial"`, `tasks = []`, and explain the reason in `unknown`.
 - Every task must declare a unique `ref_name`.
 - If you need the previous module item's leaf task, use one provided upstream `ref_name` and write the dependency as `$dep.<ref_name>.<signal>`.
+- `branch_tags` must be authored in raw JSON task objects, later persisted in `apv_index` `leaf_contexts`, and must not be materialized into runtime YAML.
+- When multiple upstream candidates are visible, pick exactly one candidate per task and copy its `branch_tags` exactly onto that task.
+- When the current item ends in multiple terminal leaves, export all of them and give each terminal leaf unique non-empty `branch_tags`.
 - If you need an earlier task from this same JSON, reference that earlier task's declared `ref_name`.
+- A local task must be declared before any later task may reference it.
 - Only reference upstream signals listed in that candidate's `capture_names`.
+- Every `$dep.<ref>.<signal>` must come from either a visible upstream candidate or an earlier declared local task, and the referenced signal must exist in that dependency's `capture_names` or declared `capture_signals`.
+- If the visible upstream candidate you need is missing `branch_tags`, do not force a `complete` tree; return `partial`.
 - If the needed relation cannot be expressed with real local signals visible in the provided topology/context, return `partial` instead of inventing a new alias.
 
 ## APV Authoring Goal
 - Start from `boundary_takeover` as the authoritative ingress of this item and end at this item's instruction-relevant `boundary_handoffs`.
 - Fill in the key signal points along that route. Prefer event points that remove instruction-identity ambiguity over generic valid-only snapshots.
-- Prefer conditions that prove instruction continuity, such as PC/value/valid alignment between two signals, rather than reducing every task to independent `== 1'b1` checks.
+- Prefer conditions that prove instruction continuity, such as PC/value alignment between two signals, rather than reducing every task to independent `== 1'b1` checks.
 - The local event chain is not necessarily a single linear chain. Inside one item, tasks may form a small tree when different channels, selector outcomes, buffer slots, reorder cases, crossbar routes, or FSM outcomes need separate path-specific evidence.
 - Multiple later tasks may depend on the same earlier `ref_name` when they represent different local paths, but each sibling task must use conditions that explicitly distinguish that path.
-- `complete` means all resolved instruction-relevant paths in this item's current context are represented, not just the strongest main path.
-- If the current item ends in multiple non-reconverged terminal branches, return `partial` rather than pretending current v1 cross-item propagation can export multiple downstream leaves.
+- `complete` means all resolved instruction-relevant terminal paths in this item's current context are represented and transferable downstream, not just the strongest main path.
+- Multi-leaf v2 cross-item propagation can export multiple downstream leaves. Use `branch_tags` to make branch identity explicit instead of collapsing back to one leaf.
+- If multiple upstream dep candidates are shown, any task that consumes one of them must keep branch identity exact by matching that candidate's `branch_tags`.
+- Prefer `channel` as the first `branch_tags` key. Add `slot`, `pipe`, or `buffer` only when needed to keep sibling terminal tag maps unique.
+- Continuity anchor priority is `pc`, then `inst`, then packed data bus or bit slice, then `valid` or `vld`.
+- If local `pc`, `inst`, or data anchors are visible, a valid-only relation cannot by itself support `complete`.
+- For `ct_ifu_top` or `ct_idu_top` style relay items, a `complete` answer must include at least one same-line upstream-to-local identity relation.
+- If you cannot make branch identity explicit for every exported terminal leaf, return `partial`.
 - When evidence is weak, keep the task local and precise; do not invent hidden state or speculative routing.
 
 ## Example Task Shape
@@ -124,6 +149,10 @@ Interpret each task's `condition_lines` as one local observation point.
         "ibctrl_ibdp_bypass_inst_vld",
         "ifu_idu_ib_pipedown_gateclk"
       ],
+      "branch_tags": {{
+        "slot": "0",
+        "channel": "bypass"
+      }},
       "logging_lines": [
         "ADD instruction PC matches upstream fetch PC and activates bypass dispatch in ibctrl"
       ],
@@ -142,6 +171,10 @@ Interpret each task's `condition_lines` as one local observation point.
         "issue_vld",
         "issue_en"
       ],
+      "branch_tags": {{
+        "slot": "0",
+        "channel": "bypass"
+      }},
       "logging_lines": [
         "ibctrl reuses the accepted bypass instruction to drive local issue enable"
       ],
@@ -163,11 +196,42 @@ Interpret each task's `condition_lines` as one local observation point.
 - Both example tasks use `match_mode = "first"`, so for each upstream matched row APV keeps only the first candidate time point that satisfies the current task, then stops searching for more matches from that same upstream row.
 - The example is split into two tasks because "accept into ibctrl" and "drive local issue enable" are modeled as two verification steps that may occur at different matched time points. If one observation point could already prove both facts clearly, one task would be enough.
 - Each example task references only one dependency `ref_name`. That is required: a single task may read multiple captured signals from one dependency, but it must not mix multiple different dependency sources in the same task.
+- In this multi-leaf v2 protocol, both example tasks carry the same `branch_tags` so downstream items can keep this bypass path distinct from sibling branches.
 
 ## Branching Walkthrough
 - The local event chain is not necessarily a single linear chain. If the current module can route the same instruction through multiple local channels or selector-controlled paths, use multiple sibling tasks that all depend on one earlier parent task.
 - Example: a parent `dispatch_entry` task may branch into `to_buf0` and `to_buf1`. Both depend on `dispatch_entry`, but one uses `buf_sel == 2'b00` and the other uses `buf_sel == 2'b01`.
 - This kind of branching is valid inside one module item because the sibling tasks use different conditions to make the path distinction explicit.
 - Use branching to cover all resolved instruction-relevant paths in the current item, especially around branch, buffer, reorder, crossbar, arbitration, or FSM-controlled ambiguity points.
-- If both sibling branches remain terminal exits of the current item and do not reconverge into one transferable downstream continuation, return `partial` in v1 instead of pretending there is one linear exported leaf.
+- If both sibling branches remain terminal exits of the current item, keep both leaves and give each one unique non-empty `branch_tags` so downstream continuation can stay branch-accurate.
+
+## Multi-leaf Completeness Examples
+- Good `pcgen` pattern: one parent task fans out into `pcgen_ifctrl`, `pcgen_icache`, `pcgen_btb`, and `pcgen_bht`, and every terminal leaf exports unique non-empty `branch_tags` such as `{{"channel":"ifctrl"}}`, `{{"channel":"icache"}}`, `{{"channel":"btb"}}`, and `{{"channel":"bht"}}`.
+- A `complete` answer must cover all resolved terminal paths, not just the visually strongest path.
+- Bad `pcgen` pattern: if any exported terminal leaf is missing `branch_tags`, the item must return `partial` instead of pretending the tree is complete.
+- Prefer `channel` first in `branch_tags`; add `slot`, `pipe`, or `buffer` only when needed to make sibling terminal leaves unique.
+
+## Local Dependency Discipline
+- A local task must be declared before any later task may reference it.
+- Good `ibctrl` pattern: declare `ibctrl_ingress` first, then let `bypass_leaf`, `ibuf_leaf`, and `lbuf_leaf` depend on `$dep.ibctrl_ingress.accept_vld` with path-specific conditions.
+- Bad `ibctrl` pattern: if `bypass_leaf` references `$dep.ibctrl_ingress.accept_vld` before `ibctrl_ingress` is declared, delete that task and return `partial`.
+- Do not mix multiple dependency sources in one task.
+- If the visible upstream candidate you need is missing `branch_tags`, do not force a `complete` tree; return `partial`.
+
+## Continuity Anchor Guidance
+- Prefer anchors in this order: `pc`, `inst`, packed data bus or bit slice, then `valid` or `vld`.
+- Good: `$dep.prev.inst0 == ifu_idu_ib_inst0_data[31:0]`
+- Good: `$dep.prev.inst0_pc == ibuf_ibdp_inst0_pc`
+- Weak-only example: `$dep.prev.inst0_vld == ifu_idu_ib_inst0_vld`
+- If local `pc`, `inst`, or data anchors are visible, a valid-only relation may assist a task but cannot by itself support `complete`.
+- For `ct_ifu_top` or `ct_idu_top` style relay items, if you output `complete`, include at least one same-line upstream-to-local identity relation.
+
+## Pre-output Self-check
+- Before final JSON, verify each of the following.
+- If the current item exports multiple terminal leaves, every terminal task has unique non-empty `branch_tags`.
+- Each task depends on at most one `ref_name`.
+- Every `$dep.<ref>.<signal>` comes from a visible upstream candidate or an earlier declared local task.
+- Every referenced dependency signal appears in that dependency's `capture_names` or declared `capture_signals`.
+- If you output `complete`, at least one same-line continuity condition directly ties an upstream anchor to a local anchor.
+- If any step lacks enough evidence, delete that speculative task and return `partial` instead of keeping a guessed chain.
 """

@@ -126,7 +126,7 @@ class Pass3Hash:
     ) -> str:
         """Build cache key for pass3.3.3 APV instruction index."""
         payload = {
-            "version": "pass3_3_instrack_apv_index_cache_v7",
+            "version": "pass3_3_instrack_apv_index_cache_v8",
             "top_module": top_module,
             "instruction": instruction,
             "start_module": start_module,
@@ -147,7 +147,7 @@ class Pass3Hash:
     ) -> str:
         """Build cache key for one pass3.3.3 APV module item."""
         payload = {
-            "version": "pass3_3_instrack_apv_item_cache_v8",
+            "version": "pass3_3_instrack_apv_item_cache_v9",
             "top_module": top_module,
             "instruction": instruction,
             "system_prompt": PASS3_3_3_APV_SYSTEM,

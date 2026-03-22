@@ -205,6 +205,7 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
     assert '"ref_name": "ifu_entry"' in llm.calls[1]["prompt"]
     assert '"task_id": "s00_t00_x_ifu"' in llm.calls[1]["prompt"]
     assert '"capture_names": [' in llm.calls[1]["prompt"]
+    assert '"branch_tags": {}' in llm.calls[1]["prompt"]
     assert "## Search Result JSON" not in llm.calls[1]["prompt"]
     assert "## Current Module Preview" not in llm.calls[1]["prompt"]
     assert "## Previous Item Summary" not in llm.calls[1]["prompt"]
@@ -232,14 +233,38 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
     assert 'dependsOn: "s00_t00_x_ifu"' in idu_yaml
     assert '"$dep.s00_t00_x_ifu.fetch_vld == x_idu.dispatch_vld_i"' in idu_yaml
     assert '"$dep.s01_t00_x_idu.dispatch_vld == x_idu.issue_en"' in idu_yaml
-    assert apv_index["schema_version"] == "pass3_3_3_apv_index_v1"
+    assert apv_index["schema_version"] == "pass3_3_3_apv_index_v2"
+    assert apv_index["items"][0]["leaf_contexts"] == [
+        {
+            "task_id": "s00_t00_x_ifu",
+            "ref_name": "ifu_entry",
+            "capture_names": ["fetch_vld"],
+            "branch_tags": {},
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+        }
+    ]
     assert apv_index["items"][0]["leaf_task_id"] == "s00_t00_x_ifu"
     assert apv_index["items"][0]["leaf_ref_name"] == "ifu_entry"
+    assert apv_index["items"][1]["leaf_contexts"] == [
+        {
+            "task_id": "s01_t01_x_idu",
+            "ref_name": "issue_fire",
+            "capture_names": ["issue_pkt_vld"],
+            "branch_tags": {},
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+        }
+    ]
     assert apv_index["items"][1]["leaf_task_id"] == "s01_t01_x_idu"
     assert apv_index["items"][1]["leaf_ref_name"] == "issue_fire"
     assert apv_index["items"][1]["status"] == "complete"
-    assert summary_json["schema_version"] == "pass3_3_instrack_apv_v1"
+    assert summary_json["schema_version"] == "pass3_3_instrack_apv_v2"
     assert summary_json["apv_index_artifact_json"] == f"instrack/{slug}/artifacts/apv_index.json"
+    assert summary_json["apv_status"] == ""
+    assert summary_json["apv_error"] == ""
     assert "top__x_ifu.apv.yaml" in summary_md
     assert "status=complete, tasks=1" in summary_md
     assert "top__x_idu.apv.yaml" in summary_md
@@ -866,6 +891,7 @@ def test_run_pass3_3_allows_sibling_branch_tasks_sharing_same_parent_ref_name(tm
     assert yaml_text.count('dependsOn: "s00_t00_x_idu"') == 2
     assert apv_index["items"][0]["status"] == "partial"
     assert apv_index["items"][0]["task_count"] == 3
+    assert len(apv_index["items"][0]["leaf_contexts"]) == 2
     assert apv_index["items"][0]["leaf_task_id"] == ""
     assert apv_index["items"][0]["leaf_ref_name"] == ""
     assert apv_index["items"][0]["leaf_capture_names"] == []
@@ -875,7 +901,90 @@ def test_run_pass3_3_allows_sibling_branch_tasks_sharing_same_parent_ref_name(tm
     assert not any("at most one unique dep `ref_name`" in reason for reason in apv_index["items"][0]["unknown"])
 
 
-def test_run_pass3_3_marks_complete_branching_item_partial_when_multiple_terminal_leaves(tmp_path):
+def test_run_pass3_3_keeps_complete_multi_leaf_item_when_terminal_branch_tags_are_unique(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"dispatch_entry","task_name":"dispatch entry","condition_lines":["entry_vld"],"capture_signals":["entry_vld"],"logging_lines":["dispatch entry"],"match_mode":"first","max_match":1},{"ref_name":"to_buf0","task_name":"route to buf0","condition_lines":["$dep.dispatch_entry.entry_vld == buf0_fire","buf_sel == 2'b00"],"capture_signals":["buf0_fire"],"branch_tags":{"slot":"0","channel":"buf"},"logging_lines":["buf0 path"],"match_mode":"first","max_match":1},{"ref_name":"to_buf1","task_name":"route to buf1","condition_lines":["$dep.dispatch_entry.entry_vld == buf1_fire","buf_sel == 2'b01"],"capture_signals":["buf1_fire"],"branch_tags":{"slot":"1","channel":"buf"},"logging_lines":["buf1 path"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+        ]
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={
+            "idu_mod": _structured_topology_block("entry_vld", "buf0_fire", "buf1_fire", "buf_sel"),
+        },
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "idu_mod",
+        "start_instance": "x_idu",
+        "start_block": "IDU_ENTRY",
+        "key_register": "idu_reg",
+        "key_register_line_range": {"start_line": 3, "end_line": 4},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [{"input_port": "dispatch_vld_i", "value_condition": "dispatch_vld_i", "behavior": "accept upstream valid"}],
+                "boundary_handoffs": [
+                    {"output_port": "buf0_fire_o", "value_condition": "buf0_fire_o", "behavior": "route to buffer0"},
+                    {"output_port": "buf1_fire_o", "value_condition": "buf1_fire_o", "behavior": "route to buffer1"},
+                ],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "branches dispatch toward two local buffers",
+                "confidence": "high",
+                "unknown": "",
+            },
+        }
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    slug = generator._safe_slug("ADD").lower()
+    apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
+
+    assert apv_index["items"][0]["status"] == "complete"
+    assert apv_index["items"][0]["task_count"] == 3
+    assert apv_index["items"][0]["leaf_task_id"] == ""
+    assert apv_index["items"][0]["leaf_ref_name"] == ""
+    assert apv_index["items"][0]["leaf_capture_names"] == []
+    assert apv_index["items"][0]["leaf_contexts"] == [
+        {
+            "task_id": "s00_t01_x_idu",
+            "ref_name": "to_buf0",
+            "capture_names": ["buf0_fire"],
+            "branch_tags": {"slot": "0", "channel": "buf"},
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+        },
+        {
+            "task_id": "s00_t02_x_idu",
+            "ref_name": "to_buf1",
+            "capture_names": ["buf1_fire"],
+            "branch_tags": {"slot": "1", "channel": "buf"},
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+        },
+    ]
+    assert apv_index["items"][0]["unknown"] == []
+
+
+def test_run_pass3_3_marks_multi_leaf_complete_partial_when_terminal_branch_tags_are_missing(tmp_path):
     llm = FakeLLM(
         [
             """```json
@@ -931,9 +1040,232 @@ def test_run_pass3_3_marks_complete_branching_item_partial_when_multiple_termina
     apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
 
     assert apv_index["items"][0]["status"] == "partial"
-    assert apv_index["items"][0]["task_count"] == 3
+    assert len(apv_index["items"][0]["leaf_contexts"]) == 2
     assert apv_index["items"][0]["leaf_task_id"] == ""
     assert apv_index["items"][0]["leaf_ref_name"] == ""
     assert apv_index["items"][0]["leaf_capture_names"] == []
-    assert any("multiple terminal task branches" in reason for reason in apv_index["items"][0]["unknown"])
-    assert any("exports only one downstream leaf" in reason for reason in apv_index["items"][0]["unknown"])
+    assert any("must declare non-empty `branch_tags`" in reason for reason in apv_index["items"][0]["unknown"])
+
+
+def test_run_pass3_3_exposes_all_visible_upstream_leaf_context_candidates_in_prompt(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"slot0_leaf","task_name":"slot0 leaf","condition_lines":["slot0_vld"],"capture_signals":["slot0_vld"],"branch_tags":{"slot":"0"},"logging_lines":["slot0"],"match_mode":"first","max_match":1},{"ref_name":"slot1_leaf","task_name":"slot1 leaf","condition_lines":["slot1_vld"],"capture_signals":["slot1_vld"],"branch_tags":{"slot":"1"},"logging_lines":["slot1"],"match_mode":"first","max_match":1},{"ref_name":"slot2_leaf","task_name":"slot2 leaf","condition_lines":["slot2_vld"],"capture_signals":["slot2_vld"],"branch_tags":{"slot":"2"},"logging_lines":["slot2"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+            """```json
+{"status":"partial","tasks":[],"unknown":["no local continuation yet"]}
+```""",
+        ]
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={
+            "ifu_mod": _structured_topology_block("slot0_vld", "slot1_vld", "slot2_vld"),
+            "idu_mod": _structured_topology_block("dispatch_vld_i", "issue_vld"),
+        },
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [
+                    {"output_port": "slot0_vld_o", "value_condition": "slot0_vld_o", "behavior": "route slot0"},
+                    {"output_port": "slot1_vld_o", "value_condition": "slot1_vld_o", "behavior": "route slot1"},
+                    {"output_port": "slot2_vld_o", "value_condition": "slot2_vld_o", "behavior": "route slot2"},
+                ],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "fanout to three terminal slots",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+        {
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+            "orchestrator_role": "parent_module",
+            "orchestration": {
+                "boundary_takeover": [{"input_port": "dispatch_vld_i", "value_condition": "dispatch_vld_i", "behavior": "accept visible leaf"}],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "consumes one selected slot",
+                "confidence": "medium",
+                "unknown": "",
+            },
+        },
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    assert len(llm.calls) == 2
+    prompt_text = llm.calls[1]["prompt"]
+    assert prompt_text.count('"task_id": "') == 3
+    assert '"ref_name": "slot0_leaf"' in prompt_text
+    assert '"ref_name": "slot1_leaf"' in prompt_text
+    assert '"ref_name": "slot2_leaf"' in prompt_text
+    assert '"branch_tags": {' in prompt_text
+    assert '"total_candidates": 3' in prompt_text
+
+
+def test_run_pass3_3_marks_partial_when_upstream_branch_tags_do_not_match_selected_candidate(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"slot0_leaf","task_name":"slot0 leaf","condition_lines":["slot0_vld"],"capture_signals":["slot0_vld"],"branch_tags":{"slot":"0"},"logging_lines":["slot0"],"match_mode":"first","max_match":1},{"ref_name":"slot1_leaf","task_name":"slot1 leaf","condition_lines":["slot1_vld"],"capture_signals":["slot1_vld"],"branch_tags":{"slot":"1"},"logging_lines":["slot1"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+            """```json
+{"status":"complete","tasks":[{"ref_name":"decode_accept","task_name":"decode accept","condition_lines":["$dep.slot0_leaf.slot0_vld == dispatch_vld_i","dispatch_vld_i"],"capture_signals":["dispatch_vld_i"],"branch_tags":{"slot":"9"},"logging_lines":["bad branch pick"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+        ]
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={
+            "ifu_mod": _structured_topology_block("slot0_vld", "slot1_vld"),
+            "idu_mod": _structured_topology_block("dispatch_vld_i"),
+        },
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [
+                    {"output_port": "slot0_vld_o", "value_condition": "slot0_vld_o", "behavior": "route slot0"},
+                    {"output_port": "slot1_vld_o", "value_condition": "slot1_vld_o", "behavior": "route slot1"},
+                ],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "fanout to two slots",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+        {
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+            "orchestrator_role": "parent_module",
+            "orchestration": {
+                "boundary_takeover": [{"input_port": "dispatch_vld_i", "value_condition": "dispatch_vld_i", "behavior": "accept selected slot"}],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "selects one upstream slot",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    slug = generator._safe_slug("ADD").lower()
+    apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
+
+    assert apv_index["items"][0]["status"] == "complete"
+    assert apv_index["items"][1]["status"] == "partial"
+    assert any("selected upstream candidate `ref_name=slot0_leaf` uses" in reason for reason in apv_index["items"][1]["unknown"])
+
+
+def test_run_pass3_3_fails_instruction_when_route_contains_duplicate_item_path(tmp_path):
+    llm = FakeLLM([])
+    generator = _build_generator(tmp_path, llm)
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_dup",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "first duplicate path",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+        {
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_dup",
+            "orchestrator_role": "parent_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "second duplicate path",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    slug = generator._safe_slug("ADD").lower()
+    apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
+    summary_json = json.loads((tmp_path / "chip" / "instrack" / slug / "add.json").read_text(encoding="utf-8"))
+    summary_md = (tmp_path / "chip" / "instrack" / slug / "add.md").read_text(encoding="utf-8")
+
+    assert llm.calls == []
+    assert apv_index["status"] == "failed"
+    assert apv_index["items"] == []
+    assert "Duplicate `item.path` detected" in apv_index["error"]
+    assert summary_json["apv_status"] == "failed"
+    assert "Duplicate `item.path` detected" in summary_json["apv_error"]
+    assert "## APV Status" in summary_md

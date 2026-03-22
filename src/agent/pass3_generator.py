@@ -1703,6 +1703,8 @@ class Pass3Generator:
             orchestrate_index_text = orchestrate_index_path.read_text(encoding="utf-8")
             apv_enabled = bool(getattr(self.owner, "pass3_3_3_enabled", True))
             apv_items: List[Dict[str, Any]] = []
+            apv_status = ""
+            apv_error = ""
             apv_index_input_hash = self._hash.build_pass3_3_apv_index_input_hash(
                 top_module=top_node.module_name,
                 instruction=instruction,
@@ -1727,6 +1729,12 @@ class Pass3Generator:
                     expected_input_hash=apv_index_input_hash,
                 ):
                     apv_items = list(cached_apv_items)
+                    try:
+                        cached_payload = json.loads(apv_index_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        cached_payload = {}
+                    apv_status = str((cached_payload or {}).get("status") or "").strip()
+                    apv_error = str((cached_payload or {}).get("error") or "").strip()
                 else:
                     self.owner.project_tracker.mark_running(
                         artifact_apv_index_json,
@@ -1745,6 +1753,8 @@ class Pass3Generator:
                         cached_items=cached_apv_items,
                     )
                     apv_items = list(apv_result.get("items") or [])
+                    apv_status = str(apv_result.get("status") or "").strip()
+                    apv_error = str(apv_result.get("error") or "").strip()
                     apv_index_text = str(apv_result.get("index_text") or "")
                     apv_index_path.write_text(apv_index_text, encoding="utf-8")
                     self.owner.project_tracker.update(
@@ -1778,6 +1788,11 @@ class Pass3Generator:
                     )
             else:
                 md_lines.append("- (none)")
+            if apv_error:
+                md_lines.append("")
+                md_lines.append("## APV Status")
+                md_lines.append(f"- `{apv_status or 'failed'}`")
+                md_lines.append(f"- {apv_error}")
             md_text = "\n".join(md_lines).strip() + "\n"
 
             out_md.write_text(md_text, encoding="utf-8")
@@ -1790,9 +1805,11 @@ class Pass3Generator:
 
             json_payload = {
                 **parsed_search,
-                "schema_version": "pass3_3_instrack_apv_v1",
+                "schema_version": "pass3_3_instrack_apv_v2",
                 "orchestrate_index_artifact_json": artifact_orchestrate_index_json,
                 "apv_index_artifact_json": artifact_apv_index_json if apv_enabled else "",
+                "apv_status": apv_status,
+                "apv_error": apv_error,
                 "lifecycle_modules": lifecycle_modules,
             }
             json_text = json.dumps(json_payload, ensure_ascii=False, indent=2)
@@ -1801,7 +1818,7 @@ class Pass3Generator:
                 artifact_json,
                 json_text,
                 input_hash=apv_index_input_hash if apv_enabled else orchestrate_input_hash,
-                meta={"source": artifact_md, "parser": "instrack_apv_v1"},
+                meta={"source": artifact_md, "parser": "instrack_apv_v2"},
             )
 
             index_entries.append({
