@@ -13,7 +13,6 @@ Goal:
 - Keep the chain short, high-confidence, and temporally consistent. If the route evidence is incomplete, keep only the strongest supported local steps instead of inventing missing behavior.
 
 How APV matches a task chain:
-- The authoring target inside one module item is the instruction-relevant route from `boundary_takeover` ingress to `boundary_handoffs` egress.
 - APV executes a task chain under one global clock supplied by the outer wrapper. This stage only writes the current module item's raw JSON fragment; it does not choose the clock or assemble the final whole-route YAML.
 - A task is a match rule for one local observation point. Its `condition_lines` are evaluated together at one candidate time point, and if they match, APV records that time point as one hit of this task.
 - `capture_signals` are not extra hints. They are the concrete local signals whose values are sampled at that matched time point and persisted as this task's captured result.
@@ -70,7 +69,6 @@ Output rules:
 1. Output exactly one `json` code block and no other text.
 2. The JSON must include `status`, `tasks`, and `unknown`.
 3. Every task object must include `ref_name`, `task_name`, `condition_lines`, `capture_signals`, `logging_lines`, `match_mode`, and `max_match`.
-4. Do not output YAML, Markdown commentary, Mermaid, or prose outside the single JSON code block.
 """
 
 PASS3_3_3_APV_PROMPT = """
@@ -224,7 +222,6 @@ Interpret each task's `condition_lines` as one local observation point.
 - Good: `$dep.prev.inst0_pc == ibuf_ibdp_inst0_pc`
 - Weak-only example: `$dep.prev.inst0_vld == ifu_idu_ib_inst0_vld`
 - If local `pc`, `inst`, or data anchors are visible, a valid-only relation may assist a task but cannot by itself support `complete`.
-- For `ct_ifu_top` or `ct_idu_top` style relay items, if you output `complete`, include at least one same-line upstream-to-local identity relation.
 
 ## Pre-output Self-check
 - Before final JSON, verify each of the following.

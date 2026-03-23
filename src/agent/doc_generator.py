@@ -77,6 +77,7 @@ class AgentDocGenerator:
         pass3_max_card_lines: int = 12,
         pass3_tree_max_depth_in_doc: int = 4,
         max_concurrent_modules: int = 4,
+        enable_webui_monitoring: bool = False,
     ):
         self.hierarchy = hierarchy
         self.llm = llm
@@ -99,6 +100,17 @@ class AgentDocGenerator:
         self.isa_instructions = isa_instructions or []
         self.instrack_single_instruction = instrack_single_instruction
         self.instrack_use_graph_markers = instrack_use_graph_markers
+        self.enable_webui_monitoring = enable_webui_monitoring
+        self._webui_collector = None
+
+        # Initialize WebUI collector if monitoring enabled
+        if enable_webui_monitoring:
+            try:
+                from webui.trace_collector import get_trace_collector
+                self._webui_collector = get_trace_collector()
+            except ImportError:
+                print("[WARN] WebUI monitoring enabled but webui module not found")
+                self._webui_collector = None
         self.pass3_output_subdir = pass3_output_subdir
         self.pass3_key_modules_per_subsystem = pass3_key_modules_per_subsystem
         self.pass3_max_card_lines = pass3_max_card_lines
@@ -156,74 +168,110 @@ class AgentDocGenerator:
 
     async def run(self):
         """Run the full documentation generation process."""
+        import time
+        start_time = time.time()
+
         print(f"[INFO] Starting Docor Agent on {self.hierarchy.module_name}...")
 
-        # Pass 0: Precompute simplified graphs
-        if self.schematic_gen:
-            print("[INFO] Running Pass 0: Precomputing SimplifiedGraphs...")
-            self._precompute_graphs(self.hierarchy)
-            print(f"[INFO] Precomputed {len(self._graphs)} simplified graphs")
+        # Start WebUI monitoring session if enabled
+        if self._webui_collector:
+            try:
+                await self._webui_collector.start_session(
+                    top_module=self.hierarchy.module_name,
+                    config={
+                        'max_modules': self.max_modules,
+                        'pass1_enabled': self.pass1_enabled,
+                        'pass2_enabled': self.pass2_enabled,
+                        'pass3_enabled': self.pass3_enabled,
+                    }
+                )
+            except Exception as e:
+                print(f"[WARN] Failed to start WebUI monitoring: {e}")
 
-        if self.pass1_enabled:
-            print("[INFO] Running Pass 1: Top-down Preview Generation...")
-            await self._run_pass1(self.hierarchy, "该模块是设计的顶层模块。")
-        else:
-            print("[INFO] Pass 1 disabled; skipping preview generation.")
+        try:
+            # Pass 0: Precompute simplified graphs
+            if self.schematic_gen:
+                print("[INFO] Running Pass 0: Precomputing SimplifiedGraphs...")
+                self._precompute_graphs(self.hierarchy)
+                print(f"[INFO] Precomputed {len(self._graphs)} simplified graphs")
 
-        if self.pass2_enabled:
-            if not self.pass1_enabled:
-                raise RuntimeError("Pass 2 requires Pass 1. Enable agent.pass1_enabled before running Pass 2.")
+            if self.pass1_enabled:
+                print("[INFO] Running Pass 1: Top-down Preview Generation...")
+                await self._run_pass1(self.hierarchy, "该模块是设计的顶层模块。")
+            else:
+                print("[INFO] Pass 1 disabled; skipping preview generation.")
 
-            # Pass 1.5: Block-level Documentation (extracted from old Pass 2)
-            print("[INFO] Running Pass 1.5: Block-level Documentation...")
-            await self._run_pass1_5(self.hierarchy)
+            if self.pass2_enabled:
+                if not self.pass1_enabled:
+                    raise RuntimeError("Pass 2 requires Pass 1. Enable agent.pass1_enabled before running Pass 2.")
 
-            # Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5 + Pass 2.6 + Pass 2.7
-            print("[INFO] Running Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5 + Pass 2.6 + Pass 2.7 in parallel...")
-            import asyncio
-            await asyncio.gather(
-                self._run_pass2_1(self.hierarchy),
-                self._run_pass2_2(self.hierarchy),
-                self._run_pass2_3(self.hierarchy),
-                self._run_pass2_4(self.hierarchy),
-                self._run_pass2_5(self.hierarchy),
-                self._run_pass2_6(self.hierarchy),
-                self._run_pass2_7(self.hierarchy)
-            )
+                # Pass 1.5: Block-level Documentation (extracted from old Pass 2)
+                print("[INFO] Running Pass 1.5: Block-level Documentation...")
+                await self._run_pass1_5(self.hierarchy)
 
-            # Pass 2: Bottom-up Synthesis Documentation
-            print("[INFO] Running Pass 2: Synthesis Documentation...")
-            await self._run_pass2(self.hierarchy)
-        else:
-            print("[INFO] Pass 2 disabled; skipping Pass 1.5 and Pass 2.x.")
+                # Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5 + Pass 2.6 + Pass 2.7
+                print("[INFO] Running Pass 2.1 + Pass 2.2 + Pass 2.3 + Pass 2.4 + Pass 2.5 + Pass 2.6 + Pass 2.7 in parallel...")
+                import asyncio
+                await asyncio.gather(
+                    self._run_pass2_1(self.hierarchy),
+                    self._run_pass2_2(self.hierarchy),
+                    self._run_pass2_3(self.hierarchy),
+                    self._run_pass2_4(self.hierarchy),
+                    self._run_pass2_5(self.hierarchy),
+                    self._run_pass2_6(self.hierarchy),
+                    self._run_pass2_7(self.hierarchy)
+                )
 
-        # Pass 3: Chip-level top-down overview and subsystem index pages
-        if self.pass3_enabled:
-            if not self.pass1_enabled:
-                raise RuntimeError("Pass 3 requires Pass 1. Enable agent.pass1_enabled before running Pass 3.")
-            print("[INFO] Running Pass 3.1: SoC-level Subsystem Partition (Agent exploration)...")
-            await self._run_pass3_1(self.hierarchy)
+                # Pass 2: Bottom-up Synthesis Documentation
+                print("[INFO] Running Pass 2: Synthesis Documentation...")
+                await self._run_pass2(self.hierarchy)
+            else:
+                print("[INFO] Pass 2 disabled; skipping Pass 1.5 and Pass 2.x.")
 
-            print("[INFO] Running Pass 3.2: Core Microarchitecture Partition (Agent Explore)...")
-            await self._run_pass3_2(self.hierarchy)
+            # Pass 3: Chip-level top-down overview and subsystem index pages
+            if self.pass3_enabled:
+                if not self.pass1_enabled:
+                    raise RuntimeError("Pass 3 requires Pass 1. Enable agent.pass1_enabled before running Pass 3.")
+                print("[INFO] Running Pass 3.1: SoC-level Subsystem Partition (Agent exploration)...")
+                await self._run_pass3_1(self.hierarchy)
 
-            # Keep only pass3.1/3.2/3.3 outputs; skip final overview/subsystem aggregation pass.
-            print("[INFO] Skipping final Pass 3 overview generation (configured workflow: keep 3.1/3.2/3.3 only).")
+                print("[INFO] Running Pass 3.2: Core Microarchitecture Partition (Agent Explore)...")
+                await self._run_pass3_2(self.hierarchy)
 
-        # Allow pass3.3 standalone debug runs (skip 3.1/3.2).
-        if self.pass3_3_enabled:
-            if not self.pass1_enabled:
-                raise RuntimeError("Pass 3.3 requires Pass 1. Enable agent.pass1_enabled before running Pass 3.3.")
-            if not self.pass3_enabled:
-                print("[INFO] Pass 3.1/3.2 disabled; running Pass 3.3 only (instrack debug mode)...")
-            print("[INFO] Running Pass 3.3: InStrack (Instruction Route Tracking)...")
-            await self._run_pass3_3(self.hierarchy)
+                # Keep only pass3.1/3.2/3.3 outputs; skip final overview/subsystem aggregation pass.
+                print("[INFO] Skipping final Pass 3 overview generation (configured workflow: keep 3.1/3.2/3.3 only).")
 
-        print(f"[INFO] Documentation generation complete.")
-        print(f"[INFO]   Modules: {self.modules_dir}")
-        print(f"[INFO]   Debug logs: {self.debug_dir}")
-        if self.pass3_enabled:
-            print(f"[INFO]   CHIP docs: {self.chip_dir}")
+            # Allow pass3.3 standalone debug runs (skip 3.1/3.2).
+            if self.pass3_3_enabled:
+                if not self.pass1_enabled:
+                    raise RuntimeError("Pass 3.3 requires Pass 1. Enable agent.pass1_enabled before running Pass 3.3.")
+                if not self.pass3_enabled:
+                    print("[INFO] Pass 3.1/3.2 disabled; running Pass 3.3 only (instrack debug mode)...")
+                print("[INFO] Running Pass 3.3: InStrack (Instruction Route Tracking)...")
+                await self._run_pass3_3(self.hierarchy)
+
+            duration = time.time() - start_time
+            print(f"[INFO] Documentation generation complete in {duration:.1f}s.")
+            print(f"[INFO]   Modules: {self.modules_dir}")
+            print(f"[INFO]   Debug logs: {self.debug_dir}")
+            if self.pass3_enabled:
+                print(f"[INFO]   CHIP docs: {self.chip_dir}")
+
+            # End WebUI monitoring session successfully
+            if self._webui_collector:
+                try:
+                    await self._webui_collector.end_session(status='completed')
+                except Exception as e:
+                    print(f"[WARN] Failed to end WebUI monitoring: {e}")
+
+        except Exception as e:
+            # End WebUI monitoring session with error
+            if self._webui_collector:
+                try:
+                    await self._webui_collector.end_session(status='error', error=str(e))
+                except Exception:
+                    pass
+            raise
 
     def _precompute_graphs(self, node: Any):
         """Recursively precompute SimplifiedGraphs for all modules.

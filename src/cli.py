@@ -307,7 +307,8 @@ def cmd_docor(args):
         "model": cfg.agent_model,
         "api_key": cfg.agent_api_key,
         "base_url": cfg.agent_base_url,
-        "thinking": cfg.agent_thinking
+        "thinking": cfg.agent_thinking,
+        "enable_webui_monitoring": cfg.enable_webui,
     }
     llm = get_llm_backend(llm_config)
 
@@ -398,6 +399,7 @@ def cmd_docor(args):
         instrack_single_instruction=cfg.instrack_single_instruction,
         instrack_use_graph_markers=cfg.instrack_use_graph_markers,
         max_concurrent_modules=cfg.max_concurrent_modules,
+        enable_webui_monitoring=cfg.enable_webui,
     )
 
     # Run async generator
@@ -848,6 +850,8 @@ def main():
                             help="Ignore progress and start from scratch")
     doc_parser.add_argument("--max-modules", type=int,
                             help="Limit number of modules to process (for debugging)")
+    doc_parser.add_argument("--enable-webui", action="store_true",
+                            help="Enable WebUI monitoring for real-time trace and LLM call tracking")
 
     args = parser.parse_args()
 

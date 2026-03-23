@@ -196,6 +196,7 @@ class ProjectConfig:
     instrack_single_instruction: Optional[str] = None  # Run only one instruction when set
     instrack_use_graph_markers: bool = False  # Phase-2 switch (kept for forward compatibility)
     max_concurrent_modules: int = 4  # Max concurrent LLM requests per pass
+    enable_webui: bool = False  # Enable WebUI monitoring for real-time trace
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ProjectConfig':
@@ -320,6 +321,8 @@ class ProjectConfig:
                 config.instrack_use_graph_markers = bool(agent['instrack_use_graph_markers'])
             if 'max_concurrent_modules' in agent:
                 config.max_concurrent_modules = int(agent['max_concurrent_modules'])
+            if 'enable_webui' in agent:
+                config.enable_webui = bool(agent['enable_webui'])
 
         return config
 
@@ -373,6 +376,8 @@ class ProjectConfig:
             self.resume = False
         if getattr(args, 'max_modules', None) is not None:
             self.max_modules = args.max_modules
+        if getattr(args, 'enable_webui', False):
+            self.enable_webui = True
 
         return self
 

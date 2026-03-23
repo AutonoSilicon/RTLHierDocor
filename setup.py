@@ -28,6 +28,11 @@ setup(
         "agent": [
             "anthropic>=0.3.0",
         ],
+        "webui": [
+            "fastapi>=0.100.0",
+            "uvicorn[standard]>=0.23.0",
+            "websockets>=11.0",
+        ],
     },
     classifiers=[
         "Development Status :: 3 - Alpha",

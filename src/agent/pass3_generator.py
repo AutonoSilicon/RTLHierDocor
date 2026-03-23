@@ -209,6 +209,21 @@ class Pass3Generator:
         module_text = str(module_selector or "")
         resolved_task = str(child_task or "").strip()
 
+        # Emit WebUI trace event if monitoring enabled
+        webui_request_id = None
+        if self.owner._webui_collector:
+            try:
+                webui_request_id = self.owner._webui_collector.emit_fork_request(
+                    parent_module=parent_module,
+                    parent_instance=parent_instance,
+                    parent_level=parent_level,
+                    module_selector=module_text,
+                    task=resolved_task,
+                    prompt_style=prompt_style,
+                )
+            except Exception:
+                pass
+
         self._append_fork_trace(
             request_event,
             {
@@ -234,6 +249,17 @@ class Pass3Generator:
                     "prompt_style": prompt_style,
                 },
             )
+            # Emit WebUI reject event
+            if webui_request_id and self.owner._webui_collector:
+                try:
+                    self.owner._webui_collector.emit_fork_rejected(
+                        request_event_id=webui_request_id,
+                        module_selector=module_text,
+                        reason=error,
+                        level=parent_level,
+                    )
+                except Exception:
+                    pass
             return error
 
         if not resolved_task and default_task_builder is not None:
@@ -257,9 +283,34 @@ class Pass3Generator:
                     "prompt_style": prompt_style,
                 },
             )
+            # Emit WebUI reject event
+            if webui_request_id and self.owner._webui_collector:
+                try:
+                    self.owner._webui_collector.emit_fork_rejected(
+                        request_event_id=webui_request_id,
+                        module_selector=module_text,
+                        reason=error_message,
+                        level=parent_level,
+                    )
+                except Exception:
+                    pass
             return error_message
 
         child_level = parent_level + 1
+
+        # Emit WebUI dispatch event
+        if webui_request_id and self.owner._webui_collector:
+            try:
+                self.owner._webui_collector.emit_fork_dispatch(
+                    request_event_id=webui_request_id,
+                    child_module=child_node.module_name,
+                    child_instance=child_node.instance_name,
+                    child_level=child_level,
+                    task=resolved_task,
+                )
+            except Exception:
+                pass
+
         self._append_fork_trace(
             dispatch_event,
             {
@@ -293,6 +344,22 @@ class Pass3Generator:
         if isinstance(extra_trace_payload, dict):
             trace_payload.update(extra_trace_payload)
         self._append_fork_trace(return_event, trace_payload)
+
+        # Emit WebUI return event
+        if webui_request_id and self.owner._webui_collector:
+            try:
+                self.owner._webui_collector.emit_fork_return(
+                    request_event_id=webui_request_id,
+                    child_module=child_node.module_name,
+                    child_instance=child_node.instance_name,
+                    child_level=child_level,
+                    report_chars=report_chars,
+                    prompt_tokens=prompt_tokens,
+                    result_preview=tool_result[:300] if tool_result else None,
+                )
+            except Exception:
+                pass
+
         return tool_result
 
     def _build_instance_path_index(self, top_node: Any) -> Dict[str, Any]:

@@ -8,6 +8,7 @@ import os
 import asyncio
 import datetime
 import json
+import time
 import traceback
 from typing import List, Optional, Any, Dict, Tuple
 
@@ -24,7 +25,7 @@ class LLMBackend:
     """LLM Backend using OpenAI's Chat Completion API."""
 
     def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None, base_url: Optional[str] = None,
-                 thinking: bool = False):
+                 thinking: bool = False, enable_webui_monitoring: bool = False):
         """Initialize the LLM backend.
 
         Args:
@@ -32,6 +33,7 @@ class LLMBackend:
             api_key: API key (defaults to OPENAI_API_KEY env var)
             base_url: Base URL for API (for non-OpenAI providers)
             thinking: Enable thinking/reasoning mode
+            enable_webui_monitoring: Enable WebUI event emission for monitoring
         """
         if openai is None:
             raise ImportError("'openai' package not installed. Run 'pip install openai'.")
@@ -43,6 +45,7 @@ class LLMBackend:
         self.model = model
         self.thinking = thinking
         self.base_url = base_url or "https://api.openai.com/v1"
+        self.enable_webui_monitoring = enable_webui_monitoring
 
         # Semaphore to limit concurrent LLM API calls (prevent rate limiting)
         self._semaphore = asyncio.Semaphore(16)
@@ -57,6 +60,9 @@ class LLMBackend:
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_callback: Optional[ToolCallback] = None,
         max_tool_rounds: int = 8,
+        *,
+        module_name: Optional[str] = None,
+        pass_name: Optional[str] = None,
     ) -> Tuple[str, Dict[str, int]]:
         """Generate text from the LLM.
 
@@ -65,10 +71,35 @@ class LLMBackend:
             prompt: User prompt
             log_path: Path for debug log file
             disable_thinking: Whether to disable thinking mode
+            tools_enabled: Enable tool calling mode
+            tools: Available tools for tool calling
+            tool_callback: Callback for tool execution
+            max_tool_rounds: Maximum tool calling rounds
+            module_name: Module name for WebUI monitoring
+            pass_name: Pass name for WebUI monitoring
 
         Returns:
             Tuple of (generated_text, token_stats)
         """
+        start_time = time.time()
+        trace_event_id = None
+
+        # Emit WebUI trace event if monitoring enabled
+        if self.enable_webui_monitoring and module_name and pass_name:
+            try:
+                from webui.trace_collector import get_trace_collector
+                collector = get_trace_collector()
+                trace_event_id = collector.emit_llm_start(
+                    module_name=module_name,
+                    pass_name=pass_name,
+                    prompt_preview=prompt[:500] if prompt else None,
+                    system_preview=system[:200] if system else None,
+                    estimated_tokens=len(prompt) // 4 if prompt else 0,
+                    model=self.model,
+                )
+            except Exception:
+                pass
+
         async with self._semaphore:
             try:
                 use_thinking = self.thinking and not disable_thinking
@@ -158,6 +189,23 @@ class LLMBackend:
 
                 # Log only the initial system+prompt (keeps log sizes bounded)
                 self._log_call(system, prompt, self.model, log_path)
+
+                # Emit WebUI trace event if monitoring enabled
+                if trace_event_id and self.enable_webui_monitoring:
+                    try:
+                        from webui.trace_collector import get_trace_collector
+                        collector = get_trace_collector()
+                        duration_ms = (time.time() - start_time) * 1000
+                        collector.emit_llm_end(
+                            event_id=trace_event_id,
+                            success=True,
+                            response_preview=final_text[:500] if final_text else None,
+                            token_stats=aggregated,
+                            duration_ms=duration_ms,
+                        )
+                    except Exception:
+                        pass
+
                 return (final_text if final_text else "Error: LLM returned empty response."), aggregated
 
             except Exception as e:
@@ -168,6 +216,22 @@ class LLMBackend:
                     tool_mode=locals().get("tool_mode"),
                 )
                 self._append_exception_to_log(log_path, detail)
+
+                # Emit WebUI trace event if monitoring enabled
+                if trace_event_id and self.enable_webui_monitoring:
+                    try:
+                        from webui.trace_collector import get_trace_collector
+                        collector = get_trace_collector()
+                        duration_ms = (time.time() - start_time) * 1000
+                        collector.emit_llm_end(
+                            event_id=trace_event_id,
+                            success=False,
+                            error=detail['summary'],
+                            duration_ms=duration_ms,
+                        )
+                    except Exception:
+                        pass
+
                 return f"Error calling LLM API: {detail['summary']}", {
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -434,5 +498,6 @@ def get_llm_backend(config: Any) -> LLMBackend:
         model=config.get("model", "gpt-4"),
         api_key=config.get("api_key"),
         base_url=config.get("base_url"),
-        thinking=config.get("thinking", False)
+        thinking=config.get("thinking", False),
+        enable_webui_monitoring=config.get("enable_webui_monitoring", False),
     )
