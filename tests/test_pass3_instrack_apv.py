@@ -137,10 +137,10 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"ifu_entry","task_name":"ifu entry","condition_lines":["fetch_vld && !flush"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"match_mode":"single","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld && !flush"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"match_mode":"single","max_match":1}],"unknown":[]}
 ```""",
             """```json
-{"status":"complete","tasks":[{"ref_name":"decode_accept","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld == dispatch_vld_i","dispatch_vld_i && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["decode accepted"],"match_mode":"first","max_match":1},{"ref_name":"issue_fire","task_name":"issue fire","condition_lines":["$dep.decode_accept.dispatch_vld == issue_en"],"capture_signals":["issue_pkt_vld"],"logging_lines":["issue fired"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"decode_accept","dep_name":"ifu_entry","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld == dispatch_vld_i","dispatch_vld_i && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["decode accepted"],"match_mode":"first","max_match":1},{"ref_name":"issue_fire","dep_name":"decode_accept","task_name":"issue fire","condition_lines":["$dep.decode_accept.dispatch_vld == issue_en"],"capture_signals":["issue_pkt_vld"],"logging_lines":["issue fired"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -205,7 +205,7 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
     assert '"ref_name": "ifu_entry"' in llm.calls[1]["prompt"]
     assert '"task_id": "s00_t00_x_ifu"' in llm.calls[1]["prompt"]
     assert '"capture_names": [' in llm.calls[1]["prompt"]
-    assert '"branch_tags": {}' in llm.calls[1]["prompt"]
+    assert '"branch_lineage": [' in llm.calls[1]["prompt"]
     assert "## Search Result JSON" not in llm.calls[1]["prompt"]
     assert "## Current Module Preview" not in llm.calls[1]["prompt"]
     assert "## Previous Item Summary" not in llm.calls[1]["prompt"]
@@ -233,13 +233,14 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
     assert 'dependsOn: "s00_t00_x_ifu"' in idu_yaml
     assert '"$dep.s00_t00_x_ifu.fetch_vld == x_idu.dispatch_vld_i"' in idu_yaml
     assert '"$dep.s01_t00_x_idu.dispatch_vld == x_idu.issue_en"' in idu_yaml
-    assert apv_index["schema_version"] == "pass3_3_3_apv_index_v2"
+    assert apv_index["schema_version"] == "pass3_3_3_apv_index_v4"
     assert apv_index["items"][0]["leaf_contexts"] == [
         {
             "task_id": "s00_t00_x_ifu",
             "ref_name": "ifu_entry",
             "capture_names": ["fetch_vld"],
-            "branch_tags": {},
+            "branch_lineage": ["ifu_entry"],
+            "upstream_hint": "",
             "module": "ifu_mod",
             "instance": "x_ifu",
             "path": "top/x_ifu",
@@ -252,7 +253,8 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
             "task_id": "s01_t01_x_idu",
             "ref_name": "issue_fire",
             "capture_names": ["issue_pkt_vld"],
-            "branch_tags": {},
+            "branch_lineage": ["ifu_entry", "decode_accept", "issue_fire"],
+            "upstream_hint": "",
             "module": "idu_mod",
             "instance": "x_idu",
             "path": "top/x_idu",
@@ -261,7 +263,7 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
     assert apv_index["items"][1]["leaf_task_id"] == "s01_t01_x_idu"
     assert apv_index["items"][1]["leaf_ref_name"] == "issue_fire"
     assert apv_index["items"][1]["status"] == "complete"
-    assert summary_json["schema_version"] == "pass3_3_instrack_apv_v2"
+    assert summary_json["schema_version"] == "pass3_3_instrack_apv_v4"
     assert summary_json["apv_index_artifact_json"] == f"instrack/{slug}/artifacts/apv_index.json"
     assert summary_json["apv_status"] == ""
     assert summary_json["apv_error"] == ""
@@ -274,7 +276,7 @@ def test_run_pass3_3_marks_partial_when_dep_ref_name_is_not_visible(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"bad_dep","task_name":"bad dep","condition_lines":["$dep.missing.fetch_vld && local_vld"],"capture_signals":["local_vld"],"logging_lines":["should fail"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"bad_dep","dep_name":"missing","task_name":"bad dep","condition_lines":["$dep.missing.fetch_vld && local_vld"],"capture_signals":["local_vld"],"logging_lines":["should fail"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -322,11 +324,153 @@ def test_run_pass3_3_marks_partial_when_dep_ref_name_is_not_visible(tmp_path):
     assert any("unknown dep `ref_name=missing`" in reason for reason in apv_index["items"][0]["unknown"])
 
 
+def test_run_pass3_3_propagates_handoff_hint_into_visible_upstream_candidates(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","behavior_hint":"IFU entry remains on the fetch family, but downstream should keep slot ambiguity in mind.","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld && !flush"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"handoff_hint":"This leaf confirms fetch-family progress only; downstream must not assume slot identity yet.","match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+            """```json
+{"status":"complete","tasks":[{"ref_name":"decode_accept","dep_name":"ifu_entry","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld == dispatch_vld_i","dispatch_vld_i && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["decode accepted"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+        ]
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={
+            "ifu_mod": _structured_topology_block("fetch_vld", "flush"),
+            "idu_mod": _structured_topology_block("dispatch_vld_i", "decode_ready", "dispatch_vld"),
+        },
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [{"output_port": "dispatch_vld_o", "value_condition": "dispatch_vld_o = fetch_vld", "behavior": "forward to IDU"}],
+                "_boundary_handoff_routes": [{"status": "resolved", "output_port": "dispatch_vld_o"}],
+                "lifecycle_context": "accepts fetch-valid and forwards decode work",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+        {
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+            "orchestrator_role": "parent_module",
+            "orchestration": {
+                "boundary_takeover": [{"input_port": "dispatch_vld_i", "value_condition": "dispatch_vld_i", "behavior": "accept IFU handoff"}],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "accepts decode handoff",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    slug = generator._safe_slug("ADD").lower()
+    apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
+
+    assert apv_index["items"][0]["behavior_hint"] == "IFU entry remains on the fetch family, but downstream should keep slot ambiguity in mind."
+    assert apv_index["items"][0]["leaf_contexts"] == [
+        {
+            "task_id": "s00_t00_x_ifu",
+            "ref_name": "ifu_entry",
+            "capture_names": ["fetch_vld"],
+            "branch_lineage": ["ifu_entry"],
+            "upstream_hint": "This leaf confirms fetch-family progress only; downstream must not assume slot identity yet.",
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+        }
+    ]
+    assert '"upstream_hint": "This leaf confirms fetch-family progress only; downstream must not assume slot identity yet."' in llm.calls[1]["prompt"]
+
+
+def test_run_pass3_3_leaf_hint_falls_back_to_behavior_hint(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","behavior_hint":"Bypass family is resolved here, but downstream still needs local evidence before selecting a concrete slot.","tasks":[{"ref_name":"bypass_leaf","dep_name":"","task_name":"bypass leaf","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["bypass observed"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+        ]
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={"ifu_mod": _structured_topology_block("fetch_vld")},
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "tracks bypass family",
+                "confidence": "high",
+                "unknown": "",
+            },
+        }
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    slug = generator._safe_slug("ADD").lower()
+    apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
+
+    assert apv_index["items"][0]["behavior_hint"] == "Bypass family is resolved here, but downstream still needs local evidence before selecting a concrete slot."
+    assert apv_index["items"][0]["leaf_contexts"][0]["upstream_hint"] == (
+        "Bypass family is resolved here, but downstream still needs local evidence before selecting a concrete slot."
+    )
+
+
 def test_run_pass3_3_keeps_valid_tasks_when_one_task_is_invalid(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"bad_first","task_name":"bad first","condition_lines":["local_vld"],"capture_signals":["local_vld"],"logging_lines":["bad"],"match_mode":"bogus","max_match":1},{"ref_name":"good_second","task_name":"good second","condition_lines":["local_vld && ready"],"capture_signals":["done_vld"],"logging_lines":["good"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"bad_first","dep_name":"","task_name":"bad first","condition_lines":["local_vld"],"capture_signals":["local_vld"],"logging_lines":["bad"],"match_mode":"bogus","max_match":1},{"ref_name":"good_second","dep_name":"","task_name":"good second","condition_lines":["local_vld && ready"],"capture_signals":["done_vld"],"logging_lines":["good"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -380,7 +524,7 @@ def test_run_pass3_3_normalizes_assignment_conditions_and_sv_literals(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"valid_flag","task_name":"valid flag","condition_lines":["flag = 1'b1"],"capture_signals":["flag"],"logging_lines":["flag asserted"],"match_mode":"condition","max_match":1},{"ref_name":"consume_flag","task_name":"consume flag","condition_lines":["$dep.valid_flag.flag = local_vld && ready"],"capture_signals":["done_vld"],"logging_lines":["flag consumed"],"match_mode":"condition","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"valid_flag","dep_name":"","task_name":"valid flag","condition_lines":["flag = 1'b1"],"capture_signals":["flag"],"logging_lines":["flag asserted"],"match_mode":"condition","max_match":1},{"ref_name":"consume_flag","dep_name":"valid_flag","task_name":"consume flag","condition_lines":["$dep.valid_flag.flag = local_vld && ready"],"capture_signals":["done_vld"],"logging_lines":["flag consumed"],"match_mode":"condition","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -433,7 +577,7 @@ def test_run_pass3_3_rejects_multiple_dep_ref_names(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"bad_multi_dep","task_name":"bad multi dep","condition_lines":["$dep.left.fetch_vld && $dep.right.dispatch_vld"],"capture_signals":["done_vld"],"logging_lines":["bad"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"bad_multi_dep","dep_name":"left","task_name":"bad multi dep","condition_lines":["$dep.left.fetch_vld && $dep.right.dispatch_vld"],"capture_signals":["done_vld"],"logging_lines":["bad"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -483,7 +627,7 @@ def test_run_pass3_3_rejects_resolved_dep_reference_in_raw_json(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"bad_resolved_dep","task_name":"bad resolved dep","condition_lines":["$dep.s00_t00_x_ifu.fetch_vld && local_vld"],"capture_signals":["done_vld"],"logging_lines":["bad"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"bad_resolved_dep","dep_name":"s00_t00_x_ifu","task_name":"bad resolved dep","condition_lines":["$dep.s00_t00_x_ifu.fetch_vld && local_vld"],"capture_signals":["done_vld"],"logging_lines":["bad"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -536,10 +680,10 @@ def test_run_pass3_3_rejects_unknown_dep_capture_name(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"ifu_entry","task_name":"start ok","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["start"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"start ok","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["start"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
             """```json
-{"status":"complete","tasks":[{"ref_name":"bad_capture","task_name":"bad capture","condition_lines":["$dep.ifu_entry.missing_sig && ready"],"capture_signals":["dispatch_vld"],"logging_lines":["bad capture"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"bad_capture","dep_name":"ifu_entry","task_name":"bad capture","condition_lines":["$dep.ifu_entry.missing_sig && ready"],"capture_signals":["dispatch_vld"],"logging_lines":["bad capture"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -603,7 +747,7 @@ def test_run_pass3_3_rejects_duplicate_ref_name(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"dup_ref","task_name":"first task","condition_lines":["local_vld"],"capture_signals":["local_vld"],"logging_lines":["first"],"match_mode":"first","max_match":1},{"ref_name":"dup_ref","task_name":"second task","condition_lines":["ready"],"capture_signals":["done_vld"],"logging_lines":["second"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"dup_ref","dep_name":"","task_name":"first task","condition_lines":["local_vld"],"capture_signals":["local_vld"],"logging_lines":["first"],"match_mode":"first","max_match":1},{"ref_name":"dup_ref","dep_name":"","task_name":"second task","condition_lines":["ready"],"capture_signals":["done_vld"],"logging_lines":["second"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -653,7 +797,7 @@ def test_run_pass3_3_rejects_forward_dep_ref_name(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"decode_accept","task_name":"decode accept","condition_lines":["$dep.issue_fire.issue_pkt_vld && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["bad forward ref"],"match_mode":"first","max_match":1},{"ref_name":"issue_fire","task_name":"issue fire","condition_lines":["issue_en"],"capture_signals":["issue_pkt_vld"],"logging_lines":["later task"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"decode_accept","dep_name":"issue_fire","task_name":"decode accept","condition_lines":["$dep.issue_fire.issue_pkt_vld && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["bad forward ref"],"match_mode":"first","max_match":1},{"ref_name":"issue_fire","dep_name":"","task_name":"issue fire","condition_lines":["issue_en"],"capture_signals":["issue_pkt_vld"],"logging_lines":["later task"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -702,7 +846,7 @@ def test_run_pass3_3_rejects_unknown_local_signal_when_topology_catalog_is_trust
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"bad_local","task_name":"bad local","condition_lines":["ghost_sig == real_vld"],"capture_signals":["real_vld"],"logging_lines":["bad local"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"bad_local","dep_name":"","task_name":"bad local","condition_lines":["ghost_sig == real_vld"],"capture_signals":["real_vld"],"logging_lines":["bad local"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -758,10 +902,10 @@ def test_run_pass3_3_marks_partial_when_complete_lacks_same_line_anchor_relation
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"ifu_entry","task_name":"ifu entry","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
             """```json
-{"status":"complete","tasks":[{"ref_name":"decode_accept","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld","dispatch_vld_i","decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["weak continuity"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"decode_accept","dep_name":"ifu_entry","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld","dispatch_vld_i","decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["weak continuity"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -833,7 +977,7 @@ def test_run_pass3_3_allows_sibling_branch_tasks_sharing_same_parent_ref_name(tm
     llm = FakeLLM(
         [
             """```json
-{"status":"partial","tasks":[{"ref_name":"dispatch_entry","task_name":"dispatch entry","condition_lines":["entry_vld"],"capture_signals":["entry_vld"],"logging_lines":["dispatch entry"],"match_mode":"first","max_match":1},{"ref_name":"to_buf0","task_name":"route to buf0","condition_lines":["$dep.dispatch_entry.entry_vld == buf0_fire","buf_sel == 2'b00"],"capture_signals":["buf0_fire"],"logging_lines":["buf0 path"],"match_mode":"first","max_match":1},{"ref_name":"to_buf1","task_name":"route to buf1","condition_lines":["$dep.dispatch_entry.entry_vld == buf1_fire","buf_sel == 2'b01"],"capture_signals":["buf1_fire"],"logging_lines":["buf1 path"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"partial","tasks":[{"ref_name":"dispatch_entry","dep_name":"","task_name":"dispatch entry","condition_lines":["entry_vld"],"capture_signals":["entry_vld"],"logging_lines":["dispatch entry"],"match_mode":"first","max_match":1},{"ref_name":"to_buf0","dep_name":"dispatch_entry","task_name":"route to buf0","condition_lines":["$dep.dispatch_entry.entry_vld == buf0_fire","buf_sel == 2'b00"],"capture_signals":["buf0_fire"],"logging_lines":["buf0 path"],"match_mode":"first","max_match":1},{"ref_name":"to_buf1","dep_name":"dispatch_entry","task_name":"route to buf1","condition_lines":["$dep.dispatch_entry.entry_vld == buf1_fire","buf_sel == 2'b01"],"capture_signals":["buf1_fire"],"logging_lines":["buf1 path"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -901,11 +1045,11 @@ def test_run_pass3_3_allows_sibling_branch_tasks_sharing_same_parent_ref_name(tm
     assert not any("at most one unique dep `ref_name`" in reason for reason in apv_index["items"][0]["unknown"])
 
 
-def test_run_pass3_3_keeps_complete_multi_leaf_item_when_terminal_branch_tags_are_unique(tmp_path):
+def test_run_pass3_3_keeps_complete_multi_leaf_item_when_terminal_branch_lineages_are_auto_generated(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"dispatch_entry","task_name":"dispatch entry","condition_lines":["entry_vld"],"capture_signals":["entry_vld"],"logging_lines":["dispatch entry"],"match_mode":"first","max_match":1},{"ref_name":"to_buf0","task_name":"route to buf0","condition_lines":["$dep.dispatch_entry.entry_vld == buf0_fire","buf_sel == 2'b00"],"capture_signals":["buf0_fire"],"branch_tags":{"slot":"0","channel":"buf"},"logging_lines":["buf0 path"],"match_mode":"first","max_match":1},{"ref_name":"to_buf1","task_name":"route to buf1","condition_lines":["$dep.dispatch_entry.entry_vld == buf1_fire","buf_sel == 2'b01"],"capture_signals":["buf1_fire"],"branch_tags":{"slot":"1","channel":"buf"},"logging_lines":["buf1 path"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"dispatch_entry","dep_name":"","task_name":"dispatch entry","condition_lines":["entry_vld"],"capture_signals":["entry_vld"],"logging_lines":["dispatch entry"],"match_mode":"first","max_match":1},{"ref_name":"to_buf0","dep_name":"dispatch_entry","task_name":"route to buf0","condition_lines":["$dep.dispatch_entry.entry_vld == buf0_fire","buf_sel == 2'b00"],"capture_signals":["buf0_fire"],"logging_lines":["buf0 path"],"match_mode":"first","max_match":1},{"ref_name":"to_buf1","dep_name":"dispatch_entry","task_name":"route to buf1","condition_lines":["$dep.dispatch_entry.entry_vld == buf1_fire","buf_sel == 2'b01"],"capture_signals":["buf1_fire"],"logging_lines":["buf1 path"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -966,7 +1110,8 @@ def test_run_pass3_3_keeps_complete_multi_leaf_item_when_terminal_branch_tags_ar
             "task_id": "s00_t01_x_idu",
             "ref_name": "to_buf0",
             "capture_names": ["buf0_fire"],
-            "branch_tags": {"slot": "0", "channel": "buf"},
+            "branch_lineage": ["dispatch_entry", "to_buf0"],
+            "upstream_hint": "",
             "module": "idu_mod",
             "instance": "x_idu",
             "path": "top/x_idu",
@@ -975,7 +1120,8 @@ def test_run_pass3_3_keeps_complete_multi_leaf_item_when_terminal_branch_tags_ar
             "task_id": "s00_t02_x_idu",
             "ref_name": "to_buf1",
             "capture_names": ["buf1_fire"],
-            "branch_tags": {"slot": "1", "channel": "buf"},
+            "branch_lineage": ["dispatch_entry", "to_buf1"],
+            "upstream_hint": "",
             "module": "idu_mod",
             "instance": "x_idu",
             "path": "top/x_idu",
@@ -984,11 +1130,11 @@ def test_run_pass3_3_keeps_complete_multi_leaf_item_when_terminal_branch_tags_ar
     assert apv_index["items"][0]["unknown"] == []
 
 
-def test_run_pass3_3_marks_multi_leaf_complete_partial_when_terminal_branch_tags_are_missing(tmp_path):
+def test_run_pass3_3_keeps_complete_multi_leaf_item_without_raw_branch_metadata(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"dispatch_entry","task_name":"dispatch entry","condition_lines":["entry_vld"],"capture_signals":["entry_vld"],"logging_lines":["dispatch entry"],"match_mode":"first","max_match":1},{"ref_name":"to_buf0","task_name":"route to buf0","condition_lines":["$dep.dispatch_entry.entry_vld == buf0_fire","buf_sel == 2'b00"],"capture_signals":["buf0_fire"],"logging_lines":["buf0 path"],"match_mode":"first","max_match":1},{"ref_name":"to_buf1","task_name":"route to buf1","condition_lines":["$dep.dispatch_entry.entry_vld == buf1_fire","buf_sel == 2'b01"],"capture_signals":["buf1_fire"],"logging_lines":["buf1 path"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"dispatch_entry","dep_name":"","task_name":"dispatch entry","condition_lines":["entry_vld"],"capture_signals":["entry_vld"],"logging_lines":["dispatch entry"],"match_mode":"first","max_match":1},{"ref_name":"to_buf0","dep_name":"dispatch_entry","task_name":"route to buf0","condition_lines":["$dep.dispatch_entry.entry_vld == buf0_fire","buf_sel == 2'b00"],"capture_signals":["buf0_fire"],"logging_lines":["buf0 path"],"match_mode":"first","max_match":1},{"ref_name":"to_buf1","dep_name":"dispatch_entry","task_name":"route to buf1","condition_lines":["$dep.dispatch_entry.entry_vld == buf1_fire","buf_sel == 2'b01"],"capture_signals":["buf1_fire"],"logging_lines":["buf1 path"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -1039,19 +1185,19 @@ def test_run_pass3_3_marks_multi_leaf_complete_partial_when_terminal_branch_tags
     slug = generator._safe_slug("ADD").lower()
     apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
 
-    assert apv_index["items"][0]["status"] == "partial"
+    assert apv_index["items"][0]["status"] == "complete"
     assert len(apv_index["items"][0]["leaf_contexts"]) == 2
     assert apv_index["items"][0]["leaf_task_id"] == ""
     assert apv_index["items"][0]["leaf_ref_name"] == ""
     assert apv_index["items"][0]["leaf_capture_names"] == []
-    assert any("must declare non-empty `branch_tags`" in reason for reason in apv_index["items"][0]["unknown"])
+    assert apv_index["items"][0]["unknown"] == []
 
 
 def test_run_pass3_3_exposes_all_visible_upstream_leaf_context_candidates_in_prompt(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"slot0_leaf","task_name":"slot0 leaf","condition_lines":["slot0_vld"],"capture_signals":["slot0_vld"],"branch_tags":{"slot":"0"},"logging_lines":["slot0"],"match_mode":"first","max_match":1},{"ref_name":"slot1_leaf","task_name":"slot1 leaf","condition_lines":["slot1_vld"],"capture_signals":["slot1_vld"],"branch_tags":{"slot":"1"},"logging_lines":["slot1"],"match_mode":"first","max_match":1},{"ref_name":"slot2_leaf","task_name":"slot2 leaf","condition_lines":["slot2_vld"],"capture_signals":["slot2_vld"],"branch_tags":{"slot":"2"},"logging_lines":["slot2"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"slot0_leaf","dep_name":"","task_name":"slot0 leaf","condition_lines":["slot0_vld"],"capture_signals":["slot0_vld"],"logging_lines":["slot0"],"match_mode":"first","max_match":1},{"ref_name":"slot1_leaf","dep_name":"","task_name":"slot1 leaf","condition_lines":["slot1_vld"],"capture_signals":["slot1_vld"],"logging_lines":["slot1"],"match_mode":"first","max_match":1},{"ref_name":"slot2_leaf","dep_name":"","task_name":"slot2 leaf","condition_lines":["slot2_vld"],"capture_signals":["slot2_vld"],"logging_lines":["slot2"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
             """```json
 {"status":"partial","tasks":[],"unknown":["no local continuation yet"]}
@@ -1124,18 +1270,18 @@ def test_run_pass3_3_exposes_all_visible_upstream_leaf_context_candidates_in_pro
     assert '"ref_name": "slot0_leaf"' in prompt_text
     assert '"ref_name": "slot1_leaf"' in prompt_text
     assert '"ref_name": "slot2_leaf"' in prompt_text
-    assert '"branch_tags": {' in prompt_text
+    assert '"branch_lineage": [' in prompt_text
     assert '"total_candidates": 3' in prompt_text
 
 
-def test_run_pass3_3_marks_partial_when_upstream_branch_tags_do_not_match_selected_candidate(tmp_path):
+def test_run_pass3_3_marks_partial_when_dep_name_does_not_match_selected_candidate(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"slot0_leaf","task_name":"slot0 leaf","condition_lines":["slot0_vld"],"capture_signals":["slot0_vld"],"branch_tags":{"slot":"0"},"logging_lines":["slot0"],"match_mode":"first","max_match":1},{"ref_name":"slot1_leaf","task_name":"slot1 leaf","condition_lines":["slot1_vld"],"capture_signals":["slot1_vld"],"branch_tags":{"slot":"1"},"logging_lines":["slot1"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"slot0_leaf","dep_name":"","task_name":"slot0 leaf","condition_lines":["slot0_vld"],"capture_signals":["slot0_vld"],"logging_lines":["slot0"],"match_mode":"first","max_match":1},{"ref_name":"slot1_leaf","dep_name":"","task_name":"slot1 leaf","condition_lines":["slot1_vld"],"capture_signals":["slot1_vld"],"logging_lines":["slot1"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
             """```json
-{"status":"complete","tasks":[{"ref_name":"decode_accept","task_name":"decode accept","condition_lines":["$dep.slot0_leaf.slot0_vld == dispatch_vld_i","dispatch_vld_i"],"capture_signals":["dispatch_vld_i"],"branch_tags":{"slot":"9"},"logging_lines":["bad branch pick"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"decode_accept","dep_name":"slot1_leaf","task_name":"decode accept","condition_lines":["$dep.slot0_leaf.slot0_vld == dispatch_vld_i","dispatch_vld_i"],"capture_signals":["dispatch_vld_i"],"logging_lines":["bad dep pick"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -1203,7 +1349,7 @@ def test_run_pass3_3_marks_partial_when_upstream_branch_tags_do_not_match_select
 
     assert apv_index["items"][0]["status"] == "complete"
     assert apv_index["items"][1]["status"] == "partial"
-    assert any("selected upstream candidate `ref_name=slot0_leaf` uses" in reason for reason in apv_index["items"][1]["unknown"])
+    assert any("declares `dep_name=slot1_leaf` but its `condition_lines` reference `$dep.slot0_leaf.*`" in reason for reason in apv_index["items"][1]["unknown"])
 
 
 def test_run_pass3_3_fails_instruction_when_route_contains_duplicate_item_path(tmp_path):

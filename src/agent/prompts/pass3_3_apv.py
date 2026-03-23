@@ -9,7 +9,7 @@ Goal:
 - Fill in the key signal points along that route, especially observation/capture points that remove instruction-identity ambiguity rather than generic valid-bit snapshots.
 - For any branch, buffer, out-of-order, crossbar, arbitration, or FSM-controlled ambiguity point on the route, describe the discriminating conditions accurately enough to eliminate identity ambiguity.
 - Make each task and capture serve downstream tracing: when a task matches, its captured signals should preserve the instruction evidence that later tasks may need through `$dep`.
-- Preserve single-instruction identity across the chain whenever the evidence allows. Prefer direct continuity anchors such as PC/value/valid alignment over disconnected `== 1'b1` facts.
+- Preserve single-instruction identity across the chain whenever the evidence allows. Prefer direct continuity anchors such as PC/inst/value alignment over disconnected `== 1'b1` facts or bare `valid == valid` echoes.
 - Keep the chain short, high-confidence, and temporally consistent. If the route evidence is incomplete, keep only the strongest supported local steps instead of inventing missing behavior.
 
 How APV matches a task chain:
@@ -38,24 +38,31 @@ How APV matches a task chain:
 - For `status = "complete"`, if upstream and local continuity anchors are visible, include at least one same-line condition that directly ties the persisted upstream capture to the current local observation, such as `$dep.<ref>.pc == local_pc` or `$dep.<ref>.inst == local_inst`.
 - Continuity anchor priority is `pc`, then `inst`, then packed data bus or bit slice, then `valid` or `vld`.
 - If local `pc`, `inst`, or data anchors are visible, a valid-only relation may assist a task but cannot by itself justify `complete`.
-- Raw task objects may include optional `branch_tags`, which must be a flat string map such as `{{"slot":"0","channel":"bypass"}}`. Do not use nested objects or arrays.
-- `branch_tags` must be authored in raw JSON task objects, later persisted in `apv_index` `leaf_contexts`, and never materialized into runtime YAML.
-- A single task may still reference only one dependency `ref_name`; `branch_tags` identify branch selection, but they do not authorize mixing multiple upstream dependency sources in one task.
+- Avoid making a bare `valid == valid` or `vld == vld` relation the primary cross-task continuity claim when stronger anchors are available.
+- Every raw task object must include `dep_name`.
+- `dep_name = ""` means this task is a root trigger task and must not use any `$dep.<ref_name>.<signal>` reference.
+- `dep_name != ""` means this task depends on exactly one visible upstream or earlier local `ref_name`, and every `$dep.<ref_name>.<signal>` reference in that task must use exactly that same `ref_name`.
+- A single task may still reference only one dependency `ref_name`; `dep_name` identifies that dependency explicitly and does not authorize mixing multiple dependency sources in one task.
+- Python computes branch identity from the task forest after parsing raw JSON and persists it as read-only `branch_lineage` in `apv_index` `leaf_contexts`.
+- `Visible Upstream Dep Handles` may show read-only `branch_lineage` for context, but branch identity is never authored in raw JSON.
+- `Visible Upstream Dep Handles` may also show read-only `upstream_hint` advisory text from the previous item. Treat it as a reminder about branch/channel/slot ambiguity, not as proof.
 - `complete` means every resolved terminal path in the current item is covered by an exported terminal task that can continue downstream, not merely that the strongest main path looks good.
-- If the current item has multiple terminal tasks, every terminal task must declare non-empty `branch_tags`, and sibling terminal tasks must use unique `branch_tags`.
-- If multiple visible upstream dep candidates are provided, every task that directly depends on one upstream candidate must declare `branch_tags` that exactly match that selected candidate.
-- If the visible upstream candidate you need is missing branch identity in `Visible Upstream Dep Handles`, return `partial` instead of forcing a guessed `complete` tree.
+- If the current item has multiple terminal tasks, each terminal task must keep a unique `ref_name` and unique dependency path so Python can export unique downstream `branch_lineage`.
 - Visible upstream candidates may be truncated by the wrapper; use only the candidates shown in `Visible Upstream Dep Handles`.
+- `behavior_hint`, `handoff_hint`, and downstream `upstream_hint` are advisory context only. They may explain uncertainty or branch design, but they never replace a real signal relation in `condition_lines`.
+- Do not assume slot identity from source-path identity alone. A unique bypass/ibuf/lbuf path does not imply the instruction must be in `inst0`/`inst1`/`inst2` unless local evidence explicitly proves that mapping.
 
 Task fields:
 - `ref_name`: short stable snake_case alias for this task inside the raw JSON. Later tasks may reference it as `$dep.<ref_name>.<signal>`.
+- `dep_name`: explicit dependency selector for this task. Use `""` for root trigger tasks. For dependent tasks, set it to the one unique upstream or earlier-local `ref_name` referenced by every `$dep.<ref_name>.<signal>` term in this task.
 - `task_name`: concise verification-oriented name for this local step.
-- `condition_lines`: Python-expression-like boolean predicates that are evaluated together at one candidate time point for this task. Prefer real RTL relationships such as PC/value/valid alignment, handoff continuity, enables, or local gating.
+- `condition_lines`: Python-expression-like boolean predicates that are evaluated together at one candidate time point for this task. Prefer real RTL relationships such as PC/inst/value alignment, handoff continuity, enables, or local gating.
 - `capture_signals`: concrete local signals to sample and persist when this task matches, so later tasks can read them through `$dep` and debug can inspect the matched values. Capture identity-carrying or handoff-carrying values, not prose or broad background state.
 - `logging_lines`: brief human-readable explanation of what this step proves.
 - `match_mode`: must be `first`, `all`, or `unique_per_var`. Use `first` for expected single-hit checks.
 - `max_match`: local upper bound for this task's expected matches.
-- `branch_tags`: optional flat string map used to preserve branch identity for multi-leaf export and multi-candidate upstream selection.
+- `behavior_hint`: optional top-level short advisory text for this item. Use it to summarize the branch design or unresolved downstream ambiguity that later modules should keep in mind.
+- `handoff_hint`: optional short advisory text on a task, especially a terminal task. Use it when this leaf needs to warn downstream about unresolved slot/pipe/channel identity or similar ambiguity.
 - `$dep.<ref_name>.<signal>`: the only allowed dependency form in raw JSON. Python later rewrites it to the final `$dep.<task_id>.<signal>` form.
 
 Authoring rules:
@@ -64,11 +71,15 @@ Authoring rules:
 - If a needed value appears packed inside a bus, use a slice on the real bus instead of inventing a standalone signal.
 - When upstream and local continuity anchors are visible, a `complete` answer should include at least one same-line condition that relates both sides.
 - Keep `logging_lines` brief and verification-oriented.
+- Keep `behavior_hint` and `handoff_hint` brief and evidence-based. They are annotations on the produced artifact, not substitutes for task logic.
+- Use `handoff_hint` on terminal tasks when the path is known but a sibling slot/pipe/channel remains unresolved and downstream should avoid over-collapsing the branch design.
 
 Output rules:
 1. Output exactly one `json` code block and no other text.
 2. The JSON must include `status`, `tasks`, and `unknown`.
-3. Every task object must include `ref_name`, `task_name`, `condition_lines`, `capture_signals`, `logging_lines`, `match_mode`, and `max_match`.
+3. The JSON may additionally include optional top-level `behavior_hint`.
+4. Every task object must include `ref_name`, `dep_name`, `task_name`, `condition_lines`, `capture_signals`, `logging_lines`, `match_mode`, and `max_match`.
+5. Every task object may additionally include optional `handoff_hint`.
 """
 
 PASS3_3_3_APV_PROMPT = """
@@ -94,31 +105,34 @@ PASS3_3_3_APV_PROMPT = """
 - Reuse `lifecycle_context`, `boundary_takeover`, `boundary_handoffs`, and any confidence/unknown notes when choosing the smallest high-confidence local task chain.
 - If no valid task can be supported, return `status = "partial"`, `tasks = []`, and explain the reason in `unknown`.
 - Every task must declare a unique `ref_name`.
+- Every task must declare `dep_name`.
+- Use `dep_name = ""` only for root trigger tasks that do not reference `$dep`.
+- For dependent tasks, `dep_name` must exactly match the one unique `$dep.<ref_name>` source used in that task's `condition_lines`.
 - If you need the previous module item's leaf task, use one provided upstream `ref_name` and write the dependency as `$dep.<ref_name>.<signal>`.
-- `branch_tags` must be authored in raw JSON task objects, later persisted in `apv_index` `leaf_contexts`, and must not be materialized into runtime YAML.
-- When multiple upstream candidates are visible, pick exactly one candidate per task and copy its `branch_tags` exactly onto that task.
-- When the current item ends in multiple terminal leaves, export all of them and give each terminal leaf unique non-empty `branch_tags`.
 - If you need an earlier task from this same JSON, reference that earlier task's declared `ref_name`.
 - A local task must be declared before any later task may reference it.
 - Only reference upstream signals listed in that candidate's `capture_names`.
 - Every `$dep.<ref>.<signal>` must come from either a visible upstream candidate or an earlier declared local task, and the referenced signal must exist in that dependency's `capture_names` or declared `capture_signals`.
-- If the visible upstream candidate you need is missing `branch_tags`, do not force a `complete` tree; return `partial`.
+- `Visible Upstream Dep Handles.branch_lineage` is read-only context exported by Python. Do not mirror it or try to author it in raw JSON.
+- `Visible Upstream Dep Handles.upstream_hint` is advisory only. You may use it to understand branch design, but never treat it as proof without matching local signal evidence.
 - If the needed relation cannot be expressed with real local signals visible in the provided topology/context, return `partial` instead of inventing a new alias.
 
 ## APV Authoring Goal
 - Start from `boundary_takeover` as the authoritative ingress of this item and end at this item's instruction-relevant `boundary_handoffs`.
 - Fill in the key signal points along that route. Prefer event points that remove instruction-identity ambiguity over generic valid-only snapshots.
-- Prefer conditions that prove instruction continuity, such as PC/value alignment between two signals, rather than reducing every task to independent `== 1'b1` checks.
+- Prefer conditions that prove instruction continuity, such as PC/value alignment between two signals, rather than reducing every task to independent `== 1'b1` checks or weak `valid == valid` echoes.
 - The local event chain is not necessarily a single linear chain. Inside one item, tasks may form a small tree when different channels, selector outcomes, buffer slots, reorder cases, crossbar routes, or FSM outcomes need separate path-specific evidence.
 - Multiple later tasks may depend on the same earlier `ref_name` when they represent different local paths, but each sibling task must use conditions that explicitly distinguish that path.
 - `complete` means all resolved instruction-relevant terminal paths in this item's current context are represented and transferable downstream, not just the strongest main path.
-- Multi-leaf v2 cross-item propagation can export multiple downstream leaves. Use `branch_tags` to make branch identity explicit instead of collapsing back to one leaf.
-- If multiple upstream dep candidates are shown, any task that consumes one of them must keep branch identity exact by matching that candidate's `branch_tags`.
-- Prefer `channel` as the first `branch_tags` key. Add `slot`, `pipe`, or `buffer` only when needed to keep sibling terminal tag maps unique.
+- Multi-leaf v3 cross-item propagation can export multiple downstream leaves. Python derives downstream `branch_lineage` from the task forest instead of relying on model-authored branch metadata.
+- When the current item forks into multiple terminal tasks, keep each terminal `ref_name` unique and preserve the true dependency ancestry so Python can export unique downstream `branch_lineage`.
+- If `boundary_handoffs` exposes sibling slot/pipe/channel exits such as `inst0/inst1/inst2`, `pipe0/pipe1`, or similar parallel outputs, do not collapse them to one terminal task unless the local evidence explicitly proves which sibling carries the instruction.
+- A unique source path such as `bypass`, `ibuf`, or `lbuf` does not by itself resolve slot identity.
+- If one terminal task is still the best supported output but sibling exits remain plausible, keep the task evidence honest and use `behavior_hint` and/or terminal `handoff_hint` to warn downstream about the unresolved ambiguity.
 - Continuity anchor priority is `pc`, then `inst`, then packed data bus or bit slice, then `valid` or `vld`.
 - If local `pc`, `inst`, or data anchors are visible, a valid-only relation cannot by itself support `complete`.
 - For `ct_ifu_top` or `ct_idu_top` style relay items, a `complete` answer must include at least one same-line upstream-to-local identity relation.
-- If you cannot make branch identity explicit for every exported terminal leaf, return `partial`.
+- If you cannot express the real dependency forest cleanly with `dep_name` and valid local conditions, return `partial`.
 - When evidence is weak, keep the task local and precise; do not invent hidden state or speculative routing.
 
 ## Example Task Shape
@@ -128,54 +142,28 @@ Interpret each task's `condition_lines` as one local observation point.
 ```json
 {{
   "status": "complete",
+  "behavior_hint": "Sequential fetch stays on the bypass family here, but downstream should not assume slot identity unless this item proves whether the instruction emerges on inst0, inst1, or inst2.",
   "tasks": [
     {{
       "ref_name": "ibctrl_accept",
+      "dep_name": "pcgen_leaf",
       "task_name": "ibctrl_pc_match_and_bypass_activate",
       "condition_lines": [
         "$dep.pcgen_leaf.pcgen_ifctrl_pc == ib_vpc",
-        "ipctrl_ibctrl_vld == ib_data_vld",
-        "ibctrl_ibdp_bypass_inst_vld == bypass_inst_vld",
-        "ifu_idu_ib_pipedown_gateclk == bypass_inst_vld",
+        "ibctrl_ibdp_bypass_inst_vld == 1'b1",
+        "ifu_idu_ib_pipedown_gateclk == 1'b1",
         "ibuf_ibctrl_empty == 1'b1",
         "!ibuf_ibctrl_stall"
       ],
       "capture_signals": [
         "ib_vpc",
-        "ib_data_vld",
-        "bypass_inst_vld",
         "ibctrl_ibdp_bypass_inst_vld",
         "ifu_idu_ib_pipedown_gateclk"
       ],
-      "branch_tags": {{
-        "slot": "0",
-        "channel": "bypass"
-      }},
       "logging_lines": [
         "ADD instruction PC matches upstream fetch PC and activates bypass dispatch in ibctrl"
       ],
-      "match_mode": "first",
-      "max_match": 1
-    }},
-    {{
-      "ref_name": "ibctrl_issue",
-      "task_name": "ibctrl_issue_enable",
-      "condition_lines": [
-        "$dep.ibctrl_accept.bypass_inst_vld == issue_en",
-        "$dep.ibctrl_accept.ib_data_vld == issue_vld",
-        "issue_queue_ready == 1'b1"
-      ],
-      "capture_signals": [
-        "issue_vld",
-        "issue_en"
-      ],
-      "branch_tags": {{
-        "slot": "0",
-        "channel": "bypass"
-      }},
-      "logging_lines": [
-        "ibctrl reuses the accepted bypass instruction to drive local issue enable"
-      ],
+      "handoff_hint": "This leaf proves bypass-family dispatch only. Downstream still needs local evidence before assuming a specific slot/channel mapping.",
       "match_mode": "first",
       "max_match": 1
     }}
@@ -187,34 +175,36 @@ Interpret each task's `condition_lines` as one local observation point.
 ## Example Walkthrough
 - `ibctrl_accept` is a dependent trace-style task. APV starts from the matched time point of upstream `pcgen_leaf`, then searches later-or-same-cycle candidate time points until all condition lines of `ibctrl_accept` hold together.
 - In `ibctrl_accept`, `$dep.pcgen_leaf.pcgen_ifctrl_pc == ib_vpc` is the continuity anchor. `$dep.pcgen_leaf.pcgen_ifctrl_pc` is the PC value captured and persisted when `pcgen_leaf` matched; `ib_vpc` is evaluated at the current candidate time point of `ibctrl_accept`.
-- The other `ibctrl_accept` conditions such as `ipctrl_ibctrl_vld == ib_data_vld` and `!ibuf_ibctrl_stall` are not separate mini-steps. They are additional predicates that must be true at that same candidate time point for this one task to match.
-- When `ibctrl_accept` matches, APV samples and persists the listed `capture_signals` at that matched time point. Those captured values become the only values later tasks may read through `$dep.ibctrl_accept.<signal>`.
-- `ibctrl_issue` shows the next step in the chain. For each matched row of `ibctrl_accept`, APV searches forward from the `ibctrl_accept` matched time point and evaluates `ibctrl_issue` at each candidate time point.
-- In `ibctrl_issue`, `$dep.ibctrl_accept.bypass_inst_vld == issue_en` and `$dep.ibctrl_accept.ib_data_vld == issue_vld` compare historical captured values from `ibctrl_accept` against local signals at the current `ibctrl_issue` candidate time point. This is why `$dep` preserves instruction identity across tasks instead of re-sampling the old signal in the present.
-- Both example tasks use `match_mode = "first"`, so for each upstream matched row APV keeps only the first candidate time point that satisfies the current task, then stops searching for more matches from that same upstream row.
-- The example is split into two tasks because "accept into ibctrl" and "drive local issue enable" are modeled as two verification steps that may occur at different matched time points. If one observation point could already prove both facts clearly, one task would be enough.
-- Each example task references only one dependency `ref_name`. That is required: a single task may read multiple captured signals from one dependency, but it must not mix multiple different dependency sources in the same task.
-- In this multi-leaf v2 protocol, both example tasks carry the same `branch_tags` so downstream items can keep this bypass path distinct from sibling branches.
+- The other `ibctrl_accept` conditions such as `ibctrl_ibdp_bypass_inst_vld == 1'b1` and `!ibuf_ibctrl_stall` are local gating predicates that must be true at that same candidate time point. They support the route, but they are not the identity anchor.
+- When `ibctrl_accept` matches, APV samples and persists the listed `capture_signals` at that matched time point.
+- This example intentionally stays as one task because one matched observation point already proves the local handoff. Do not split a chain into extra tasks whose only new relation would be `valid == valid`.
+- If a later task is truly required, it should continue using captured PC, instruction, or data anchors from `ibctrl_accept` rather than relying only on echoed valid bits.
+- The example task uses `match_mode = "first"`, so for each upstream matched row APV keeps only the first candidate time point that satisfies the current task, then stops searching for more matches from that same upstream row.
+- The example task references only one dependency `ref_name`, and its `dep_name` matches that dependency exactly. That is required: a single task may read multiple captured signals from one dependency, but it must not mix multiple different dependency sources in the same task.
+- Python later derives the downstream `branch_lineage` from this dependency chain, so the model does not author any branch metadata here.
+- If present, `behavior_hint` is the item-level summary and `handoff_hint` is the leaf-level reminder for downstream; both are advisory annotations only.
 
 ## Branching Walkthrough
 - The local event chain is not necessarily a single linear chain. If the current module can route the same instruction through multiple local channels or selector-controlled paths, use multiple sibling tasks that all depend on one earlier parent task.
 - Example: a parent `dispatch_entry` task may branch into `to_buf0` and `to_buf1`. Both depend on `dispatch_entry`, but one uses `buf_sel == 2'b00` and the other uses `buf_sel == 2'b01`.
 - This kind of branching is valid inside one module item because the sibling tasks use different conditions to make the path distinction explicit.
 - Use branching to cover all resolved instruction-relevant paths in the current item, especially around branch, buffer, reorder, crossbar, arbitration, or FSM-controlled ambiguity points.
-- If both sibling branches remain terminal exits of the current item, keep both leaves and give each one unique non-empty `branch_tags` so downstream continuation can stay branch-accurate.
+- If both sibling branches remain terminal exits of the current item, keep both leaves with unique `ref_name` values and correct dependency ancestry so Python can export unique downstream `branch_lineage`.
+- If the item cannot yet resolve which sibling slot/pipe/channel is the real carrier, do not pretend the ambiguity vanished; keep multiple leaves when evidence supports them, or annotate the surviving leaf with `handoff_hint` and keep status conservative when needed.
 
 ## Multi-leaf Completeness Examples
-- Good `pcgen` pattern: one parent task fans out into `pcgen_ifctrl`, `pcgen_icache`, `pcgen_btb`, and `pcgen_bht`, and every terminal leaf exports unique non-empty `branch_tags` such as `{{"channel":"ifctrl"}}`, `{{"channel":"icache"}}`, `{{"channel":"btb"}}`, and `{{"channel":"bht"}}`.
+- Good `pcgen` pattern: one parent task fans out into `pcgen_ifctrl`, `pcgen_icache`, `pcgen_btb`, and `pcgen_bht`, and every terminal leaf keeps a unique `ref_name` so Python can export unique downstream `branch_lineage`.
 - A `complete` answer must cover all resolved terminal paths, not just the visually strongest path.
-- Bad `pcgen` pattern: if any exported terminal leaf is missing `branch_tags`, the item must return `partial` instead of pretending the tree is complete.
-- Prefer `channel` first in `branch_tags`; add `slot`, `pipe`, or `buffer` only when needed to make sibling terminal leaves unique.
+- Bad `pcgen` pattern: if sibling terminal tasks collapse onto one ambiguous dependency chain or reuse the same `ref_name`, the item must return `partial` instead of pretending the tree is complete.
+- Bad `ibdp` pattern: `boundary_handoffs` exposes `inst0/inst1/inst2`, but the answer emits only one `inst0` leaf because the upstream path was `bypass`. `bypass` family selection alone does not prove slot identity.
+- Prefer short stable `ref_name` values that make the branch split obvious, such as `pcgen_ifctrl_leaf` or `pcgen_btb_leaf`.
 
 ## Local Dependency Discipline
 - A local task must be declared before any later task may reference it.
-- Good `ibctrl` pattern: declare `ibctrl_ingress` first, then let `bypass_leaf`, `ibuf_leaf`, and `lbuf_leaf` depend on `$dep.ibctrl_ingress.accept_vld` with path-specific conditions.
-- Bad `ibctrl` pattern: if `bypass_leaf` references `$dep.ibctrl_ingress.accept_vld` before `ibctrl_ingress` is declared, delete that task and return `partial`.
+- Good `ibctrl` pattern: declare `ibctrl_ingress` first, then let `bypass_leaf`, `ibuf_leaf`, and `lbuf_leaf` depend on `$dep.ibctrl_ingress.accept_pc` with path-specific conditions.
+- Bad `ibctrl` pattern: if `bypass_leaf` references `$dep.ibctrl_ingress.accept_pc` before `ibctrl_ingress` is declared, delete that task and return `partial`.
 - Do not mix multiple dependency sources in one task.
-- If the visible upstream candidate you need is missing `branch_tags`, do not force a `complete` tree; return `partial`.
+- Every dependent task must set `dep_name` to the one unique dependency `ref_name` it uses in `$dep.<ref_name>.<signal>` terms.
 
 ## Continuity Anchor Guidance
 - Prefer anchors in this order: `pc`, `inst`, packed data bus or bit slice, then `valid` or `vld`.
@@ -222,13 +212,18 @@ Interpret each task's `condition_lines` as one local observation point.
 - Good: `$dep.prev.inst0_pc == ibuf_ibdp_inst0_pc`
 - Weak-only example: `$dep.prev.inst0_vld == ifu_idu_ib_inst0_vld`
 - If local `pc`, `inst`, or data anchors are visible, a valid-only relation may assist a task but cannot by itself support `complete`.
+- Avoid turning that weak-only pattern into the main example task shape unless no stronger anchor exists and the answer remains `partial`.
 
 ## Pre-output Self-check
 - Before final JSON, verify each of the following.
-- If the current item exports multiple terminal leaves, every terminal task has unique non-empty `branch_tags`.
+- Every task declares `dep_name`.
+- Every root task uses `dep_name = ""` and no `$dep` references.
+- Every dependent task uses exactly one unique `$dep.<ref_name>` source and its `dep_name` matches that source exactly.
+- If the current item exports multiple terminal leaves, every terminal task keeps a unique `ref_name` and unique dependency ancestry so Python can export unique downstream `branch_lineage`.
 - Each task depends on at most one `ref_name`.
 - Every `$dep.<ref>.<signal>` comes from a visible upstream candidate or an earlier declared local task.
 - Every referenced dependency signal appears in that dependency's `capture_names` or declared `capture_signals`.
 - If you output `complete`, at least one same-line continuity condition directly ties an upstream anchor to a local anchor.
+- If you rely on `behavior_hint`, `handoff_hint`, or `upstream_hint`, confirm they only explain ambiguity and do not replace any required signal evidence.
 - If any step lacks enough evidence, delete that speculative task and return `partial` instead of keeping a guessed chain.
 """

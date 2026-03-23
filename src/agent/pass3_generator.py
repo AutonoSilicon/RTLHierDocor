@@ -1872,7 +1872,7 @@ class Pass3Generator:
 
             json_payload = {
                 **parsed_search,
-                "schema_version": "pass3_3_instrack_apv_v2",
+                "schema_version": "pass3_3_instrack_apv_v4",
                 "orchestrate_index_artifact_json": artifact_orchestrate_index_json,
                 "apv_index_artifact_json": artifact_apv_index_json if apv_enabled else "",
                 "apv_status": apv_status,
@@ -1885,7 +1885,7 @@ class Pass3Generator:
                 artifact_json,
                 json_text,
                 input_hash=apv_index_input_hash if apv_enabled else orchestrate_input_hash,
-                meta={"source": artifact_md, "parser": "instrack_apv_v2"},
+                meta={"source": artifact_md, "parser": "instrack_apv_v4"},
             )
 
             index_entries.append({

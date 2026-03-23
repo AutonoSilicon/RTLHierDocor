@@ -93,7 +93,7 @@ class Pass3InStrackAPV:
             index_payload = {
                 "instruction": instruction,
                 "start_module": parsed_search.get("start_module", ""),
-                "schema_version": "pass3_3_3_apv_index_v2",
+                "schema_version": "pass3_3_3_apv_index_v4",
                 "status": "failed",
                 "error": error,
                 "items": [],
@@ -136,7 +136,7 @@ class Pass3InStrackAPV:
         index_payload = {
             "instruction": instruction,
             "start_module": parsed_search.get("start_module", ""),
-            "schema_version": "pass3_3_3_apv_index_v2",
+            "schema_version": "pass3_3_3_apv_index_v4",
             "items": items,
         }
         index_text = json.dumps(index_payload, ensure_ascii=False, indent=2)
@@ -228,6 +228,7 @@ class Pass3InStrackAPV:
                 artifact_yaml=artifact_yaml,
                 artifact_raw=artifact_raw,
                 tasks=[],
+                behavior_hint="",
                 input_hash=item_input_hash,
                 token_stats={},
             )
@@ -287,6 +288,7 @@ class Pass3InStrackAPV:
         parsed_payload = self._parse_model_payload(raw_text)
         status = str(parsed_payload.get("status") or "partial").strip().lower()
         unknown = list(parsed_payload.get("unknown") or [])
+        behavior_hint = self._normalize_hint_text(parsed_payload.get("behavior_hint"))
         tasks, task_errors = self._materialize_tasks(
             top_node=top_node,
             item=item,
@@ -334,6 +336,7 @@ class Pass3InStrackAPV:
             artifact_yaml=artifact_yaml,
             artifact_raw=artifact_raw,
             tasks=tasks,
+            behavior_hint=behavior_hint,
             input_hash=item_input_hash,
             token_stats=token_stats,
         )
@@ -351,6 +354,7 @@ class Pass3InStrackAPV:
 
         unknown = self._normalize_unknown(payload.get("unknown"))
         status = str(payload.get("status") or "partial").strip().lower()
+        behavior_hint = self._normalize_hint_text(payload.get("behavior_hint"))
         if status not in {"complete", "partial"}:
             unknown.append(f"Unsupported APV status: {status or '<empty>'}.")
             status = "partial"
@@ -362,6 +366,7 @@ class Pass3InStrackAPV:
             "status": status,
             "tasks": tasks,
             "unknown": unknown,
+            "behavior_hint": behavior_hint,
         }
 
     def _materialize_tasks(
@@ -380,7 +385,6 @@ class Pass3InStrackAPV:
         errors: List[str] = []
         dep_symbols: Dict[str, Dict[str, Any]] = {}
         normalized_previous_leaf_contexts = self._normalize_leaf_context_list(previous_leaf_contexts)
-        multiple_upstream_candidates = len(normalized_previous_leaf_contexts) > 1
         trusted_local_signal_catalog = bool((local_signal_guidance or {}).get("trusted_local_signal_catalog"))
         allowed_local_signals = set((local_signal_guidance or {}).get("allowed_local_signals") or [])
         for previous_leaf_context in normalized_previous_leaf_contexts:
@@ -392,7 +396,7 @@ class Pass3InStrackAPV:
                     ref_name=upstream_ref_name,
                     task_id=upstream_task_id,
                     capture_names=upstream_capture_names,
-                    branch_tags=dict(previous_leaf_context.get("branch_tags") or {}),
+                    branch_lineage=list(previous_leaf_context.get("branch_lineage") or []),
                     item=previous_leaf_context,
                     source="upstream",
                 )
@@ -420,11 +424,13 @@ class Pass3InStrackAPV:
                 if raw_task.get("logging_lines") is not None
                 else raw_task.get("logging")
             )
+            handoff_hint = self._normalize_hint_text(raw_task.get("handoff_hint"))
+            dep_name_raw = raw_task.get("dep_name") if "dep_name" in raw_task else None
+            dep_name = str(dep_name_raw or "").strip() if dep_name_raw is not None else ""
             raw_match_mode = str(raw_task.get("match_mode") or "first").strip().lower()
             match_mode = self._MATCH_MODE_ALIASES.get(raw_match_mode, raw_match_mode)
             legacy_dep_source = str(raw_task.get("dep_source") or "").strip()
             legacy_dep_leaf_name = str(raw_task.get("dep_leaf_name") or "").strip()
-            branch_tags, branch_tag_errors = self._normalize_branch_tags(raw_task.get("branch_tags"))
 
             try:
                 max_match = int(raw_task.get("max_match", 0))
@@ -446,6 +452,8 @@ class Pass3InStrackAPV:
                 task_errors.append(
                     f"Task `{task_name or task_index}` uses duplicate `ref_name={ref_name}` which is already visible in the dep namespace."
                 )
+            if dep_name_raw is None:
+                task_errors.append(f"Task `{task_name or task_index}` is missing `dep_name`.")
             if not task_name:
                 task_errors.append(f"Task #{task_index + 1} is missing `task_name`.")
             if not condition_lines:
@@ -460,7 +468,6 @@ class Pass3InStrackAPV:
                 )
             if max_match < 0:
                 task_errors.append(f"Task `{task_name or task_index}` uses negative `max_match`.")
-            task_errors.extend(branch_tag_errors)
 
             if task_errors:
                 errors.extend(task_errors)
@@ -485,6 +492,8 @@ class Pass3InStrackAPV:
                 if isinstance(future_task, dict)
             }
             dep_task_id = ""
+            dep_symbol: Optional[Dict[str, Any]] = None
+            dep_ref_name = dep_ref_names[0] if len(dep_ref_names) == 1 else ""
             if bare_dep_refs:
                 task_errors.append(
                     f"Task `{task_name}` must use full `$dep.<ref_name>.<signal>` references in `condition_lines`, got bare refs: {', '.join(bare_dep_refs)}."
@@ -493,22 +502,33 @@ class Pass3InStrackAPV:
                 task_errors.append(
                     f"Task `{task_name}` must reference at most one unique dep `ref_name` in `condition_lines`, got: {', '.join(dep_ref_names)}."
                 )
-            elif dep_ref_names:
-                dep_ref_name = dep_ref_names[0]
-                dep_symbol = dep_symbols.get(dep_ref_name)
+            elif dep_name and not dep_ref_name:
+                task_errors.append(
+                    f"Task `{task_name}` declares `dep_name={dep_name}` but has no `$dep.<ref_name>.<signal>` reference in `condition_lines`."
+                )
+            elif dep_ref_name and not dep_name:
+                task_errors.append(
+                    f"Task `{task_name}` references `$dep.{dep_ref_name}.*` but must declare matching `dep_name`."
+                )
+            elif dep_ref_name and dep_name and dep_ref_name != dep_name:
+                task_errors.append(
+                    f"Task `{task_name}` declares `dep_name={dep_name}` but its `condition_lines` reference `$dep.{dep_ref_name}.*`."
+                )
+            elif dep_name:
+                dep_symbol = dep_symbols.get(dep_name)
                 if not dep_symbol:
                     available_ref_names = ", ".join(sorted(dep_symbols.keys())) or "<none>"
-                    if self._TASK_ID_LIKE_RE.fullmatch(dep_ref_name):
+                    if self._TASK_ID_LIKE_RE.fullmatch(dep_name):
                         task_errors.append(
-                            f"Task `{task_name}` must not emit final `$dep.<task_id>.<signal>` references in raw APV JSON; use a declared `ref_name` instead of `{dep_ref_name}`."
+                            f"Task `{task_name}` must not emit final `$dep.<task_id>.<signal>` references in raw APV JSON; use a declared `ref_name` instead of `{dep_name}`."
                         )
-                    elif dep_ref_name in future_ref_names:
+                    elif dep_name in future_ref_names:
                         task_errors.append(
-                            f"Task `{task_name}` forward-references `ref_name={dep_ref_name}` before that task is declared."
+                            f"Task `{task_name}` forward-references `ref_name={dep_name}` before that task is declared."
                         )
                     else:
                         task_errors.append(
-                            f"Task `{task_name}` references unknown dep `ref_name={dep_ref_name}`; available: {available_ref_names}."
+                            f"Task `{task_name}` references unknown dep `ref_name={dep_name}`; available: {available_ref_names}."
                         )
                 else:
                     dep_task_id = str(dep_symbol.get("task_id") or "").strip()
@@ -517,46 +537,28 @@ class Pass3InStrackAPV:
                         {
                             capture_name
                             for current_ref_name, capture_name in dep_references
-                            if current_ref_name == dep_ref_name and capture_name not in available_capture_names
+                            if current_ref_name == dep_name and capture_name not in available_capture_names
                         }
                     )
                     if missing_capture_names:
                         task_errors.append(
-                            f"Task `{task_name}` references unknown dep capture name(s) for `ref_name={dep_ref_name}`: {', '.join(missing_capture_names)}; available: {', '.join(available_capture_names)}."
+                            f"Task `{task_name}` references unknown dep capture name(s) for `ref_name={dep_name}`: {', '.join(missing_capture_names)}; available: {', '.join(available_capture_names)}."
                         )
                     if not dep_task_id:
                         task_errors.append(
-                            f"Task `{task_name}` is missing the resolved upstream task id for `ref_name={dep_ref_name}`."
+                            f"Task `{task_name}` is missing the resolved upstream task id for `ref_name={dep_name}`."
                         )
-                    dep_source = str(dep_symbol.get("source") or "").strip()
-                    dep_branch_tags = dict(dep_symbol.get("branch_tags") or {})
-                    if dep_source == "upstream" and multiple_upstream_candidates:
-                        if not dep_branch_tags:
-                            task_errors.append(
-                                f"Task `{task_name}` depends on upstream candidate `ref_name={dep_ref_name}` "
-                                "but that visible candidate is missing `branch_tags`, so branch identity is ambiguous."
-                            )
-                        elif not branch_tags:
-                            task_errors.append(
-                                f"Task `{task_name}` must declare non-empty `branch_tags` when selecting one of multiple "
-                                f"upstream dep candidates; selected candidate `ref_name={dep_ref_name}` has {self._format_branch_tags(dep_branch_tags)}."
-                            )
-                        elif branch_tags != dep_branch_tags:
-                            task_errors.append(
-                                f"Task `{task_name}` declares `branch_tags={self._format_branch_tags(branch_tags)}` "
-                                f"but selected upstream candidate `ref_name={dep_ref_name}` uses {self._format_branch_tags(dep_branch_tags)}."
-                            )
-                if legacy_dep_source:
-                    task_errors.append(
-                        f"Task `{task_name}` must not emit legacy `dep_source={legacy_dep_source}`; use `$dep.<ref_name>.<signal>` references only."
-                    )
-                if legacy_dep_leaf_name:
-                    task_errors.append(
-                        f"Task `{task_name}` must not emit legacy `dep_leaf_name={legacy_dep_leaf_name}`; use `$dep.<ref_name>.<signal>` references only."
-                    )
             elif legacy_dep_source or legacy_dep_leaf_name:
                 task_errors.append(
                     f"Task `{task_name}` declares legacy dependency fields without any `$dep.<ref_name>.<signal>` reference in `condition_lines`."
+                )
+            if legacy_dep_source:
+                task_errors.append(
+                    f"Task `{task_name}` must not emit legacy `dep_source={legacy_dep_source}`; use `dep_name` plus `$dep.<ref_name>.<signal>` references only."
+                )
+            if legacy_dep_leaf_name:
+                task_errors.append(
+                    f"Task `{task_name}` must not emit legacy `dep_leaf_name={legacy_dep_leaf_name}`; use `dep_name` plus `$dep.<ref_name>.<signal>` references only."
                 )
 
             if task_errors:
@@ -599,11 +601,13 @@ class Pass3InStrackAPV:
             if not capture_names:
                 errors.append(f"Task `{task_name}` does not expose any usable capture names.")
                 continue
+            branch_lineage = self._derive_branch_lineage(dep_symbol=dep_symbol, ref_name=ref_name)
 
             tasks.append(
                 {
                     "id": task_id,
                     "ref_name": ref_name,
+                    "dep_name": dep_name,
                     "task_name": task_name,
                     "depends_on": dep_task_id,
                     "condition_lines": normalized_conditions,
@@ -612,14 +616,16 @@ class Pass3InStrackAPV:
                     "match_mode": match_mode,
                     "max_match": max_match,
                     "capture_names": capture_names,
-                    "branch_tags": branch_tags,
+                    "branch_lineage": branch_lineage,
+                    "handoff_hint": handoff_hint,
                 }
             )
             dep_symbols[ref_name] = self._build_dep_symbol(
                 ref_name=ref_name,
                 task_id=task_id,
                 capture_names=capture_names,
-                branch_tags=branch_tags,
+                branch_lineage=branch_lineage,
+                upstream_hint=handoff_hint,
                 item=item,
                 source="local",
             )
@@ -641,7 +647,7 @@ class Pass3InStrackAPV:
         errors: List[str] = []
         terminal_tasks = self._terminal_tasks(tasks)
         if len(terminal_tasks) > 1:
-            seen_branch_tags: Set[str] = set()
+            seen_branch_lineages: Set[str] = set()
             for task in terminal_tasks:
                 capture_names = list(task.get("capture_names") or [])
                 if not capture_names:
@@ -650,21 +656,21 @@ class Pass3InStrackAPV:
                         "does not expose any capture names and cannot be exported as a downstream leaf."
                     )
                     continue
-                branch_tags = dict(task.get("branch_tags") or {})
-                if not branch_tags:
+                branch_lineage = list(task.get("branch_lineage") or [])
+                if not branch_lineage:
                     errors.append(
                         f"Terminal task `{str(task.get('task_name') or task.get('ref_name') or task.get('id') or '<unknown>').strip()}` "
-                        "must declare non-empty `branch_tags` when the current item exports multiple terminal leaves."
+                        "does not expose a usable `branch_lineage` for downstream export."
                     )
                     continue
-                branch_key = self._branch_tags_key(branch_tags)
-                if branch_key in seen_branch_tags:
+                branch_key = self._branch_lineage_key(branch_lineage)
+                if branch_key in seen_branch_lineages:
                     errors.append(
                         f"Terminal task `{str(task.get('task_name') or task.get('ref_name') or task.get('id') or '<unknown>').strip()}` "
-                        f"reuses duplicate `branch_tags={self._format_branch_tags(branch_tags)}` within one multi-leaf item."
+                        f"reuses duplicate `branch_lineage={self._format_branch_lineage(branch_lineage)}` within one multi-leaf item."
                     )
                     continue
-                seen_branch_tags.add(branch_key)
+                seen_branch_lineages.add(branch_key)
 
         leaf_contexts = self._normalize_leaf_context_list(previous_leaf_contexts)
         upstream_anchor_map = dict((local_signal_guidance or {}).get("preferred_upstream_anchor_names_by_task_id") or {})
@@ -973,6 +979,13 @@ class Pass3InStrackAPV:
         text = str(value or "").strip()
         return [text] if text else []
 
+    @staticmethod
+    def _normalize_hint_text(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return " ".join(text.split())
+
     def _build_current_item_context(self, item: Dict[str, Any]) -> Dict[str, Any]:
         payload = dict(item.get("orchestration") or {})
         lifecycle_context = str(payload.get("lifecycle_context") or "").strip()
@@ -1006,7 +1019,8 @@ class Pass3InStrackAPV:
                 "ref_name": str(candidate.get("ref_name") or "").strip(),
                 "task_id": str(candidate.get("task_id") or "").strip(),
                 "capture_names": list(candidate.get("capture_names") or []),
-                "branch_tags": dict(candidate.get("branch_tags") or {}),
+                "branch_lineage": list(candidate.get("branch_lineage") or []),
+                "upstream_hint": self._normalize_hint_text(candidate.get("upstream_hint")),
                 "module": str(candidate.get("module") or "").strip(),
                 "instance": str(candidate.get("instance") or "").strip(),
                 "path": str(candidate.get("path") or "").strip(),
@@ -1024,15 +1038,17 @@ class Pass3InStrackAPV:
         ref_name: str,
         task_id: str,
         capture_names: List[str],
-        branch_tags: Optional[Dict[str, str]],
+        branch_lineage: Optional[List[str]],
         item: Dict[str, Any],
         source: str,
+        upstream_hint: str = "",
     ) -> Dict[str, Any]:
         return {
             "ref_name": str(ref_name or "").strip(),
             "task_id": str(task_id or "").strip(),
             "capture_names": list(capture_names or []),
-            "branch_tags": dict(branch_tags or {}),
+            "branch_lineage": list(branch_lineage or []),
+            "upstream_hint": self._normalize_hint_text(upstream_hint),
             "module": str(item.get("module") or "").strip(),
             "instance": str(item.get("instance") or "").strip(),
             "path": self._item_path(item),
@@ -1071,7 +1087,7 @@ class Pass3InStrackAPV:
                 "ref_name": ref_name,
                 "task_id": task_id,
                 "capture_names": capture_names,
-                "branch_tags": {},
+                "branch_lineage": [ref_name],
                 "module": str(entry.get("module") or "").strip(),
                 "instance": str(entry.get("instance") or "").strip(),
                 "path": str(entry.get("path") or "").strip(),
@@ -1083,6 +1099,7 @@ class Pass3InStrackAPV:
         cached = dict(entry or {})
         cached.setdefault("status", "partial")
         cached.setdefault("unknown", [])
+        cached.setdefault("behavior_hint", "")
         cached.setdefault("artifact_yaml", artifact_yaml)
         cached.setdefault("artifact_raw", artifact_raw)
         cached.setdefault("task_ids", [])
@@ -1098,7 +1115,8 @@ class Pass3InStrackAPV:
                     "task_id": str(cached.get("leaf_task_id") or "").strip(),
                     "ref_name": str(cached.get("leaf_ref_name") or "").strip(),
                     "capture_names": list(cached.get("leaf_capture_names") or []),
-                    "branch_tags": {},
+                    "branch_lineage": [str(cached.get("leaf_ref_name") or "").strip()],
+                    "upstream_hint": "",
                     "module": str(cached.get("module") or "").strip(),
                     "instance": str(cached.get("instance") or "").strip(),
                     "path": str(cached.get("path") or "").strip(),
@@ -1115,10 +1133,15 @@ class Pass3InStrackAPV:
         artifact_yaml: str,
         artifact_raw: str,
         tasks: List[Dict[str, Any]],
+        behavior_hint: str,
         input_hash: str,
         token_stats: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        leaf_contexts = self._build_leaf_contexts_from_tasks(item=item, tasks=tasks)
+        leaf_contexts = self._build_leaf_contexts_from_tasks(
+            item=item,
+            tasks=tasks,
+            behavior_hint=behavior_hint,
+        )
         single_leaf_context = leaf_contexts[0] if len(leaf_contexts) == 1 else None
         return {
             "module": str(item.get("module") or "").strip(),
@@ -1126,6 +1149,7 @@ class Pass3InStrackAPV:
             "path": self._item_path(item),
             "status": status,
             "unknown": list(unknown or []),
+            "behavior_hint": self._normalize_hint_text(behavior_hint),
             "artifact_yaml": artifact_yaml,
             "artifact_raw": artifact_raw,
             "task_ids": [task["id"] for task in tasks],
@@ -1139,7 +1163,13 @@ class Pass3InStrackAPV:
             "token_stats": dict(token_stats or {}),
         }
 
-    def _build_leaf_contexts_from_tasks(self, *, item: Dict[str, Any], tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _build_leaf_contexts_from_tasks(
+        self,
+        *,
+        item: Dict[str, Any],
+        tasks: List[Dict[str, Any]],
+        behavior_hint: str = "",
+    ) -> List[Dict[str, Any]]:
         leaf_contexts: List[Dict[str, Any]] = []
         for task in self._terminal_tasks(tasks):
             task_id = str(task.get("id") or "").strip()
@@ -1147,12 +1177,14 @@ class Pass3InStrackAPV:
             capture_names = list(task.get("capture_names") or [])
             if not task_id or not ref_name or not capture_names:
                 continue
+            upstream_hint = self._normalize_hint_text(task.get("handoff_hint")) or self._normalize_hint_text(behavior_hint)
             leaf_contexts.append(
                 {
                     "task_id": task_id,
                     "ref_name": ref_name,
                     "capture_names": capture_names,
-                    "branch_tags": dict(task.get("branch_tags") or {}),
+                    "branch_lineage": list(task.get("branch_lineage") or []),
+                    "upstream_hint": upstream_hint,
                     "module": str(item.get("module") or "").strip(),
                     "instance": str(item.get("instance") or "").strip(),
                     "path": self._item_path(item),
@@ -1168,7 +1200,10 @@ class Pass3InStrackAPV:
             task_id = str(entry.get("task_id") or "").strip()
             ref_name = str(entry.get("ref_name") or "").strip()
             capture_names = self._coerce_string_list(entry.get("capture_names"))
-            branch_tags, _ = self._normalize_branch_tags(entry.get("branch_tags"))
+            branch_lineage = self._coerce_string_list(entry.get("branch_lineage"))
+            upstream_hint = self._normalize_hint_text(entry.get("upstream_hint"))
+            if ref_name and not branch_lineage:
+                branch_lineage = [ref_name]
             if not task_id or not ref_name or not capture_names:
                 continue
             normalized.append(
@@ -1176,36 +1211,14 @@ class Pass3InStrackAPV:
                     "task_id": task_id,
                     "ref_name": ref_name,
                     "capture_names": capture_names,
-                    "branch_tags": branch_tags,
+                    "branch_lineage": branch_lineage,
+                    "upstream_hint": upstream_hint,
                     "module": str(entry.get("module") or "").strip(),
                     "instance": str(entry.get("instance") or "").strip(),
                     "path": str(entry.get("path") or "").strip(),
                 }
             )
         return normalized
-
-    def _normalize_branch_tags(self, value: Any) -> (Dict[str, str], List[str]):
-        if value is None or value == "":
-            return {}, []
-        if not isinstance(value, dict):
-            return {}, ["`branch_tags` must be a flat string map when provided."]
-
-        branch_tags: Dict[str, str] = {}
-        errors: List[str] = []
-        for raw_key, raw_value in value.items():
-            key = str(raw_key or "").strip()
-            if not key:
-                errors.append("`branch_tags` keys must be non-empty strings.")
-                continue
-            if isinstance(raw_value, (dict, list, tuple, set)):
-                errors.append(f"`branch_tags.{key}` must be a string value, not a nested object.")
-                continue
-            val = str(raw_value or "").strip()
-            if not val:
-                errors.append(f"`branch_tags.{key}` must be a non-empty string.")
-                continue
-            branch_tags[key] = val
-        return branch_tags, errors
 
     def _detect_candidate_overflow(self, previous_leaf_contexts: Optional[List[Dict[str, Any]]]) -> str:
         count = len(self._normalize_leaf_context_list(previous_leaf_contexts))
@@ -1226,11 +1239,25 @@ class Pass3InStrackAPV:
         return sorted(path for path, count in counts.items() if count > 1)
 
     @staticmethod
-    def _branch_tags_key(branch_tags: Dict[str, str]) -> str:
-        return json.dumps(dict(branch_tags or {}), ensure_ascii=False, sort_keys=True)
+    def _branch_lineage_key(branch_lineage: List[str]) -> str:
+        return json.dumps(list(branch_lineage or []), ensure_ascii=False)
 
-    def _format_branch_tags(self, branch_tags: Dict[str, str]) -> str:
-        return self._branch_tags_key(branch_tags)
+    def _format_branch_lineage(self, branch_lineage: List[str]) -> str:
+        return self._branch_lineage_key(branch_lineage)
+
+    def _derive_branch_lineage(self, *, dep_symbol: Optional[Dict[str, Any]], ref_name: str) -> List[str]:
+        normalized_ref_name = str(ref_name or "").strip()
+        if not dep_symbol:
+            return [normalized_ref_name] if normalized_ref_name else []
+
+        parent_lineage = self._coerce_string_list(dep_symbol.get("branch_lineage"))
+        if not parent_lineage:
+            parent_ref_name = str(dep_symbol.get("ref_name") or "").strip()
+            if parent_ref_name:
+                parent_lineage = [parent_ref_name]
+        if normalized_ref_name:
+            return parent_lineage + [normalized_ref_name]
+        return parent_lineage
 
     def _build_task_id(self, *, item: Dict[str, Any], item_index: int, task_index: int) -> str:
         instance_slug = self.g._safe_slug(str(item.get("instance") or item.get("module") or "inst")).lower()

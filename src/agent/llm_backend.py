@@ -10,6 +10,7 @@ import datetime
 import json
 import time
 import traceback
+import inspect
 from typing import List, Optional, Any, Dict, Tuple
 
 from .llm_toolcall import ToolCallback, build_tool_round_messages
@@ -131,6 +132,8 @@ class LLMBackend:
                     }
                     if use_thinking:
                         kwargs["extra_body"] = {"enable_thinking": True}
+                        kwargs["stream"] = True
+                        kwargs["stream_options"] = {"include_usage": True}
                     if tool_mode:
                         kwargs["tools"] = tools
                         kwargs["tool_choice"] = "auto"
@@ -140,12 +143,18 @@ class LLMBackend:
                         self.client.chat.completions.create(**kwargs),
                         timeout=timeout_sec,
                     )
-                    assistant_message = response.choices[0].message
-
-                    if hasattr(response, "usage") and response.usage:
-                        aggregated["input_tokens"] += int(getattr(response.usage, "prompt_tokens", 0) or 0)
-                        aggregated["output_tokens"] += int(getattr(response.usage, "completion_tokens", 0) or 0)
-                        aggregated["total_tokens"] += int(getattr(response.usage, "total_tokens", 0) or 0)
+                    if use_thinking:
+                        assistant_message, streamed_thinking = await self._consume_streaming_chat_completion(
+                            response,
+                            aggregated,
+                        )
+                    else:
+                        assistant_message = response.choices[0].message
+                        streamed_thinking = ""
+                        if hasattr(response, "usage") and response.usage:
+                            aggregated["input_tokens"] += int(getattr(response.usage, "prompt_tokens", 0) or 0)
+                            aggregated["output_tokens"] += int(getattr(response.usage, "completion_tokens", 0) or 0)
+                            aggregated["total_tokens"] += int(getattr(response.usage, "total_tokens", 0) or 0)
 
                     tool_calls = getattr(assistant_message, "tool_calls", None)
                     if tool_mode and tool_calls:
@@ -178,6 +187,8 @@ class LLMBackend:
 
                     # Final assistant content (no tool calls)
                     final_text = assistant_message.content or ""
+                    if streamed_thinking:
+                        self._append_thinking_to_log(streamed_thinking, log_path)
                     self._append_final_response_to_log(final_text, log_path)
                     break
 
@@ -237,6 +248,65 @@ class LLMBackend:
                     "output_tokens": 0,
                     "total_tokens": 0,
                 }
+
+    async def _consume_streaming_chat_completion(
+        self,
+        response_stream: Any,
+        aggregated: Dict[str, int],
+    ) -> Tuple[Any, str]:
+        """Collect streamed reasoning/content deltas into a message-like object."""
+        reasoning_parts: List[str] = []
+        content_parts: List[str] = []
+        final_message: Any = None
+
+        async for chunk in self._aiter_response_stream(response_stream):
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                    aggregated["input_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
+                    aggregated["output_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
+                    aggregated["total_tokens"] += int(getattr(usage, "total_tokens", 0) or 0)
+                continue
+
+            delta = getattr(choices[0], "delta", None)
+            if delta is not None:
+                reasoning_delta = getattr(delta, "reasoning_content", None)
+                if reasoning_delta:
+                    reasoning_parts.append(str(reasoning_delta))
+                content_delta = getattr(delta, "content", None)
+                if content_delta:
+                    content_parts.append(str(content_delta))
+
+            message = getattr(choices[0], "message", None)
+            if message is not None:
+                final_message = message
+
+        if final_message is None:
+            final_message = type("StreamedAssistantMessage", (), {})()
+        if not getattr(final_message, "content", None):
+            final_message.content = "".join(content_parts)
+        if not hasattr(final_message, "tool_calls"):
+            final_message.tool_calls = None
+
+        return final_message, "".join(reasoning_parts).strip()
+
+    async def _aiter_response_stream(self, response_stream: Any):
+        """Normalize OpenAI-compatible sync/async streams into one async iterator."""
+        if hasattr(response_stream, "__aiter__"):
+            async for chunk in response_stream:
+                yield chunk
+            return
+
+        iterator = iter(response_stream)
+        while True:
+            try:
+                chunk = await asyncio.to_thread(next, iterator)
+            except StopIteration:
+                break
+            if inspect.isawaitable(chunk):
+                chunk = await chunk
+            yield chunk
 
     def _format_exception_details(
         self,
