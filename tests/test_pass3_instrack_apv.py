@@ -19,6 +19,13 @@ class FakeTracker:
 class FakeResolver:
     backend = None
 
+    def __init__(self, source_slices=None):
+        self._source_slices = dict(source_slices or {})
+
+    def get_module_source_slice(self, module_name):
+        payload = self._source_slices.get(module_name)
+        return dict(payload) if isinstance(payload, dict) else None
+
 
 class FakeLLM:
     def __init__(self, responses):
@@ -32,12 +39,44 @@ class FakeLLM:
         return self.responses.pop(0), {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
 
 
+class FakeToolLLM(FakeLLM):
+    def __init__(self, responses, tool_rounds):
+        super().__init__(responses)
+        self.tool_rounds = list(tool_rounds)
+
+    async def generate(self, system, prompt, **kwargs):
+        self.calls.append({"system": system, "prompt": prompt, "kwargs": kwargs})
+        if kwargs.get("tools_enabled"):
+            tool_callback = kwargs.get("tool_callback")
+            assert tool_callback is not None
+            rounds = self.tool_rounds.pop(0) if self.tool_rounds else []
+            log_path = kwargs.get("log_path", "")
+            for round_idx, step in enumerate(rounds, start=1):
+                tool_result = tool_callback(step["name"], dict(step.get("args") or {}))
+                if asyncio.iscoroutine(tool_result):
+                    tool_result = await tool_result
+                if log_path:
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write("\n\n" + "=" * 80 + "\n")
+                        f.write(f"## Tool Trace Round {round_idx}\n")
+                        f.write("=" * 80 + "\n\n")
+                        f.write("### Calls\n")
+                        f.write(
+                            f"- call `{step['name']}` args: `{json.dumps(step.get('args') or {}, ensure_ascii=False)}`\n\n"
+                        )
+                        f.write("### Results\n")
+                        f.write(f"- result `{step['name']}_{round_idx}`:\n```text\n{tool_result}\n```\n")
+        if not self.responses:
+            raise AssertionError("unexpected LLM call")
+        return self.responses.pop(0), {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
+
+
 class FakeOwner:
-    def __init__(self, tmp_path, llm):
+    def __init__(self, tmp_path, llm, source_slices=None, source_access_mode="embedded_topology", apv_max_tool_rounds=32):
         self.llm = llm
         self.instrack_orchestrate_llm = llm
         self.tracker = FakeTracker()
-        self.resolver = FakeResolver()
+        self.resolver = FakeResolver(source_slices=source_slices)
         self._graphs = {}
         self.chip_dir = tmp_path / "chip"
         self.chip_debug_dir = self.chip_dir / "debug"
@@ -46,6 +85,8 @@ class FakeOwner:
         self.isa_profile = "c910"
         self.isa_instructions = []
         self.instrack_single_instruction = None
+        self.instrack_apv_source_access_mode = source_access_mode
+        self.instrack_apv_max_tool_rounds = apv_max_tool_rounds
 
 
 class FakeNode:
@@ -119,8 +160,47 @@ def _structured_topology_block(*signals):
     return f"# Topology\n\nInputs from blocks: {joined}\n"
 
 
-def _build_generator(tmp_path, llm, topology_blocks=None):
-    owner = FakeOwner(tmp_path, llm)
+def _build_source_slice(source_path, lines, file_line_start=1):
+    rendered_lines = []
+    line_map = []
+    for idx, text in enumerate(lines, start=1):
+        line_text = str(text)
+        if not line_text.endswith("\n"):
+            line_text += "\n"
+        rendered_lines.append(line_text)
+        line_map.append(
+            {
+                "module_line": idx,
+                "file_line": file_line_start + idx - 1,
+                "text": line_text.rstrip("\n"),
+            }
+        )
+    return {
+        "source_path": source_path,
+        "module_line_count": len(rendered_lines),
+        "module_file_line_start": file_line_start,
+        "module_file_line_end": file_line_start + len(rendered_lines) - 1 if rendered_lines else 0,
+        "text": "".join(rendered_lines),
+        "lines": rendered_lines,
+        "line_map": line_map,
+    }
+
+
+def _build_generator(
+    tmp_path,
+    llm,
+    topology_blocks=None,
+    source_slices=None,
+    source_access_mode="embedded_topology",
+    apv_max_tool_rounds=32,
+):
+    owner = FakeOwner(
+        tmp_path,
+        llm,
+        source_slices=source_slices,
+        source_access_mode=source_access_mode,
+        apv_max_tool_rounds=apv_max_tool_rounds,
+    )
     generator = Pass3Generator(owner)
     generator._resolve_instrack_instructions = lambda: ["ADD"]
     generator._load_instrack_datasheet = lambda: "ADD datasheet excerpt"
@@ -140,7 +220,7 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
 {"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld && !flush"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"match_mode":"single","max_match":1}],"unknown":[]}
 ```""",
             """```json
-{"status":"complete","tasks":[{"ref_name":"decode_accept","dep_name":"ifu_entry","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld == dispatch_vld_i","dispatch_vld_i && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["decode accepted"],"match_mode":"first","max_match":1},{"ref_name":"issue_fire","dep_name":"decode_accept","task_name":"issue fire","condition_lines":["$dep.decode_accept.dispatch_vld == issue_en"],"capture_signals":["issue_pkt_vld"],"logging_lines":["issue fired"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"decode_accept","dep_name":"s00_t00_x_ifu","task_name":"decode accept","condition_lines":["$dep.s00_t00_x_ifu.fetch_vld == dispatch_vld_i","dispatch_vld_i && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["decode accepted"],"match_mode":"first","max_match":1},{"ref_name":"issue_fire","dep_name":"decode_accept","task_name":"issue fire","condition_lines":["$dep.decode_accept.dispatch_vld == issue_en"],"capture_signals":["issue_pkt_vld"],"logging_lines":["issue fired"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -202,7 +282,8 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
 
     assert len(llm.calls) == 2
     assert all(call["kwargs"].get("tools_enabled", False) is False for call in llm.calls)
-    assert '"ref_name": "ifu_entry"' in llm.calls[1]["prompt"]
+    assert '"ref_name": "s00_t00_x_ifu"' in llm.calls[1]["prompt"]
+    assert '"local_ref_name": "ifu_entry"' in llm.calls[1]["prompt"]
     assert '"task_id": "s00_t00_x_ifu"' in llm.calls[1]["prompt"]
     assert '"capture_names": [' in llm.calls[1]["prompt"]
     assert '"branch_lineage": [' in llm.calls[1]["prompt"]
@@ -233,7 +314,7 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
     assert 'dependsOn: "s00_t00_x_ifu"' in idu_yaml
     assert '"$dep.s00_t00_x_ifu.fetch_vld == x_idu.dispatch_vld_i"' in idu_yaml
     assert '"$dep.s01_t00_x_idu.dispatch_vld == x_idu.issue_en"' in idu_yaml
-    assert apv_index["schema_version"] == "pass3_3_3_apv_index_v4"
+    assert apv_index["schema_version"] == "pass3_3_3_apv_index_v7"
     assert apv_index["items"][0]["leaf_contexts"] == [
         {
             "task_id": "s00_t00_x_ifu",
@@ -263,13 +344,175 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
     assert apv_index["items"][1]["leaf_task_id"] == "s01_t01_x_idu"
     assert apv_index["items"][1]["leaf_ref_name"] == "issue_fire"
     assert apv_index["items"][1]["status"] == "complete"
-    assert summary_json["schema_version"] == "pass3_3_instrack_apv_v4"
+    assert summary_json["schema_version"] == "pass3_3_instrack_apv_v7"
     assert summary_json["apv_index_artifact_json"] == f"instrack/{slug}/artifacts/apv_index.json"
     assert summary_json["apv_status"] == ""
     assert summary_json["apv_error"] == ""
     assert "top__x_ifu.apv.yaml" in summary_md
     assert "status=complete, tasks=1" in summary_md
     assert "top__x_idu.apv.yaml" in summary_md
+
+
+def test_run_pass3_3_toolized_source_uses_tools_and_omits_embedded_source(tmp_path):
+    llm = FakeToolLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"pcgen_seq_fetch","dep_name":"","task_name":"sequential fetch","condition_lines":["pcgen_icache_if_seq_data_req == 1'b1","!pcgen_chgflw"],"capture_signals":["pcgen_ifctrl_pc"],"logging_lines":["pcgen fetch observed"],"match_mode":"first","max_match":1}],"unknown":[]}
+```"""
+        ],
+        tool_rounds=[
+            [
+                {"name": "grepSource", "args": {"pattern": "pcgen_ifctrl_pc", "ignore_case": False, "max_matches": 5}},
+                {"name": "readLine", "args": {"start_line": 3, "end_line": 7}},
+            ]
+        ],
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        source_access_mode="toolized_source",
+        source_slices={
+            "pcgen_mod": _build_source_slice(
+                "/tmp/pcgen_mod.v",
+                [
+                    "module pcgen_mod(",
+                    "  input wire pcgen_icache_if_seq_data_req,",
+                    "  input wire pcgen_chgflw,",
+                    "  output wire [14:0] pcgen_ifctrl_pc",
+                    ");",
+                    "assign pcgen_ifctrl_pc = 15'h1234;",
+                    "endmodule",
+                ],
+                file_line_start=101,
+            )
+        },
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "pcgen_mod",
+        "start_instance": "x_pcgen",
+        "start_block": "PCGEN_ENTRY",
+        "key_register": "pcgen_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "pcgen_mod",
+            "instance": "x_pcgen",
+            "path": "top/x_pcgen",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "tracks pcgen sequential fetch",
+                "confidence": "high",
+                "unknown": "",
+            },
+        }
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    call = llm.calls[0]
+    prompt_text = call["prompt"]
+    slug = generator._safe_slug("ADD").lower()
+    debug_text = (
+        tmp_path / "chip" / "debug" / "debug_pass3_instrack_apv_agent_ADD_top__x_pcgen_L1.md"
+    ).read_text(encoding="utf-8")
+    yaml_text = (
+        tmp_path / "chip" / "instrack" / slug / "artifacts" / "top__x_pcgen.apv.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert call["kwargs"].get("tools_enabled") is True
+    assert call["kwargs"].get("tools")
+    assert call["kwargs"].get("max_tool_rounds") == 32
+    assert "## Current Module Source Metadata" in prompt_text
+    assert "## Optional Source Tools" in prompt_text
+    assert "## Current Module Verilog Source" not in prompt_text
+    assert "module pcgen_mod(" not in prompt_text
+    assert '"source_path": "/tmp/pcgen_mod.v"' in prompt_text
+    assert "## Tool Trace Round 1" in debug_text
+    assert "grepSource" in debug_text
+    assert "readLine" in debug_text
+    assert 'name: "sequential fetch"' in yaml_text
+
+
+def test_run_pass3_3_writes_llm_error_artifact_for_empty_response(tmp_path):
+    llm = FakeLLM(
+        [
+            "Error: LLM returned empty response. rounds_used=32; tool_mode=True; saw_tool_calls=True; configured_max_tool_rounds=32; input_tokens=101; output_tokens=0; total_tokens=101."
+        ]
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        source_access_mode="toolized_source",
+        source_slices={
+            "pcgen_mod": _build_source_slice(
+                "/tmp/pcgen_mod.v",
+                [
+                    "module pcgen_mod(",
+                    "  input wire pcgen_icache_if_seq_data_req,",
+                    "  output wire pcgen_ifctrl_pc",
+                    ");",
+                    "endmodule",
+                ],
+                file_line_start=1,
+            )
+        },
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "pcgen_mod",
+        "start_instance": "x_pcgen",
+        "start_block": "PCGEN_ENTRY",
+        "key_register": "pcgen_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "pcgen_mod",
+            "instance": "x_pcgen",
+            "path": "top/x_pcgen",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "tracks pcgen sequential fetch",
+                "confidence": "high",
+                "unknown": "",
+            },
+        }
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    slug = generator._safe_slug("ADD").lower()
+    artifacts_dir = tmp_path / "chip" / "instrack" / slug / "artifacts"
+    error_log = artifacts_dir / "top__x_pcgen.apv.llm_error.md"
+    index_payload = json.loads((artifacts_dir / "apv_index.json").read_text(encoding="utf-8"))
+
+    assert error_log.exists()
+    error_text = error_log.read_text(encoding="utf-8")
+    assert "## Raw Error" in error_text
+    assert "configured_max_tool_rounds=32" in error_text
+    assert index_payload["items"][0]["artifact_llm_error"].endswith(".apv.llm_error.md")
 
 
 def test_run_pass3_3_marks_partial_when_dep_ref_name_is_not_visible(tmp_path):
@@ -331,7 +574,7 @@ def test_run_pass3_3_propagates_handoff_hint_into_visible_upstream_candidates(tm
 {"status":"complete","behavior_hint":"IFU entry remains on the fetch family, but downstream should keep slot ambiguity in mind.","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld && !flush"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"handoff_hint":"This leaf confirms fetch-family progress only; downstream must not assume slot identity yet.","match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
             """```json
-{"status":"complete","tasks":[{"ref_name":"decode_accept","dep_name":"ifu_entry","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld == dispatch_vld_i","dispatch_vld_i && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["decode accepted"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"decode_accept","dep_name":"s00_t00_x_ifu","task_name":"decode accept","condition_lines":["$dep.s00_t00_x_ifu.fetch_vld == dispatch_vld_i","dispatch_vld_i && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["decode accepted"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -623,41 +866,65 @@ def test_run_pass3_3_rejects_multiple_dep_ref_names(tmp_path):
     assert any("at most one unique dep `ref_name`" in reason for reason in apv_index["items"][0]["unknown"])
 
 
-def test_run_pass3_3_rejects_resolved_dep_reference_in_raw_json(tmp_path):
+def test_run_pass3_3_accepts_visible_task_id_dep_reference(tmp_path):
     llm = FakeLLM(
         [
             """```json
-{"status":"complete","tasks":[{"ref_name":"bad_resolved_dep","dep_name":"s00_t00_x_ifu","task_name":"bad resolved dep","condition_lines":["$dep.s00_t00_x_ifu.fetch_vld && local_vld"],"capture_signals":["done_vld"],"logging_lines":["bad"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["start"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+            """```json
+{"status":"complete","tasks":[{"ref_name":"task_id_dep","dep_name":"s00_t00_x_ifu","task_name":"task id dep","condition_lines":["$dep.s00_t00_x_ifu.fetch_vld == dispatch_vld_i","dispatch_vld_i && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["task id dep is valid"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
-    generator = _build_generator(tmp_path, llm)
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={
+            "ifu_mod": _structured_topology_block("fetch_vld"),
+            "idu_mod": _structured_topology_block("dispatch_vld_i", "decode_ready", "dispatch_vld"),
+        },
+    )
     top_node = FakeNode("top_mod", "top")
 
     search_payload = {
         "schema_version": "pass3_3_1_startpoint_v3",
         "top_module": "top_mod",
         "instruction": "ADD",
-        "start_module": "idu_mod",
-        "start_instance": "x_idu",
-        "start_block": "IDU_ENTRY",
-        "key_register": "idu_reg",
-        "key_register_line_range": {"start_line": 3, "end_line": 4},
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
         "confidence": "high",
         "unknown": "",
     }
     orchestrate_items = [
         {
-            "module": "idu_mod",
-            "instance": "x_idu",
-            "path": "top/x_idu",
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
             "orchestrator_role": "start_module",
             "orchestration": {
                 "boundary_takeover": [],
+                "boundary_handoffs": [{"output_port": "dispatch_vld_o", "value_condition": "dispatch_vld_o = fetch_vld", "behavior": "forward"}],
+                "_boundary_handoff_routes": [{"status": "resolved", "output_port": "dispatch_vld_o"}],
+                "lifecycle_context": "first local fetch module",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+        {
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+            "orchestrator_role": "parent_module",
+            "orchestration": {
+                "boundary_takeover": [{"input_port": "dispatch_vld_i", "value_condition": "dispatch_vld_i", "behavior": "accept IFU handoff"}],
                 "boundary_handoffs": [],
                 "_boundary_handoff_routes": [],
-                "lifecycle_context": "first local decode module",
-                "confidence": "medium",
+                "lifecycle_context": "accepts decode handoff",
+                "confidence": "high",
                 "unknown": "",
             },
         }
@@ -669,11 +936,8 @@ def test_run_pass3_3_rejects_resolved_dep_reference_in_raw_json(tmp_path):
     slug = generator._safe_slug("ADD").lower()
     apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
 
-    assert apv_index["items"][0]["status"] == "partial"
-    assert any(
-        "must not emit final `$dep.<task_id>.<signal>` references" in reason
-        for reason in apv_index["items"][0]["unknown"]
-    )
+    assert apv_index["items"][0]["status"] == "complete"
+    assert apv_index["items"][1]["status"] == "complete"
 
 
 def test_run_pass3_3_rejects_unknown_dep_capture_name(tmp_path):
@@ -683,7 +947,7 @@ def test_run_pass3_3_rejects_unknown_dep_capture_name(tmp_path):
 {"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"start ok","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["start"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
             """```json
-{"status":"complete","tasks":[{"ref_name":"bad_capture","dep_name":"ifu_entry","task_name":"bad capture","condition_lines":["$dep.ifu_entry.missing_sig && ready"],"capture_signals":["dispatch_vld"],"logging_lines":["bad capture"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"bad_capture","dep_name":"s00_t00_x_ifu","task_name":"bad capture","condition_lines":["$dep.s00_t00_x_ifu.missing_sig && ready"],"capture_signals":["dispatch_vld"],"logging_lines":["bad capture"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -905,7 +1169,7 @@ def test_run_pass3_3_marks_partial_when_complete_lacks_same_line_anchor_relation
 {"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
             """```json
-{"status":"complete","tasks":[{"ref_name":"decode_accept","dep_name":"ifu_entry","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld","dispatch_vld_i","decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["weak continuity"],"match_mode":"first","max_match":1}],"unknown":[]}
+{"status":"complete","tasks":[{"ref_name":"decode_accept","dep_name":"s00_t00_x_ifu","task_name":"decode accept","condition_lines":["$dep.s00_t00_x_ifu.fetch_vld","dispatch_vld_i","decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["weak continuity"],"match_mode":"first","max_match":1}],"unknown":[]}
 ```""",
         ]
     )
@@ -1267,9 +1531,12 @@ def test_run_pass3_3_exposes_all_visible_upstream_leaf_context_candidates_in_pro
     assert len(llm.calls) == 2
     prompt_text = llm.calls[1]["prompt"]
     assert prompt_text.count('"task_id": "') == 3
-    assert '"ref_name": "slot0_leaf"' in prompt_text
-    assert '"ref_name": "slot1_leaf"' in prompt_text
-    assert '"ref_name": "slot2_leaf"' in prompt_text
+    assert '"ref_name": "s00_t00_x_ifu"' in prompt_text
+    assert '"ref_name": "s00_t01_x_ifu"' in prompt_text
+    assert '"ref_name": "s00_t02_x_ifu"' in prompt_text
+    assert '"local_ref_name": "slot0_leaf"' in prompt_text
+    assert '"local_ref_name": "slot1_leaf"' in prompt_text
+    assert '"local_ref_name": "slot2_leaf"' in prompt_text
     assert '"branch_lineage": [' in prompt_text
     assert '"total_candidates": 3' in prompt_text
 

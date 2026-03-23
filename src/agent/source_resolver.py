@@ -16,6 +16,7 @@ class SourceResolver:
         self.backend = backend
         self.code_base_path = code_base_path
         self._path_cache: Dict[str, str] = {}
+        self._module_slice_cache: Dict[str, Dict[str, Any]] = {}
 
     def resolve_path(self, module_name: str) -> Optional[str]:
         """Resolve module name to a Verilog source file path."""
@@ -135,6 +136,78 @@ class SourceResolver:
             print(f"[ERROR] Failed to read source at {path}: {e}")
             return None
 
+    def read_module_source(self, module_name: str, max_lines: int = 0) -> Optional[str]:
+        """Read only the target module's Verilog source when possible.
+
+        Falls back to the whole source file when module slicing fails.
+
+        Args:
+            module_name: Target RTL module name.
+            max_lines: Maximum lines to read. Set <= 0 for no truncation.
+        """
+        module_slice = self.get_module_source_slice(module_name)
+        if not module_slice:
+            return None
+
+        lines = list(module_slice.get("lines") or [])
+        if max_lines > 0 and len(lines) > max_lines:
+            lines = lines[:max_lines] + [f"\n// ... (truncated after {max_lines} lines)\n"]
+        rendered = "".join(lines).strip()
+        if not rendered:
+            return None
+        return f"// Source file: {module_slice.get('source_path', '')}\n{rendered}\n"
+
+    def get_module_source_slice(self, module_name: str) -> Optional[Dict[str, Any]]:
+        """Return one module's source slice and line mapping metadata."""
+        key = str(module_name or "").strip()
+        if not key:
+            return None
+        cached = self._module_slice_cache.get(key)
+        if cached is not None:
+            return dict(cached)
+
+        path = self.resolve_path(key)
+        if not path or not os.path.exists(path):
+            return None
+
+        try:
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                file_lines = f.readlines()
+        except Exception as e:
+            print(f"[ERROR] Failed to read source at {path}: {e}")
+            return None
+
+        start_idx, end_idx = self._find_module_line_range(file_lines, key)
+        if start_idx is None or end_idx is None:
+            start_idx = 0
+            end_idx = max(len(file_lines) - 1, 0)
+        slice_lines = list(file_lines[start_idx:end_idx + 1])
+        if not slice_lines:
+            return None
+
+        module_lines = []
+        for idx, text in enumerate(slice_lines, start=1):
+            module_lines.append(
+                {
+                    "module_line": idx,
+                    "file_line": start_idx + idx,
+                    "text": text.rstrip("\n"),
+                }
+            )
+
+        payload = {
+            "module_name": key,
+            "source_path": path,
+            "module_line_count": len(slice_lines),
+            "module_file_line_start": start_idx + 1,
+            "module_file_line_end": start_idx + len(slice_lines),
+            "text": "".join(slice_lines),
+            "lines": slice_lines,
+            "line_map": module_lines,
+        }
+        self._module_slice_cache[key] = dict(payload)
+        return dict(payload)
+
     def get_port_summary(self, module_name: str) -> str:
         """Get a summary of ports for the module."""
         module = self.backend.get_module(module_name)
@@ -246,6 +319,33 @@ class SourceResolver:
         if not key:
             return ""
         return self.read_source(key, max_lines=0) or ""
+
+    @staticmethod
+    def _find_module_line_range(file_lines: List[str], module_name: str) -> Tuple[Optional[int], Optional[int]]:
+        """Find the inclusive line range for one module definition."""
+        target = str(module_name or "").strip().lstrip('\\')
+        if not file_lines or not target:
+            return None, None
+
+        module_pattern = re.compile(
+            r"^\s*module\s+(?:automatic\s+)?\\?%s\b" % re.escape(target)
+        )
+        end_pattern = re.compile(r"^\s*endmodule\b")
+
+        start_idx: Optional[int] = None
+        for idx, raw_line in enumerate(file_lines):
+            if module_pattern.search(raw_line):
+                start_idx = idx
+                break
+        if start_idx is None:
+            return None, None
+
+        end_idx = len(file_lines) - 1
+        for idx in range(start_idx + 1, len(file_lines)):
+            if end_pattern.search(file_lines[idx]):
+                end_idx = idx
+                break
+        return start_idx, end_idx
 
     def get_proc_blocks(self, module_name: str) -> List[Dict[str, Any]]:
         """Compatibility API retained for old call sites.

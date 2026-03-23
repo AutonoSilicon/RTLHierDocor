@@ -559,6 +559,9 @@ class Pass3Generator:
     def _pass3_3_2_tools(self) -> List[Dict[str, Any]]:
         return self._tools.pass3_3_2_tools()
 
+    def _pass3_3_3_tools(self) -> List[Dict[str, Any]]:
+        return self._tools.pass3_3_3_tools()
+
     def _pass3_3_2_parent_tools(self) -> List[Dict[str, Any]]:
         return self._tools.pass3_3_2_parent_tools()
 
@@ -1777,6 +1780,8 @@ class Pass3Generator:
                 instruction=instruction,
                 start_module=str(parsed_search.get("start_module") or "").strip(),
                 orchestration_json_text=orchestrate_index_text,
+                source_access_mode=str(getattr(self.owner, "instrack_apv_source_access_mode", "embedded_topology") or "embedded_topology"),
+                apv_max_tool_rounds=int(getattr(self.owner, "instrack_apv_max_tool_rounds", 32) or 32),
             )
             cached_apv_items: List[Dict[str, Any]] = []
             if apv_enabled and apv_index_path.exists():
@@ -1872,7 +1877,7 @@ class Pass3Generator:
 
             json_payload = {
                 **parsed_search,
-                "schema_version": "pass3_3_instrack_apv_v4",
+                "schema_version": "pass3_3_instrack_apv_v7",
                 "orchestrate_index_artifact_json": artifact_orchestrate_index_json,
                 "apv_index_artifact_json": artifact_apv_index_json if apv_enabled else "",
                 "apv_status": apv_status,
@@ -1885,7 +1890,7 @@ class Pass3Generator:
                 artifact_json,
                 json_text,
                 input_hash=apv_index_input_hash if apv_enabled else orchestrate_input_hash,
-                meta={"source": artifact_md, "parser": "instrack_apv_v4"},
+                meta={"source": artifact_md, "parser": "instrack_apv_v6"},
             )
 
             index_entries.append({

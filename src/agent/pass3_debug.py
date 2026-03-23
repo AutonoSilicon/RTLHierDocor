@@ -408,6 +408,7 @@ class Pass3Debug:
         return normalized in {
             "Current Module Preview",
             "Current Module Topology",
+            "Current Module Verilog Source",
             "Direct Child Preview List",
         }
 

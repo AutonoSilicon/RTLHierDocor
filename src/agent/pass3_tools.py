@@ -218,6 +218,59 @@ class Pass3Tools:
         """Alias for pass3.3.2 tools (for parent-level calls)."""
         return self.pass3_3_2_tools()
 
+    def pass3_3_3_tools(self) -> List[Dict[str, Any]]:
+        """Tools for pass3.3.3 APV source access."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "grepSource",
+                    "description": "Search the current module source slice for matching lines. Scope is fixed to the current module only.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": {
+                                "type": "string",
+                                "description": "Literal or regex-like pattern to search inside the current module source slice.",
+                            },
+                            "ignore_case": {
+                                "type": "boolean",
+                                "description": "Whether to ignore case while searching.",
+                                "default": False,
+                            },
+                            "max_matches": {
+                                "type": "integer",
+                                "description": "Maximum number of matching lines to return.",
+                                "default": 20,
+                            },
+                        },
+                        "required": ["pattern"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "readLine",
+                    "description": "Read a small line range from the current module source slice. Uses module-relative line numbers only.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "start_line": {
+                                "type": "integer",
+                                "description": "1-based start line inside the current module source slice.",
+                            },
+                            "end_line": {
+                                "type": "integer",
+                                "description": "1-based end line inside the current module source slice. Defaults to start_line.",
+                            },
+                        },
+                        "required": ["start_line"],
+                    },
+                },
+            },
+        ]
+
     def pass3_3_tools(self) -> List[Dict[str, Any]]:
         """Legacy alias for pass3.3 tools."""
         return self.pass3_3_2_tools()

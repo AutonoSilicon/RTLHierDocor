@@ -27,7 +27,7 @@ How APV matches a task chain:
   - `unique_per_var`: keep one match for each unique pattern-variable binding in the forward window
 - `max_match` limits how many matches one upstream row may produce.
 - A single task may reference multiple captured signals from one dependency `ref_name`, but it must never mix multiple different dependency `ref_name` values in the same task.
-- Use `Visible Upstream Dep Handles` only for the previous module item's exported `leaf_contexts`. Inside this same JSON fragment, later tasks may depend only on an earlier declared local task by its `ref_name`.
+- Use `Visible Upstream Dep Handles` for any previously generated historical task that the wrapper exposes from earlier route items. Every visible upstream handle is a valid dependency target. Inside this same JSON fragment, later local tasks may additionally depend on an earlier declared local task by its `ref_name`.
 - Multiple later tasks may depend on the same earlier local `ref_name` when they represent different candidate paths, channels, selector outcomes, buffer slots, reorder cases, crossbar routes, or FSM outcomes.
 - Such sibling branch tasks must use different conditions that make the path distinction explicit.
 - A local task must be declared before any later task may reference it. Do not reference an undeclared local `ref_name`.
@@ -35,6 +35,7 @@ How APV matches a task chain:
 - The task chain must be monotonic in time: a dependent task may match in the same cycle as its dependency or at a later cycle, but never earlier.
 - Keep one task when one observation point is enough to prove the local fact. Split into multiple tasks only when the proof really spans multiple matched time points or sequential steps.
 - Every `$dep.<ref_name>.<signal>` must resolve to one visible upstream candidate or one earlier declared local task, and that `<signal>` must already appear in that dependency's `capture_names` or declared `capture_signals`.
+- For visible upstream history, the wrapper may expose the handle as that task's final `task_id` such as `s03_t01_x_ct_ifu_ibctrl`. When that happens, use that exact visible handle in both `dep_name` and `$dep.<ref_name>.<signal>`.
 - For `status = "complete"`, if upstream and local continuity anchors are visible, include at least one same-line condition that directly ties the persisted upstream capture to the current local observation, such as `$dep.<ref>.pc == local_pc` or `$dep.<ref>.inst == local_inst`.
 - Continuity anchor priority is `pc`, then `inst`, then packed data bus or bit slice, then `valid` or `vld`.
 - If local `pc`, `inst`, or data anchors are visible, a valid-only relation may assist a task but cannot by itself justify `complete`.
@@ -45,15 +46,15 @@ How APV matches a task chain:
 - A single task may still reference only one dependency `ref_name`; `dep_name` identifies that dependency explicitly and does not authorize mixing multiple dependency sources in one task.
 - Python computes branch identity from the task forest after parsing raw JSON and persists it as read-only `branch_lineage` in `apv_index` `leaf_contexts`.
 - `Visible Upstream Dep Handles` may show read-only `branch_lineage` for context, but branch identity is never authored in raw JSON.
-- `Visible Upstream Dep Handles` may also show read-only `upstream_hint` advisory text from the previous item. Treat it as a reminder about branch/channel/slot ambiguity, not as proof.
+- `Visible Upstream Dep Handles` may also show read-only `upstream_hint` advisory text from historical items. Treat it as a reminder about branch/channel/slot ambiguity, not as proof.
 - `complete` means every resolved terminal path in the current item is covered by an exported terminal task that can continue downstream, not merely that the strongest main path looks good.
 - If the current item has multiple terminal tasks, each terminal task must keep a unique `ref_name` and unique dependency path so Python can export unique downstream `branch_lineage`.
-- Visible upstream candidates may be truncated by the wrapper; use only the candidates shown in `Visible Upstream Dep Handles`.
+- Use only the candidates shown in `Visible Upstream Dep Handles`.
 - `behavior_hint`, `handoff_hint`, and downstream `upstream_hint` are advisory context only. They may explain uncertainty or branch design, but they never replace a real signal relation in `condition_lines`.
 - Do not assume slot identity from source-path identity alone. A unique bypass/ibuf/lbuf path does not imply the instruction must be in `inst0`/`inst1`/`inst2` unless local evidence explicitly proves that mapping.
 
 Task fields:
-- `ref_name`: short stable snake_case alias for this task inside the raw JSON. Later tasks may reference it as `$dep.<ref_name>.<signal>`.
+- `ref_name`: short stable snake_case alias for this task inside the raw JSON. Later local tasks may reference it as `$dep.<ref_name>.<signal>`. Visible upstream history handles are provided separately by the wrapper and may be final `task_id` strings.
 - `dep_name`: explicit dependency selector for this task. Use `""` for root trigger tasks. For dependent tasks, set it to the one unique upstream or earlier-local `ref_name` referenced by every `$dep.<ref_name>.<signal>` term in this task.
 - `task_name`: concise verification-oriented name for this local step.
 - `condition_lines`: Python-expression-like boolean predicates that are evaluated together at one candidate time point for this task. Prefer real RTL relationships such as PC/inst/value alignment, handoff continuity, enables, or local gating.
@@ -63,11 +64,11 @@ Task fields:
 - `max_match`: local upper bound for this task's expected matches.
 - `behavior_hint`: optional top-level short advisory text for this item. Use it to summarize the branch design or unresolved downstream ambiguity that later modules should keep in mind.
 - `handoff_hint`: optional short advisory text on a task, especially a terminal task. Use it when this leaf needs to warn downstream about unresolved slot/pipe/channel identity or similar ambiguity.
-- `$dep.<ref_name>.<signal>`: the only allowed dependency form in raw JSON. Python later rewrites it to the final `$dep.<task_id>.<signal>` form.
+- `$dep.<ref_name>.<signal>`: the only allowed dependency form in raw JSON. For visible upstream history, `<ref_name>` may already be the wrapper-provided final task handle.
 
 Authoring rules:
 - If route evidence is incomplete, keep the strongest local tasks you can support, set `status` to `partial`, and explain the gap in `unknown`.
-- Only use local signal names that are plainly visible in `Current Module Topology` or directly supported by `Current Module Context`. Do not invent alias signals.
+- Only use local signal names that are plainly visible in the provided current-module evidence, directly supported by `Current Module Context`, or read later through allowed source tools. Do not invent alias signals.
 - If a needed value appears packed inside a bus, use a slice on the real bus instead of inventing a standalone signal.
 - When upstream and local continuity anchors are visible, a `complete` answer should include at least one same-line condition that relates both sides.
 - Keep `logging_lines` brief and verification-oriented.
@@ -86,8 +87,7 @@ PASS3_3_3_APV_PROMPT = """
 ## Instruction Datasheet (`{instruction}`)
 {instruction_datasheet}
 
-## Current Module Topology
-{current_module_topology}
+{current_module_evidence_block}
 
 ## Current Module Context
 ```json
@@ -99,6 +99,8 @@ PASS3_3_3_APV_PROMPT = """
 {visible_dep_json}
 ```
 
+{source_tool_guidance_block}
+
 ## Required Output
 - Produce APV fragment content for the current module item only.
 - Treat `Current Module Context.instruction_state` as the authoritative 3.3.2 local route summary for this module.
@@ -108,19 +110,22 @@ PASS3_3_3_APV_PROMPT = """
 - Every task must declare `dep_name`.
 - Use `dep_name = ""` only for root trigger tasks that do not reference `$dep`.
 - For dependent tasks, `dep_name` must exactly match the one unique `$dep.<ref_name>` source used in that task's `condition_lines`.
-- If you need the previous module item's leaf task, use one provided upstream `ref_name` and write the dependency as `$dep.<ref_name>.<signal>`.
+- If you need any earlier route task, use one provided visible upstream handle and write the dependency as `$dep.<ref_name>.<signal>`.
 - If you need an earlier task from this same JSON, reference that earlier task's declared `ref_name`.
 - A local task must be declared before any later task may reference it.
 - Only reference upstream signals listed in that candidate's `capture_names`.
 - Every `$dep.<ref>.<signal>` must come from either a visible upstream candidate or an earlier declared local task, and the referenced signal must exist in that dependency's `capture_names` or declared `capture_signals`.
+- Visible upstream handles may be final historical `task_id` strings. That is valid. Use the exact handle shown by the wrapper.
 - `Visible Upstream Dep Handles.branch_lineage` is read-only context exported by Python. Do not mirror it or try to author it in raw JSON.
 - `Visible Upstream Dep Handles.upstream_hint` is advisory only. You may use it to understand branch design, but never treat it as proof without matching local signal evidence.
-- If the needed relation cannot be expressed with real local signals visible in the provided topology/context, return `partial` instead of inventing a new alias.
+- If the needed relation cannot be expressed with real local signals visible in the provided evidence/context or tool results, return `partial` instead of inventing a new alias.
 
 ## APV Authoring Goal
 - Start from `boundary_takeover` as the authoritative ingress of this item and end at this item's instruction-relevant `boundary_handoffs`.
+- Derive candidate local signals from the provided current-module evidence. If source tools are available, call them only when you need to verify exact declarations, assignments, or always-block logic before writing a task condition.
 - Fill in the key signal points along that route. Prefer event points that remove instruction-identity ambiguity over generic valid-only snapshots.
 - Prefer conditions that prove instruction continuity, such as PC/value alignment between two signals, rather than reducing every task to independent `== 1'b1` checks or weak `valid == valid` echoes.
+- When useful, you may depend directly on any historical task visible in `Visible Upstream Dep Handles`, not only the immediately previous item and not only terminal leaves.
 - The local event chain is not necessarily a single linear chain. Inside one item, tasks may form a small tree when different channels, selector outcomes, buffer slots, reorder cases, crossbar routes, or FSM outcomes need separate path-specific evidence.
 - Multiple later tasks may depend on the same earlier `ref_name` when they represent different local paths, but each sibling task must use conditions that explicitly distinguish that path.
 - `complete` means all resolved instruction-relevant terminal paths in this item's current context are represented and transferable downstream, not just the strongest main path.

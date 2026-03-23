@@ -398,6 +398,8 @@ def cmd_docor(args):
         isa_instructions=cfg.isa_instructions,
         instrack_single_instruction=cfg.instrack_single_instruction,
         instrack_use_graph_markers=cfg.instrack_use_graph_markers,
+        instrack_apv_source_access_mode=cfg.instrack_apv_source_access_mode,
+        instrack_apv_max_tool_rounds=cfg.instrack_apv_max_tool_rounds,
         max_concurrent_modules=cfg.max_concurrent_modules,
         enable_webui_monitoring=cfg.enable_webui,
     )

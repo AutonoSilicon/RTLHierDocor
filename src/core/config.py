@@ -195,6 +195,8 @@ class ProjectConfig:
     isa_instructions: List[str] = field(default_factory=list)  # Explicit instruction list override
     instrack_single_instruction: Optional[str] = None  # Run only one instruction when set
     instrack_use_graph_markers: bool = False  # Phase-2 switch (kept for forward compatibility)
+    instrack_apv_source_access_mode: str = "embedded_topology"  # embedded_topology|toolized_source
+    instrack_apv_max_tool_rounds: int = 32  # Tool budget for pass3.3.3 APV toolized_source mode
     max_concurrent_modules: int = 4  # Max concurrent LLM requests per pass
     enable_webui: bool = False  # Enable WebUI monitoring for real-time trace
 
@@ -319,6 +321,10 @@ class ProjectConfig:
                 config.instrack_single_instruction = text or None
             if 'instrack_use_graph_markers' in agent:
                 config.instrack_use_graph_markers = bool(agent['instrack_use_graph_markers'])
+            if 'instrack_apv_source_access_mode' in agent:
+                config.instrack_apv_source_access_mode = str(agent['instrack_apv_source_access_mode']).strip() or "embedded_topology"
+            if 'instrack_apv_max_tool_rounds' in agent:
+                config.instrack_apv_max_tool_rounds = int(agent['instrack_apv_max_tool_rounds'])
             if 'max_concurrent_modules' in agent:
                 config.max_concurrent_modules = int(agent['max_concurrent_modules'])
             if 'enable_webui' in agent:

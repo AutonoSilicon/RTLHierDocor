@@ -13,6 +13,9 @@ class Pass3InStrackAPV:
 
     _MAX_VISIBLE_DEP_CANDIDATES = 16
     _UPSTREAM_CANDIDATE_OVERFLOW_LIMIT = 8
+    _DEFAULT_APV_MAX_TOOL_ROUNDS = 32
+    _MAX_READ_LINE_SPAN = 80
+    _ALLOWED_SOURCE_ACCESS_MODES = {"embedded_topology", "toolized_source"}
     _ALLOWED_MATCH_MODES = {"first", "all", "unique_per_var"}
     _MATCH_MODE_ALIASES = {
         "single": "first",
@@ -26,6 +29,9 @@ class Pass3InStrackAPV:
     _ASSIGNMENT_RE = re.compile(r"(?<![<>=!])=(?!=)")
     _SIGNAL_TOKEN_RE = re.compile(
         r"[A-Za-z_][A-Za-z0-9_{}]*(?:\.[A-Za-z_][A-Za-z0-9_{}]*)*(?:\[\s*\d+\s*:\s*\d+\s*\]|\[\s*\d+\s*\])?"
+    )
+    _DECL_KEYWORD_RE = re.compile(
+        r"^\s*(?:input|output|inout|wire|reg|logic|tri|tri0|tri1|wand|wor|supply0|supply1)\b"
     )
     _INDEX_RE = re.compile(r"\[[^\]]+\]")
     _CONST_TOKEN_RE = re.compile(r"[A-Z][A-Z0-9_]*")
@@ -93,17 +99,20 @@ class Pass3InStrackAPV:
             index_payload = {
                 "instruction": instruction,
                 "start_module": parsed_search.get("start_module", ""),
-                "schema_version": "pass3_3_3_apv_index_v4",
+                "schema_version": "pass3_3_3_apv_index_v7",
                 "status": "failed",
                 "error": error,
                 "items": [],
             }
             index_text = json.dumps(index_payload, ensure_ascii=False, indent=2)
+            source_access_mode = self._source_access_mode()
             input_hash = self.g._hash.build_pass3_3_apv_index_input_hash(
                 top_module=top_node.module_name,
                 instruction=instruction,
                 start_module=str(parsed_search.get("start_module") or "").strip(),
                 orchestration_json_text=orchestrate_index_text,
+                source_access_mode=source_access_mode,
+                apv_max_tool_rounds=self._apv_max_tool_rounds(),
             )
             return {
                 "items": [],
@@ -115,7 +124,8 @@ class Pass3InStrackAPV:
             }
 
         items: List[Dict[str, Any]] = []
-        previous_leaf_contexts: List[Dict[str, Any]] = []
+        previous_task_contexts: List[Dict[str, Any]] = []
+        source_access_mode = self._source_access_mode()
 
         for item_index, item in enumerate(orchestrate_items):
             path_key = self._item_path(item)
@@ -126,17 +136,17 @@ class Pass3InStrackAPV:
                 instruction_datasheet=instruction_datasheet,
                 item=item,
                 item_index=item_index,
-                previous_leaf_contexts=previous_leaf_contexts,
+                previous_task_contexts=previous_task_contexts,
                 artifacts_dir=artifacts_dir,
                 cached_entry=cached_by_path.get(path_key),
             )
             items.append(result)
-            previous_leaf_contexts = self._build_leaf_contexts_from_entry(result)
+            previous_task_contexts.extend(self._build_task_contexts_from_entry(result))
 
         index_payload = {
             "instruction": instruction,
             "start_module": parsed_search.get("start_module", ""),
-            "schema_version": "pass3_3_3_apv_index_v4",
+            "schema_version": "pass3_3_3_apv_index_v7",
             "items": items,
         }
         index_text = json.dumps(index_payload, ensure_ascii=False, indent=2)
@@ -145,6 +155,8 @@ class Pass3InStrackAPV:
             instruction=instruction,
             start_module=str(parsed_search.get("start_module") or "").strip(),
             orchestration_json_text=orchestrate_index_text,
+            source_access_mode=source_access_mode,
+            apv_max_tool_rounds=self._apv_max_tool_rounds(),
         )
         return {
             "items": items,
@@ -162,7 +174,7 @@ class Pass3InStrackAPV:
         instruction_datasheet: str,
         item: Dict[str, Any],
         item_index: int,
-        previous_leaf_contexts: Optional[List[Dict[str, Any]]],
+        previous_task_contexts: Optional[List[Dict[str, Any]]],
         artifacts_dir: Path,
         cached_entry: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
@@ -170,27 +182,52 @@ class Pass3InStrackAPV:
         item_path = self._item_path(item)
         artifact_yaml = f"instrack/{instruction_slug}/artifacts/{path_slug}.apv.yaml"
         artifact_raw = f"instrack/{instruction_slug}/artifacts/{path_slug}.apv.raw.md"
+        artifact_llm_error = f"instrack/{instruction_slug}/artifacts/{path_slug}.apv.llm_error.md"
         yaml_path = artifacts_dir / f"{path_slug}.apv.yaml"
         raw_path = artifacts_dir / f"{path_slug}.apv.raw.md"
+        llm_error_path = artifacts_dir / f"{path_slug}.apv.llm_error.md"
 
         module_name = str(item.get("module") or "").strip()
+        source_access_mode = self._source_access_mode()
+        apv_max_tool_rounds = self._apv_max_tool_rounds()
+        module_source_slice = self._get_module_source_slice(module_name)
         current_module_topology = self.g._prompts.build_instrack_current_module_topology(module_name)
-        normalized_previous_leaf_contexts = self._normalize_leaf_context_list(previous_leaf_contexts)
+        current_module_metadata = self._build_current_module_source_metadata(
+            module_name=module_name,
+            module_source_slice=module_source_slice,
+        )
+        current_module_metadata_text = json.dumps(current_module_metadata, ensure_ascii=False, indent=2)
+        if source_access_mode == "toolized_source":
+            current_module_evidence_text = current_module_metadata_text
+            current_module_evidence_block = self._build_current_module_source_metadata_block(current_module_metadata_text)
+            source_tool_guidance_block = self._build_source_tool_guidance_block()
+            local_signal_evidence_text = ""
+            local_signal_source_text = str(module_source_slice.get("text") or "") if module_source_slice else ""
+        else:
+            current_module_evidence_text = current_module_topology
+            current_module_evidence_block = self._build_current_module_topology_block(current_module_topology)
+            source_tool_guidance_block = ""
+            local_signal_evidence_text = current_module_topology
+            local_signal_source_text = ""
+        normalized_previous_task_contexts = self._normalize_visible_dep_context_list(previous_task_contexts)
         local_signal_guidance = self._build_local_signal_guidance(
             item=item,
-            current_module_topology=current_module_topology,
-            previous_leaf_contexts=normalized_previous_leaf_contexts,
+            current_module_evidence=local_signal_evidence_text,
+            current_module_source=local_signal_source_text,
+            previous_task_contexts=normalized_previous_task_contexts,
         )
         local_signal_guidance_text = json.dumps(local_signal_guidance, ensure_ascii=False, indent=2)
         item_json_text = json.dumps(self._build_current_item_context(item), ensure_ascii=False, indent=2)
-        visible_dep_payload = self._build_visible_dep_payload(normalized_previous_leaf_contexts)
+        visible_dep_payload = self._build_visible_dep_payload(normalized_previous_task_contexts)
         visible_dep_text = json.dumps(visible_dep_payload, ensure_ascii=False, indent=2)
         item_input_hash = self.g._hash.build_pass3_3_apv_item_input_hash(
             top_module=top_node.module_name,
             instruction=instruction,
             item_json_text=item_json_text,
-            previous_leaf_json_text=visible_dep_text,
-            current_module_topology_text=current_module_topology,
+            history_task_json_text=visible_dep_text,
+            current_module_evidence_text=current_module_evidence_text,
+            source_access_mode=source_access_mode,
+            apv_max_tool_rounds=apv_max_tool_rounds,
             local_signal_guidance_json_text=local_signal_guidance_text,
         )
 
@@ -204,7 +241,7 @@ class Pass3InStrackAPV:
         if cached_ok:
             return self._normalize_cached_entry(cached_entry, artifact_yaml, artifact_raw)
 
-        overflow_reason = self._detect_candidate_overflow(normalized_previous_leaf_contexts)
+        overflow_reason = self._detect_candidate_overflow(normalized_previous_task_contexts)
         if overflow_reason:
             yaml_text = self._render_yaml(item=item, status="partial", unknown=[overflow_reason], tasks=[])
             yaml_path.write_text(yaml_text, encoding="utf-8")
@@ -227,6 +264,7 @@ class Pass3InStrackAPV:
                 unknown=[overflow_reason],
                 artifact_yaml=artifact_yaml,
                 artifact_raw=artifact_raw,
+                artifact_llm_error="",
                 tasks=[],
                 behavior_hint="",
                 input_hash=item_input_hash,
@@ -236,9 +274,10 @@ class Pass3InStrackAPV:
         prompt = PASS3_3_3_APV_PROMPT.format(
             instruction=instruction,
             instruction_datasheet=instruction_datasheet or "Instruction unavailable",
-            current_module_topology=current_module_topology,
+            current_module_evidence_block=current_module_evidence_block,
             current_item_json=item_json_text,
             visible_dep_json=visible_dep_text,
+            source_tool_guidance_block=source_tool_guidance_block,
         )
         log_path = self.g._build_pass3_instrack_agent_log_path(
             instruction=instruction,
@@ -255,10 +294,39 @@ class Pass3InStrackAPV:
             prompt_redaction_policy="instrack_context",
         )
 
+        async def _tool_callback(tool_name: str, args: Dict[str, Any]) -> str:
+            if source_access_mode != "toolized_source":
+                return json.dumps(
+                    {
+                        "tool": tool_name,
+                        "status": "error",
+                        "error": "APV source tools are disabled in the current source access mode.",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            if tool_name == "grepSource":
+                return self._run_grep_source_tool(module_name=module_name, module_source_slice=module_source_slice, args=args)
+            if tool_name == "readLine":
+                return self._run_read_line_tool(module_name=module_name, module_source_slice=module_source_slice, args=args)
+            return json.dumps(
+                {
+                    "tool": tool_name,
+                    "status": "error",
+                    "error": f"Unknown APV source tool `{tool_name}`.",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
         content, token_stats = await self.g.owner.llm.generate(
             PASS3_3_3_APV_SYSTEM,
             prompt,
             log_path=log_path,
+            tools_enabled=(source_access_mode == "toolized_source"),
+            tools=self.g._pass3_3_3_tools() if source_access_mode == "toolized_source" else None,
+            tool_callback=_tool_callback if source_access_mode == "toolized_source" else None,
+            max_tool_rounds=apv_max_tool_rounds,
         )
 
         self.g._append_agent_io_snapshot(
@@ -294,7 +362,7 @@ class Pass3InStrackAPV:
             item=item,
             item_index=item_index,
             raw_tasks=list(parsed_payload.get("tasks") or []),
-            previous_leaf_contexts=normalized_previous_leaf_contexts,
+            previous_task_contexts=normalized_previous_task_contexts,
             local_signal_guidance=local_signal_guidance,
         )
         if task_errors:
@@ -304,7 +372,7 @@ class Pass3InStrackAPV:
             tasks=tasks,
             item=item,
             status=status,
-            previous_leaf_contexts=normalized_previous_leaf_contexts,
+            previous_task_contexts=normalized_previous_task_contexts,
             local_signal_guidance=local_signal_guidance,
         )
         if quality_errors:
@@ -313,6 +381,35 @@ class Pass3InStrackAPV:
         if status == "complete" and not tasks:
             unknown.append("Model returned complete without any valid tasks.")
             status = "partial"
+
+        llm_error_text = self._build_llm_error_log_text(
+            item=item,
+            log_path=log_path,
+            raw_text=raw_text,
+            unknown=unknown,
+            token_stats=token_stats,
+            source_access_mode=source_access_mode,
+            apv_max_tool_rounds=apv_max_tool_rounds,
+        )
+        artifact_llm_error_value = ""
+        if llm_error_text:
+            llm_error_path.write_text(llm_error_text, encoding="utf-8")
+            self.g.owner.project_tracker.update(
+                artifact_llm_error,
+                llm_error_text,
+                input_hash=item_input_hash,
+                meta={
+                    "top_module": top_node.module_name,
+                    "instruction": instruction,
+                    "module": module_name,
+                    "instance": str(item.get("instance") or "").strip(),
+                    "path": item_path,
+                    "pass": "pass3_3_3_apv_llm_error",
+                },
+            )
+            artifact_llm_error_value = artifact_llm_error
+        elif llm_error_path.exists():
+            llm_error_path.unlink()
 
         yaml_text = self._render_yaml(item=item, status=status, unknown=unknown, tasks=tasks)
         yaml_path.write_text(yaml_text, encoding="utf-8")
@@ -335,6 +432,7 @@ class Pass3InStrackAPV:
             unknown=unknown,
             artifact_yaml=artifact_yaml,
             artifact_raw=artifact_raw,
+            artifact_llm_error=artifact_llm_error_value,
             tasks=tasks,
             behavior_hint=behavior_hint,
             input_hash=item_input_hash,
@@ -376,7 +474,7 @@ class Pass3InStrackAPV:
         item: Dict[str, Any],
         item_index: int,
         raw_tasks: List[Dict[str, Any]],
-        previous_leaf_contexts: Optional[List[Dict[str, Any]]],
+        previous_task_contexts: Optional[List[Dict[str, Any]]],
         local_signal_guidance: Optional[Dict[str, Any]] = None,
     ) -> (List[Dict[str, Any]], List[str]):
         scope_prefix = self._scope_prefix(item_path=self._item_path(item), top_node=top_node)
@@ -384,21 +482,22 @@ class Pass3InStrackAPV:
         tasks: List[Dict[str, Any]] = []
         errors: List[str] = []
         dep_symbols: Dict[str, Dict[str, Any]] = {}
-        normalized_previous_leaf_contexts = self._normalize_leaf_context_list(previous_leaf_contexts)
+        normalized_previous_task_contexts = self._normalize_visible_dep_context_list(previous_task_contexts)
         trusted_local_signal_catalog = bool((local_signal_guidance or {}).get("trusted_local_signal_catalog"))
         allowed_local_signals = set((local_signal_guidance or {}).get("allowed_local_signals") or [])
-        for previous_leaf_context in normalized_previous_leaf_contexts:
-            upstream_ref_name = str(previous_leaf_context.get("ref_name") or "").strip()
-            upstream_task_id = str(previous_leaf_context.get("task_id") or "").strip()
-            upstream_capture_names = list(previous_leaf_context.get("capture_names") or [])
+        for previous_task_context in normalized_previous_task_contexts:
+            upstream_ref_name = str(previous_task_context.get("ref_name") or "").strip()
+            upstream_task_id = str(previous_task_context.get("task_id") or "").strip()
+            upstream_capture_names = list(previous_task_context.get("capture_names") or [])
             if upstream_ref_name and upstream_task_id and upstream_capture_names:
                 dep_symbols[upstream_ref_name] = self._build_dep_symbol(
                     ref_name=upstream_ref_name,
                     task_id=upstream_task_id,
                     capture_names=upstream_capture_names,
-                    branch_lineage=list(previous_leaf_context.get("branch_lineage") or []),
-                    item=previous_leaf_context,
+                    branch_lineage=list(previous_task_context.get("branch_lineage") or []),
+                    item=previous_task_context,
                     source="upstream",
+                    upstream_hint=str(previous_task_context.get("upstream_hint") or "").strip(),
                 )
 
         for task_index, raw_task in enumerate(raw_tasks):
@@ -638,7 +737,7 @@ class Pass3InStrackAPV:
         tasks: List[Dict[str, Any]],
         item: Dict[str, Any],
         status: str,
-        previous_leaf_contexts: Optional[List[Dict[str, Any]]],
+        previous_task_contexts: Optional[List[Dict[str, Any]]],
         local_signal_guidance: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
         if status != "complete" or not tasks:
@@ -672,10 +771,10 @@ class Pass3InStrackAPV:
                     continue
                 seen_branch_lineages.add(branch_key)
 
-        leaf_contexts = self._normalize_leaf_context_list(previous_leaf_contexts)
+        task_contexts = self._normalize_visible_dep_context_list(previous_task_contexts)
         upstream_anchor_map = dict((local_signal_guidance or {}).get("preferred_upstream_anchor_names_by_task_id") or {})
         local_anchor_names = set((local_signal_guidance or {}).get("preferred_local_anchor_names") or [])
-        if not leaf_contexts or not local_anchor_names:
+        if not task_contexts or not local_anchor_names:
             return errors
         for task in tasks:
             dep_task_id = str(task.get("depends_on") or "").strip()
@@ -714,12 +813,15 @@ class Pass3InStrackAPV:
         self,
         *,
         item: Dict[str, Any],
-        current_module_topology: str,
-        previous_leaf_contexts: Optional[List[Dict[str, Any]]],
+        current_module_evidence: str,
+        current_module_source: str,
+        previous_task_contexts: Optional[List[Dict[str, Any]]],
     ) -> Dict[str, Any]:
         payload = dict(item.get("orchestration") or {})
-        structured_topology = self._has_structured_signal_catalog(current_module_topology)
-        allowed_local_signals = self._extract_topology_signal_catalog(current_module_topology)
+        structured_topology = self._has_structured_signal_catalog(current_module_evidence)
+        topology_signal_catalog = self._extract_topology_signal_catalog(current_module_evidence)
+        verilog_signal_catalog = self._extract_verilog_signal_catalog(current_module_source)
+        allowed_local_signals = set(topology_signal_catalog) | set(verilog_signal_catalog)
 
         for entry in list(payload.get("boundary_takeover") or []):
             input_port = str((entry or {}).get("input_port") or "").strip()
@@ -739,12 +841,12 @@ class Pass3InStrackAPV:
         )
         preferred_upstream_anchor_names_by_task_id: Dict[str, List[str]] = {}
         preferred_upstream_anchor_names: Set[str] = set()
-        for previous_leaf_context in self._normalize_leaf_context_list(previous_leaf_contexts):
-            task_id = str(previous_leaf_context.get("task_id") or "").strip()
+        for previous_task_context in self._normalize_visible_dep_context_list(previous_task_contexts):
+            task_id = str(previous_task_context.get("task_id") or "").strip()
             anchor_names = sorted(
                 {
                     str(name or "").strip()
-                    for name in list(previous_leaf_context.get("capture_names") or [])
+                    for name in list(previous_task_context.get("capture_names") or [])
                     if self._is_anchor_like_name(str(name or "").strip())
                 }
             )
@@ -760,7 +862,7 @@ class Pass3InStrackAPV:
         )
 
         guidance = {
-            "trusted_local_signal_catalog": bool(structured_topology and allowed_local_signals),
+            "trusted_local_signal_catalog": bool(allowed_local_signals and (structured_topology or verilog_signal_catalog)),
             "allowed_local_signals": sorted(allowed_local_signals),
             "preferred_local_anchor_names": preferred_local_anchor_names,
             "preferred_upstream_anchor_names": sorted(preferred_upstream_anchor_names),
@@ -774,10 +876,241 @@ class Pass3InStrackAPV:
             ]
         else:
             guidance["notes"] = [
-                "No trusted local signal catalog could be extracted from topology text for this item.",
-                "Do not invent new local alias signals; prefer explicit ports and topology-visible names only.",
+                "No trusted local signal catalog could be extracted from the provided source for this item.",
+                "Do not invent new local alias signals; prefer explicit ports and source-visible names only.",
             ]
         return guidance
+
+    def _normalize_source_access_mode(self, value: Any) -> str:
+        mode = str(value or "").strip().lower()
+        if mode not in self._ALLOWED_SOURCE_ACCESS_MODES:
+            return "embedded_topology"
+        return mode
+
+    def _source_access_mode(self) -> str:
+        return self._normalize_source_access_mode(
+            getattr(self.g.owner, "instrack_apv_source_access_mode", "embedded_topology")
+        )
+
+    def _apv_max_tool_rounds(self) -> int:
+        raw_value = getattr(self.g.owner, "instrack_apv_max_tool_rounds", self._DEFAULT_APV_MAX_TOOL_ROUNDS)
+        try:
+            return max(1, int(raw_value or self._DEFAULT_APV_MAX_TOOL_ROUNDS))
+        except Exception:
+            return self._DEFAULT_APV_MAX_TOOL_ROUNDS
+
+    def _get_module_source_slice(self, module_name: str) -> Optional[Dict[str, Any]]:
+        resolver = getattr(self.g.owner, "resolver", None)
+        if resolver is None or not module_name:
+            return None
+        try:
+            if hasattr(resolver, "get_module_source_slice"):
+                return resolver.get_module_source_slice(module_name)
+        except Exception:
+            return None
+        return None
+
+    def _build_current_module_source_metadata(
+        self,
+        *,
+        module_name: str,
+        module_source_slice: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        source_slice = dict(module_source_slice or {})
+        source_path = str(source_slice.get("source_path") or "").strip()
+        module_line_count = int(source_slice.get("module_line_count") or 0)
+        line_start = int(source_slice.get("module_file_line_start") or 0)
+        line_end = int(source_slice.get("module_file_line_end") or 0)
+        return {
+            "module": str(module_name or "").strip(),
+            "source_path": source_path,
+            "module_line_count": module_line_count,
+            "module_file_line_start": line_start,
+            "module_file_line_end": line_end,
+            "source_available": bool(source_path and module_line_count > 0),
+        }
+
+    @staticmethod
+    def _build_current_module_topology_block(current_module_topology: str) -> str:
+        return (
+            "## Current Module Topology\n"
+            f"{current_module_topology}\n"
+        )
+
+    @staticmethod
+    def _build_current_module_source_metadata_block(current_module_metadata_text: str) -> str:
+        return (
+            "## Current Module Source Metadata\n"
+            "```json\n"
+            f"{current_module_metadata_text}\n"
+            "```"
+        )
+
+    @staticmethod
+    def _build_source_tool_guidance_block() -> str:
+        return """
+## Optional Source Tools
+- Source tools are enabled for this item and scoped to the current module only.
+- Use `grepSource(pattern, ignore_case=false, max_matches=20)` to locate candidate signals, assignments, or always blocks by module-relative line.
+- Use `readLine(start_line, end_line)` only after grep narrows the area. `readLine` uses module-relative line numbers and allows at most 80 lines per call.
+- Prefer zero or a few targeted tool calls. Do not scan the whole module linearly.
+- If you never read a signal or logic region through the provided evidence or tool results, do not invent it in task conditions.
+""".strip()
+
+    def _run_grep_source_tool(
+        self,
+        *,
+        module_name: str,
+        module_source_slice: Optional[Dict[str, Any]],
+        args: Dict[str, Any],
+    ) -> str:
+        source_slice = dict(module_source_slice or {})
+        metadata = self._build_current_module_source_metadata(
+            module_name=module_name,
+            module_source_slice=source_slice,
+        )
+        pattern = str(args.get("pattern") or "").strip()
+        try:
+            max_matches = int(args.get("max_matches", 20))
+        except Exception:
+            max_matches = 20
+        max_matches = max(1, min(max_matches, 50))
+        ignore_case = bool(args.get("ignore_case", False))
+        if not pattern:
+            return json.dumps(
+                {
+                    "tool": "grepSource",
+                    "status": "error",
+                    "error": "Empty pattern is not allowed.",
+                    **metadata,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        try:
+            regex = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
+        except re.error as exc:
+            return json.dumps(
+                {
+                    "tool": "grepSource",
+                    "status": "error",
+                    "error": f"Invalid search pattern: {exc}",
+                    **metadata,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        results: List[Dict[str, Any]] = []
+        for entry in list(source_slice.get("line_map") or []):
+            text = str(entry.get("text") or "")
+            if regex.search(text):
+                results.append(
+                    {
+                        "module_line": int(entry.get("module_line") or 0),
+                        "file_line": int(entry.get("file_line") or 0),
+                        "text": text,
+                    }
+                )
+                if len(results) >= max_matches:
+                    break
+        return json.dumps(
+            {
+                "tool": "grepSource",
+                "status": "ok",
+                **metadata,
+                "pattern": pattern,
+                "ignore_case": ignore_case,
+                "results": results,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    def _run_read_line_tool(
+        self,
+        *,
+        module_name: str,
+        module_source_slice: Optional[Dict[str, Any]],
+        args: Dict[str, Any],
+    ) -> str:
+        source_slice = dict(module_source_slice or {})
+        metadata = self._build_current_module_source_metadata(
+            module_name=module_name,
+            module_source_slice=source_slice,
+        )
+        module_line_count = int(source_slice.get("module_line_count") or 0)
+        try:
+            start_line = int(args.get("start_line", 0))
+        except Exception:
+            start_line = 0
+        try:
+            end_line = int(args.get("end_line", start_line))
+        except Exception:
+            end_line = start_line
+        if end_line <= 0:
+            end_line = start_line
+        if start_line <= 0:
+            return json.dumps(
+                {
+                    "tool": "readLine",
+                    "status": "error",
+                    "error": "start_line must be a positive module-relative line number.",
+                    **metadata,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        if end_line < start_line:
+            start_line, end_line = end_line, start_line
+        if end_line - start_line + 1 > self._MAX_READ_LINE_SPAN:
+            return json.dumps(
+                {
+                    "tool": "readLine",
+                    "status": "error",
+                    "error": f"range too wide: requested {end_line - start_line + 1} lines, max is {self._MAX_READ_LINE_SPAN}.",
+                    **metadata,
+                    "valid_module_line_range": [1, module_line_count],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        if module_line_count <= 0 or start_line > module_line_count or end_line > module_line_count:
+            return json.dumps(
+                {
+                    "tool": "readLine",
+                    "status": "error",
+                    "error": "Requested line range is outside the current module source slice.",
+                    **metadata,
+                    "valid_module_line_range": [1, module_line_count],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        line_map = list(source_slice.get("line_map") or [])
+        selected = [entry for entry in line_map if start_line <= int(entry.get("module_line") or 0) <= end_line]
+        file_start = int(selected[0].get("file_line") or 0) if selected else 0
+        file_end = int(selected[-1].get("file_line") or 0) if selected else 0
+        return json.dumps(
+            {
+                "tool": "readLine",
+                "status": "ok",
+                **metadata,
+                "module_range": [start_line, end_line],
+                "file_range": [file_start, file_end],
+                "lines": [
+                    {
+                        "module_line": int(entry.get("module_line") or 0),
+                        "file_line": int(entry.get("file_line") or 0),
+                        "text": str(entry.get("text") or ""),
+                    }
+                    for entry in selected
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     def _has_structured_signal_catalog(self, topology_text: str) -> bool:
         text = str(topology_text or "")
@@ -804,6 +1137,41 @@ class Pass3InStrackAPV:
             if name.lower() in self._TOPOLOGY_NOISE_TOKENS:
                 continue
             names.add(name)
+        return names
+
+    def _extract_verilog_signal_catalog(self, source_text: str) -> Set[str]:
+        text = str(source_text or "")
+        if not text:
+            return set()
+
+        text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+        names: Set[str] = set()
+        for raw_line in text.splitlines():
+            line = raw_line.split("//", 1)[0].strip()
+            if not line or not self._DECL_KEYWORD_RE.match(line):
+                continue
+            normalized = re.sub(
+                r"\b(?:input|output|inout|wire|reg|logic|signed|unsigned|tri|tri0|tri1|wand|wor|supply0|supply1)\b",
+                " ",
+                line,
+            )
+            normalized = self._INDEX_RE.sub(" ", normalized)
+            normalized = normalized.rstrip(",);")
+            for candidate in normalized.split(","):
+                candidate = candidate.split("=", 1)[0].strip()
+                if not candidate:
+                    continue
+                tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", candidate)
+                if not tokens:
+                    continue
+                name = tokens[-1].strip()
+                if not name:
+                    continue
+                if name in self._RESERVED_TOKENS or name.lower() in self._RESERVED_TOKENS:
+                    continue
+                if self._CONST_TOKEN_RE.fullmatch(name):
+                    continue
+                names.add(name)
         return names
 
     def _extract_local_signal_names(self, values: Any) -> Set[str]:
@@ -1012,12 +1380,14 @@ class Pass3InStrackAPV:
             "instruction_state": instruction_state,
         }
 
-    def _build_visible_dep_payload(self, previous_leaf_contexts: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        normalized = self._normalize_leaf_context_list(previous_leaf_contexts)
+    def _build_visible_dep_payload(self, previous_task_contexts: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        normalized = self._normalize_visible_dep_context_list(previous_task_contexts)
         candidates = [
             {
                 "ref_name": str(candidate.get("ref_name") or "").strip(),
                 "task_id": str(candidate.get("task_id") or "").strip(),
+                "local_ref_name": str(candidate.get("local_ref_name") or "").strip(),
+                "task_name": str(candidate.get("task_name") or "").strip(),
                 "capture_names": list(candidate.get("capture_names") or []),
                 "branch_lineage": list(candidate.get("branch_lineage") or []),
                 "upstream_hint": self._normalize_hint_text(candidate.get("upstream_hint")),
@@ -1025,7 +1395,7 @@ class Pass3InStrackAPV:
                 "instance": str(candidate.get("instance") or "").strip(),
                 "path": str(candidate.get("path") or "").strip(),
             }
-            for candidate in normalized[: self._MAX_VISIBLE_DEP_CANDIDATES]
+            for candidate in normalized
         ]
         return {
             "candidates": candidates,
@@ -1094,6 +1464,12 @@ class Pass3InStrackAPV:
             }
         ]
 
+    def _build_task_contexts_from_entry(self, entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+        task_contexts = self._normalize_task_context_list(entry.get("task_contexts") or [])
+        if task_contexts:
+            return task_contexts
+        return self._normalize_task_context_list(entry.get("leaf_contexts") or [])
+
     @staticmethod
     def _normalize_cached_entry(entry: Dict[str, Any], artifact_yaml: str, artifact_raw: str) -> Dict[str, Any]:
         cached = dict(entry or {})
@@ -1102,6 +1478,7 @@ class Pass3InStrackAPV:
         cached.setdefault("behavior_hint", "")
         cached.setdefault("artifact_yaml", artifact_yaml)
         cached.setdefault("artifact_raw", artifact_raw)
+        cached.setdefault("artifact_llm_error", "")
         cached.setdefault("task_ids", [])
         cached.setdefault("task_count", len(list(cached.get("task_ids") or [])))
         cached.setdefault("first_task_id", "")
@@ -1109,6 +1486,7 @@ class Pass3InStrackAPV:
         cached.setdefault("leaf_task_id", "")
         cached.setdefault("leaf_ref_name", "")
         cached.setdefault("leaf_capture_names", [])
+        cached.setdefault("task_contexts", [])
         if not cached.get("leaf_contexts") and cached.get("leaf_task_id") and cached.get("leaf_ref_name"):
             cached["leaf_contexts"] = [
                 {
@@ -1122,6 +1500,8 @@ class Pass3InStrackAPV:
                     "path": str(cached.get("path") or "").strip(),
                 }
             ]
+        if not cached.get("task_contexts"):
+            cached["task_contexts"] = list(cached.get("leaf_contexts") or [])
         return cached
 
     def _build_item_entry(
@@ -1132,11 +1512,17 @@ class Pass3InStrackAPV:
         unknown: List[str],
         artifact_yaml: str,
         artifact_raw: str,
+        artifact_llm_error: str,
         tasks: List[Dict[str, Any]],
         behavior_hint: str,
         input_hash: str,
         token_stats: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        task_contexts = self._build_task_contexts_from_tasks(
+            item=item,
+            tasks=tasks,
+            behavior_hint=behavior_hint,
+        )
         leaf_contexts = self._build_leaf_contexts_from_tasks(
             item=item,
             tasks=tasks,
@@ -1152,9 +1538,11 @@ class Pass3InStrackAPV:
             "behavior_hint": self._normalize_hint_text(behavior_hint),
             "artifact_yaml": artifact_yaml,
             "artifact_raw": artifact_raw,
+            "artifact_llm_error": artifact_llm_error,
             "task_ids": [task["id"] for task in tasks],
             "task_count": len(tasks),
             "first_task_id": tasks[0]["id"] if tasks else "",
+            "task_contexts": task_contexts,
             "leaf_contexts": leaf_contexts,
             "leaf_task_id": str(single_leaf_context.get("task_id") or "").strip() if single_leaf_context else "",
             "leaf_ref_name": str(single_leaf_context.get("ref_name") or "").strip() if single_leaf_context else "",
@@ -1162,6 +1550,103 @@ class Pass3InStrackAPV:
             "input_hash": input_hash,
             "token_stats": dict(token_stats or {}),
         }
+
+    def _build_llm_error_log_text(
+        self,
+        *,
+        item: Dict[str, Any],
+        log_path: str,
+        raw_text: str,
+        unknown: List[str],
+        token_stats: Optional[Dict[str, Any]],
+        source_access_mode: str,
+        apv_max_tool_rounds: int,
+    ) -> str:
+        normalized_unknown = [str(entry).strip() for entry in list(unknown or []) if str(entry).strip()]
+        raw_error_text = str(raw_text or "").strip()
+        parse_errors = [entry for entry in normalized_unknown if entry.startswith("Invalid APV JSON output:")]
+        if not raw_error_text.startswith("Error:") and not parse_errors:
+            return ""
+
+        raw_preview = raw_error_text if raw_error_text else "<empty>"
+        if len(raw_preview) > 4000:
+            raw_preview = raw_preview[:4000] + "\n\n[... truncated ...]"
+
+        lines = [
+            f"# APV LLM Error Log: {self._item_path(item)}",
+            "",
+            "## Item",
+            f"- module: {str(item.get('module') or '').strip()}",
+            f"- instance: {str(item.get('instance') or '').strip()}",
+            f"- path: {self._item_path(item)}",
+            "",
+            "## Runtime",
+            f"- source_access_mode: {source_access_mode}",
+            f"- apv_max_tool_rounds: {int(apv_max_tool_rounds)}",
+            f"- debug_log: {log_path}",
+            "",
+            "## Token Stats",
+            f"- input_tokens: {int((token_stats or {}).get('input_tokens', 0) or 0)}",
+            f"- output_tokens: {int((token_stats or {}).get('output_tokens', 0) or 0)}",
+            f"- total_tokens: {int((token_stats or {}).get('total_tokens', 0) or 0)}",
+            "",
+        ]
+        if parse_errors:
+            lines.extend(
+                [
+                    "## Parse Errors",
+                    *[f"- {entry}" for entry in parse_errors],
+                    "",
+                ]
+            )
+        if raw_error_text.startswith("Error:"):
+            lines.extend(
+                [
+                    "## Raw Error",
+                    f"- {raw_error_text}",
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "## Raw Response Preview",
+                "```text",
+                raw_preview,
+                "```",
+                "",
+            ]
+        )
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _build_task_contexts_from_tasks(
+        self,
+        *,
+        item: Dict[str, Any],
+        tasks: List[Dict[str, Any]],
+        behavior_hint: str = "",
+    ) -> List[Dict[str, Any]]:
+        task_contexts: List[Dict[str, Any]] = []
+        for task in list(tasks or []):
+            task_id = str(task.get("id") or "").strip()
+            ref_name = str(task.get("ref_name") or "").strip()
+            capture_names = list(task.get("capture_names") or [])
+            if not task_id or not ref_name or not capture_names:
+                continue
+            upstream_hint = self._normalize_hint_text(task.get("handoff_hint")) or self._normalize_hint_text(behavior_hint)
+            task_contexts.append(
+                {
+                    "task_id": task_id,
+                    "ref_name": ref_name,
+                    "task_name": str(task.get("task_name") or "").strip(),
+                    "capture_names": capture_names,
+                    "branch_lineage": list(task.get("branch_lineage") or []),
+                    "upstream_hint": upstream_hint,
+                    "module": str(item.get("module") or "").strip(),
+                    "instance": str(item.get("instance") or "").strip(),
+                    "path": self._item_path(item),
+                }
+            )
+        return task_contexts
 
     def _build_leaf_contexts_from_tasks(
         self,
@@ -1192,6 +1677,38 @@ class Pass3InStrackAPV:
             )
         return leaf_contexts
 
+    def _normalize_task_context_list(self, task_contexts: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for entry in list(task_contexts or []):
+            if not isinstance(entry, dict):
+                continue
+            task_id = str(entry.get("task_id") or entry.get("id") or "").strip()
+            ref_name = str(entry.get("ref_name") or "").strip()
+            local_ref_name = str(entry.get("local_ref_name") or ref_name or "").strip()
+            capture_names = self._coerce_string_list(entry.get("capture_names"))
+            branch_lineage = self._coerce_string_list(entry.get("branch_lineage"))
+            upstream_hint = self._normalize_hint_text(entry.get("upstream_hint"))
+            task_name = str(entry.get("task_name") or entry.get("name") or "").strip()
+            if ref_name and not branch_lineage:
+                branch_lineage = [ref_name]
+            if not task_id or not ref_name or not capture_names:
+                continue
+            normalized.append(
+                {
+                    "task_id": task_id,
+                    "ref_name": ref_name,
+                    "local_ref_name": local_ref_name,
+                    "task_name": task_name,
+                    "capture_names": capture_names,
+                    "branch_lineage": branch_lineage,
+                    "upstream_hint": upstream_hint,
+                    "module": str(entry.get("module") or "").strip(),
+                    "instance": str(entry.get("instance") or "").strip(),
+                    "path": str(entry.get("path") or "").strip(),
+                }
+            )
+        return normalized
+
     def _normalize_leaf_context_list(self, leaf_contexts: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
         normalized: List[Dict[str, Any]] = []
         for entry in list(leaf_contexts or []):
@@ -1220,14 +1737,32 @@ class Pass3InStrackAPV:
             )
         return normalized
 
-    def _detect_candidate_overflow(self, previous_leaf_contexts: Optional[List[Dict[str, Any]]]) -> str:
-        count = len(self._normalize_leaf_context_list(previous_leaf_contexts))
-        if count <= self._UPSTREAM_CANDIDATE_OVERFLOW_LIMIT:
-            return ""
-        return (
-            f"Upstream candidate overflow: previous item exported {count} leaf_contexts, exceeding the supported "
-            f"limit of {self._UPSTREAM_CANDIDATE_OVERFLOW_LIMIT}. Current item is forced to partial."
-        )
+    def _normalize_visible_dep_context_list(self, dep_contexts: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for entry in self._normalize_task_context_list(dep_contexts):
+            task_id = str(entry.get("task_id") or "").strip()
+            local_ref_name = str(entry.get("local_ref_name") or entry.get("ref_name") or "").strip()
+            if not task_id:
+                continue
+            normalized.append(
+                {
+                    "task_id": task_id,
+                    "ref_name": task_id,
+                    "local_ref_name": local_ref_name,
+                    "task_name": str(entry.get("task_name") or "").strip(),
+                    "capture_names": list(entry.get("capture_names") or []),
+                    "branch_lineage": list(entry.get("branch_lineage") or []),
+                    "upstream_hint": self._normalize_hint_text(entry.get("upstream_hint")),
+                    "module": str(entry.get("module") or "").strip(),
+                    "instance": str(entry.get("instance") or "").strip(),
+                    "path": str(entry.get("path") or "").strip(),
+                }
+            )
+        return normalized
+
+    def _detect_candidate_overflow(self, previous_task_contexts: Optional[List[Dict[str, Any]]]) -> str:
+        _ = previous_task_contexts
+        return ""
 
     def _find_duplicate_item_paths(self, orchestrate_items: List[Dict[str, Any]]) -> List[str]:
         counts: Dict[str, int] = {}

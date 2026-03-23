@@ -11,6 +11,7 @@ import json
 import time
 import traceback
 import inspect
+from types import SimpleNamespace
 from typing import List, Optional, Any, Dict, Tuple
 
 from .llm_toolcall import ToolCallback, build_tool_round_messages
@@ -119,6 +120,8 @@ class LLMBackend:
 
                 aggregated = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
                 final_text: str = ""
+                completed_rounds = 0
+                saw_tool_calls = False
 
                 # Multi-round tool calling loop.
                 # - Round 0: normal call with tools enabled
@@ -126,6 +129,7 @@ class LLMBackend:
                 # - Stop when no tool_calls (final assistant content).
                 rounds = max(1, int(max_tool_rounds) if tool_mode else 1)
                 for _round in range(rounds):
+                    completed_rounds = _round + 1
                     kwargs: Dict[str, Any] = {
                         "model": self.model,
                         "messages": messages,
@@ -158,6 +162,7 @@ class LLMBackend:
 
                     tool_calls = getattr(assistant_message, "tool_calls", None)
                     if tool_mode and tool_calls:
+                        saw_tool_calls = True
                         tool_round_log_lines: List[str] = []
                         for tc in tool_calls:
                             fn = getattr(tc, "function", None)
@@ -201,6 +206,20 @@ class LLMBackend:
                 # Log only the initial system+prompt (keeps log sizes bounded)
                 self._log_call(system, prompt, self.model, log_path)
 
+                if not final_text:
+                    empty_detail = {
+                        "summary": "LLM returned empty response.",
+                        "model": self.model,
+                        "base_url": self.base_url,
+                        "thinking": bool(use_thinking),
+                        "tool_mode": bool(tool_mode),
+                        "configured_max_tool_rounds": int(max_tool_rounds) if tool_mode else 0,
+                        "completed_rounds": int(completed_rounds),
+                        "saw_tool_calls": bool(saw_tool_calls),
+                        "token_stats": dict(aggregated),
+                    }
+                    self._append_empty_response_to_log(log_path, empty_detail)
+
                 # Emit WebUI trace event if monitoring enabled
                 if trace_event_id and self.enable_webui_monitoring:
                     try:
@@ -217,7 +236,19 @@ class LLMBackend:
                     except Exception:
                         pass
 
-                return (final_text if final_text else "Error: LLM returned empty response."), aggregated
+                if final_text:
+                    return final_text, aggregated
+                empty_summary = (
+                    "Error: LLM returned empty response. "
+                    f"rounds_used={completed_rounds}; "
+                    f"tool_mode={bool(tool_mode)}; "
+                    f"saw_tool_calls={bool(saw_tool_calls)}; "
+                    f"configured_max_tool_rounds={int(max_tool_rounds) if tool_mode else 0}; "
+                    f"input_tokens={int(aggregated.get('input_tokens', 0) or 0)}; "
+                    f"output_tokens={int(aggregated.get('output_tokens', 0) or 0)}; "
+                    f"total_tokens={int(aggregated.get('total_tokens', 0) or 0)}."
+                )
+                return empty_summary, aggregated
 
             except Exception as e:
                 detail = self._format_exception_details(
@@ -258,6 +289,7 @@ class LLMBackend:
         reasoning_parts: List[str] = []
         content_parts: List[str] = []
         final_message: Any = None
+        streamed_tool_calls: Dict[int, Dict[str, Any]] = {}
 
         async for chunk in self._aiter_response_stream(response_stream):
             choices = getattr(chunk, "choices", None) or []
@@ -277,6 +309,10 @@ class LLMBackend:
                 content_delta = getattr(delta, "content", None)
                 if content_delta:
                     content_parts.append(str(content_delta))
+                self._accumulate_streamed_tool_calls(
+                    streamed_tool_calls,
+                    getattr(delta, "tool_calls", None),
+                )
 
             message = getattr(choices[0], "message", None)
             if message is not None:
@@ -286,10 +322,68 @@ class LLMBackend:
             final_message = type("StreamedAssistantMessage", (), {})()
         if not getattr(final_message, "content", None):
             final_message.content = "".join(content_parts)
-        if not hasattr(final_message, "tool_calls"):
+        if streamed_tool_calls:
+            final_message.tool_calls = self._build_streamed_tool_call_objects(streamed_tool_calls)
+        elif not hasattr(final_message, "tool_calls"):
             final_message.tool_calls = None
 
         return final_message, "".join(reasoning_parts).strip()
+
+    def _accumulate_streamed_tool_calls(
+        self,
+        streamed_tool_calls: Dict[int, Dict[str, Any]],
+        delta_tool_calls: Any,
+    ) -> None:
+        """Collect streamed tool call deltas into one stable tool-call payload."""
+        for raw_tool_call in list(delta_tool_calls or []):
+            try:
+                index = int(getattr(raw_tool_call, "index", 0) or 0)
+            except Exception:
+                index = 0
+            entry = streamed_tool_calls.setdefault(
+                index,
+                {
+                    "id": "",
+                    "type": "function",
+                    "function": {
+                        "name": "",
+                        "arguments": "",
+                    },
+                },
+            )
+            tool_call_id = getattr(raw_tool_call, "id", None)
+            if tool_call_id:
+                entry["id"] = str(tool_call_id)
+            tool_call_type = getattr(raw_tool_call, "type", None)
+            if tool_call_type:
+                entry["type"] = str(tool_call_type)
+            function = getattr(raw_tool_call, "function", None)
+            if function is None:
+                continue
+            function_name = getattr(function, "name", None)
+            if function_name:
+                entry["function"]["name"] += str(function_name)
+            function_arguments = getattr(function, "arguments", None)
+            if function_arguments:
+                entry["function"]["arguments"] += str(function_arguments)
+
+    def _build_streamed_tool_call_objects(self, streamed_tool_calls: Dict[int, Dict[str, Any]]) -> List[Any]:
+        """Materialize accumulated streamed tool calls into message-like objects."""
+        tool_calls: List[Any] = []
+        for index in sorted(streamed_tool_calls.keys()):
+            payload = streamed_tool_calls[index]
+            function = SimpleNamespace(
+                name=str(((payload.get("function") or {}).get("name") or "")).strip(),
+                arguments=str(((payload.get("function") or {}).get("arguments") or "")),
+            )
+            tool_calls.append(
+                SimpleNamespace(
+                    id=str(payload.get("id") or ""),
+                    type=str(payload.get("type") or "function"),
+                    function=function,
+                )
+            )
+        return tool_calls
 
     async def _aiter_response_stream(self, response_stream: Any):
         """Normalize OpenAI-compatible sync/async streams into one async iterator."""
@@ -522,6 +616,30 @@ class LLMBackend:
                     f.write("```text\n" + traceback_text + "\n```\n")
         except Exception as e:
             print(f"[WARN] Failed to append exception log: {e}")
+
+    def _append_empty_response_to_log(self, log_path: str, detail: Dict[str, Any]):
+        """Append structured empty-response diagnostics to debug log."""
+        try:
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write("\n\n" + "=" * 80 + "\n")
+                f.write("## LLM Empty Response\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(f"- summary: {detail.get('summary', '')}\n")
+                f.write(f"- model: {detail.get('model', '')}\n")
+                f.write(f"- base_url: {detail.get('base_url', '')}\n")
+                f.write(f"- thinking: {detail.get('thinking', False)}\n")
+                f.write(f"- tool_mode: {detail.get('tool_mode', False)}\n")
+                f.write(f"- configured_max_tool_rounds: {detail.get('configured_max_tool_rounds', 0)}\n")
+                f.write(f"- completed_rounds: {detail.get('completed_rounds', 0)}\n")
+                f.write(f"- saw_tool_calls: {detail.get('saw_tool_calls', False)}\n")
+                token_stats = detail.get("token_stats") or {}
+                if token_stats:
+                    f.write("- token_stats:\n")
+                    f.write(f"  - input_tokens: {int(token_stats.get('input_tokens', 0) or 0)}\n")
+                    f.write(f"  - output_tokens: {int(token_stats.get('output_tokens', 0) or 0)}\n")
+                    f.write(f"  - total_tokens: {int(token_stats.get('total_tokens', 0) or 0)}\n")
+        except Exception as e:
+            print(f"[WARN] Failed to append empty-response log: {e}")
 
     def _log_call(self, system: str, prompt: str, model: str, log_path: str = "debug.md"):
         """Log the LLM call to a markdown file."""

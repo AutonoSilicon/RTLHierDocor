@@ -123,13 +123,17 @@ class Pass3Hash:
         instruction: str,
         start_module: str,
         orchestration_json_text: str,
+        source_access_mode: str = "embedded_topology",
+        apv_max_tool_rounds: int = 32,
     ) -> str:
         """Build cache key for pass3.3.3 APV instruction index."""
         payload = {
-            "version": "pass3_3_instrack_apv_index_cache_v10",
+            "version": "pass3_3_instrack_apv_index_cache_v14",
             "top_module": top_module,
             "instruction": instruction,
             "start_module": start_module,
+            "source_access_mode": source_access_mode,
+            "apv_max_tool_rounds": int(apv_max_tool_rounds),
             "system_prompt": PASS3_3_3_APV_SYSTEM,
             "prompt_template": PASS3_3_3_APV_PROMPT,
             "orchestration_json_hash": hash_text(orchestration_json_text),
@@ -141,20 +145,24 @@ class Pass3Hash:
         top_module: str,
         instruction: str,
         item_json_text: str,
-        previous_leaf_json_text: str,
-        current_module_topology_text: str = "",
+        history_task_json_text: str,
+        current_module_evidence_text: str = "",
+        source_access_mode: str = "embedded_topology",
+        apv_max_tool_rounds: int = 32,
         local_signal_guidance_json_text: str = "",
     ) -> str:
         """Build cache key for one pass3.3.3 APV module item."""
         payload = {
-            "version": "pass3_3_instrack_apv_item_cache_v11",
+            "version": "pass3_3_instrack_apv_item_cache_v15",
             "top_module": top_module,
             "instruction": instruction,
+            "source_access_mode": source_access_mode,
+            "apv_max_tool_rounds": int(apv_max_tool_rounds),
             "system_prompt": PASS3_3_3_APV_SYSTEM,
             "prompt_template": PASS3_3_3_APV_PROMPT,
             "item_json_hash": hash_text(item_json_text),
-            "previous_leaf_json_hash": hash_text(previous_leaf_json_text),
-            "current_module_topology_hash": hash_text(current_module_topology_text),
+            "history_task_json_hash": hash_text(history_task_json_text),
+            "current_module_evidence_hash": hash_text(current_module_evidence_text),
             "local_signal_guidance_hash": hash_text(local_signal_guidance_json_text),
         }
         return hash_text(json.dumps(payload, ensure_ascii=False, sort_keys=True))

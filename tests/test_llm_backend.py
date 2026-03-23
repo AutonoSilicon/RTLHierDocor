@@ -4,9 +4,24 @@ from agent.llm_backend import LLMBackend
 
 
 class _FakeDelta:
-    def __init__(self, reasoning_content=None, content=None):
+    def __init__(self, reasoning_content=None, content=None, tool_calls=None):
         self.reasoning_content = reasoning_content
         self.content = content
+        self.tool_calls = tool_calls
+
+
+class _FakeToolFunction:
+    def __init__(self, name=None, arguments=None):
+        self.name = name
+        self.arguments = arguments
+
+
+class _FakeToolCallDelta:
+    def __init__(self, index=0, id=None, type="function", function=None):
+        self.index = index
+        self.id = id
+        self.type = type
+        self.function = function
 
 
 class _FakeChoice:
@@ -69,3 +84,53 @@ def test_consume_streaming_chat_completion_collects_reasoning_and_usage():
     assert reasoning == "think-1 think-2"
     assert message.content == "```json\n{\"status\":\"complete\"}\n```"
     assert aggregated == {"input_tokens": 12, "output_tokens": 5, "total_tokens": 17}
+
+
+def test_consume_streaming_chat_completion_collects_streamed_tool_calls():
+    backend = object.__new__(LLMBackend)
+    aggregated = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    stream = _FakeAsyncStream(
+        [
+            _FakeChunk(
+                [
+                    _FakeChoice(
+                        delta=_FakeDelta(
+                            reasoning_content="thinking",
+                            tool_calls=[
+                                _FakeToolCallDelta(
+                                    index=0,
+                                    id="call_1",
+                                    function=_FakeToolFunction(name="grepSource", arguments="{\"pattern\":\""),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            ),
+            _FakeChunk(
+                [
+                    _FakeChoice(
+                        delta=_FakeDelta(
+                            tool_calls=[
+                                _FakeToolCallDelta(
+                                    index=0,
+                                    function=_FakeToolFunction(arguments="pcgen_ifctrl_pc\"}"),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            ),
+            _FakeChunk([], _FakeUsage(prompt_tokens=9, completion_tokens=4, total_tokens=13)),
+        ]
+    )
+
+    message, reasoning = asyncio.run(backend._consume_streaming_chat_completion(stream, aggregated))
+
+    assert reasoning == "thinking"
+    assert message.content == ""
+    assert len(message.tool_calls) == 1
+    assert message.tool_calls[0].id == "call_1"
+    assert message.tool_calls[0].function.name == "grepSource"
+    assert message.tool_calls[0].function.arguments == "{\"pattern\":\"pcgen_ifctrl_pc\"}"
+    assert aggregated == {"input_tokens": 9, "output_tokens": 4, "total_tokens": 13}

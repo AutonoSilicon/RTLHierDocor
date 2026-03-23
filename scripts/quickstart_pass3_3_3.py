@@ -150,7 +150,12 @@ def _collect_cleanup_targets(
 
         if artifacts_dir.exists():
             for path in sorted(artifacts_dir.iterdir()):
-                if path.name == "apv_index.json" or path.name.endswith(".apv.yaml") or path.name.endswith(".apv.raw.md"):
+                if (
+                    path.name == "apv_index.json"
+                    or path.name.endswith(".apv.yaml")
+                    or path.name.endswith(".apv.raw.md")
+                    or path.name.endswith(".apv.llm_error.md")
+                ):
                     files_to_remove.append(path)
                     progress_keys.add(f"instrack/{slug}/artifacts/{path.name}")
 

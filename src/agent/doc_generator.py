@@ -72,6 +72,8 @@ class AgentDocGenerator:
         isa_instructions: Optional[List[str]] = None,
         instrack_single_instruction: Optional[str] = None,
         instrack_use_graph_markers: bool = False,
+        instrack_apv_source_access_mode: str = "embedded_topology",
+        instrack_apv_max_tool_rounds: int = 32,
         pass3_output_subdir: str = "chip",
         pass3_key_modules_per_subsystem: int = 24,
         pass3_max_card_lines: int = 12,
@@ -100,6 +102,8 @@ class AgentDocGenerator:
         self.isa_instructions = isa_instructions or []
         self.instrack_single_instruction = instrack_single_instruction
         self.instrack_use_graph_markers = instrack_use_graph_markers
+        self.instrack_apv_source_access_mode = str(instrack_apv_source_access_mode or "embedded_topology").strip() or "embedded_topology"
+        self.instrack_apv_max_tool_rounds = max(1, int(instrack_apv_max_tool_rounds or 32))
         self.enable_webui_monitoring = enable_webui_monitoring
         self._webui_collector = None
 

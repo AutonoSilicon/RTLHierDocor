@@ -61,6 +61,30 @@ class Pass3Prompts:
             return "无当前模块拓扑证据"
         return text
 
+    def build_instrack_current_module_verilog_source(self, module_name: str) -> str:
+        """Return the current module's raw Verilog source for APV prompts."""
+        key = str(module_name or "").strip()
+        if not key:
+            return "未找到当前模块 Verilog 源码"
+
+        resolver = getattr(getattr(self.g, "owner", None), "resolver", None)
+        if resolver is None:
+            return "未找到当前模块 Verilog 源码"
+
+        text = ""
+        try:
+            if hasattr(resolver, "read_module_source"):
+                text = str(resolver.read_module_source(key, max_lines=0) or "")
+            else:
+                text = str(resolver.read_source(key, max_lines=0) or "")
+        except Exception:
+            text = ""
+
+        text = text.strip()
+        if not text:
+            return "未找到当前模块 Verilog 源码"
+        return text
+
     def build_pass3_recursive_system(self, prompt_style: str = "architecture") -> str:
         """Build the system prompt for recursive pass3 agents."""
         if prompt_style == "instrack_search":
