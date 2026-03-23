@@ -6,6 +6,8 @@ from agent.prompts.pass3_3_instrack import (
     PASS3_3_2_ORCHESTRATE_SYSTEM,
 )
 from agent.prompts.pass3_3_apv import (
+    PASS3_3_3_APV_CONSULT_PROMPT,
+    PASS3_3_3_APV_CONSULT_SYSTEM,
     PASS3_3_3_APV_PROMPT,
     PASS3_3_3_APV_SYSTEM,
 )
@@ -185,6 +187,24 @@ def test_apv_prompt_is_single_shot_and_uses_dep_placeholders_only():
     assert '"handoff_hint": "This leaf proves bypass-family dispatch only.' in prompt_text
     assert '"$dep.pcgen_leaf.pcgen_ifctrl_pc == ib_vpc"' in prompt_text
     assert '"ibctrl_ibdp_bypass_inst_vld == 1\'b1"' in prompt_text
+
+
+def test_apv_prompt_exposes_ask_agent_rules_and_consult_contract():
+    prompt_text = PASS3_3_3_APV_SYSTEM + "\n" + PASS3_3_3_APV_PROMPT
+    consult_text = PASS3_3_3_APV_CONSULT_SYSTEM + "\n" + PASS3_3_3_APV_CONSULT_PROMPT
+
+    assert "`AskAgent(ref_name, question)`" in prompt_text
+    assert "Q/A-only" in prompt_text
+    assert "must not be used to rewrite upstream APV tasks, captures, conditions, status, or YAML" in prompt_text
+    assert "Keep `AskAgent` questions concrete." in prompt_text
+    assert "Visible Upstream Dep Handles" in prompt_text
+
+    assert "answering one downstream clarification question about an already-generated upstream APV leaf" in consult_text
+    assert "Do not regenerate or rewrite upstream APV tasks, captures, conditions, status, branch topology, or runtime YAML." in consult_text
+    assert "The JSON must include `status`, `answer`, `field_updates`, `unknown`, and `suggested_action`." in consult_text
+    assert "`behavior_hint`: optional item-level advisory override" in consult_text
+    assert "`leaf_updates`: optional list of `{ref_name, upstream_hint}`" in consult_text
+    assert "Do not return any APV task list, YAML fragment, or rewritten raw JSON." in consult_text
 
 
 def test_apv_prompt_plan2_guardrails_are_present():

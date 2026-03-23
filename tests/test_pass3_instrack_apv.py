@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 
 from agent.pass3_generator import Pass3Generator
@@ -26,10 +27,29 @@ class FakeLLM:
         self.calls = []
 
     async def generate(self, system, prompt, **kwargs):
-        self.calls.append({"system": system, "prompt": prompt, "kwargs": kwargs})
+        call_record = {"system": system, "prompt": prompt, "kwargs": kwargs}
+        self.calls.append(call_record)
         if not self.responses:
             raise AssertionError("unexpected LLM call")
-        return self.responses.pop(0), {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
+        response = self.responses.pop(0)
+        if isinstance(response, dict) and kwargs.get("tools_enabled"):
+            final_text = str(response.get("final") or "")
+            tool_results = []
+            for tool_call in list(response.get("tool_calls") or []):
+                tool_name = str(tool_call.get("name") or "").strip()
+                tool_args = dict(tool_call.get("arguments") or {})
+                callback = kwargs.get("tool_callback")
+                if callback is None:
+                    raise AssertionError("tool response provided but no tool_callback was supplied")
+                result = callback(tool_name, tool_args)
+                if inspect.isawaitable(result):
+                    result = await result
+                tool_results.append({"name": tool_name, "arguments": tool_args, "result": result})
+            call_record["tool_results"] = tool_results
+            return final_text, {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
+        if isinstance(response, dict):
+            response = response.get("final", "")
+        return response, {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
 
 
 class FakeOwner:
@@ -201,7 +221,7 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
     asyncio.run(generator.run_pass3_3(top_node))
 
     assert len(llm.calls) == 2
-    assert all(call["kwargs"].get("tools_enabled", False) is False for call in llm.calls)
+    assert all(call["kwargs"].get("tools_enabled", False) is True for call in llm.calls)
     assert '"ref_name": "ifu_entry"' in llm.calls[1]["prompt"]
     assert '"task_id": "s00_t00_x_ifu"' in llm.calls[1]["prompt"]
     assert '"capture_names": [' in llm.calls[1]["prompt"]
@@ -464,6 +484,293 @@ def test_run_pass3_3_leaf_hint_falls_back_to_behavior_hint(tmp_path):
     assert apv_index["items"][0]["leaf_contexts"][0]["upstream_hint"] == (
         "Bypass family is resolved here, but downstream still needs local evidence before selecting a concrete slot."
     )
+
+
+def test_run_pass3_3_ask_agent_updates_advisory_hint_for_visible_upstream_leaf(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+            {
+                "tool_calls": [
+                    {
+                        "name": "AskAgent",
+                        "arguments": {
+                            "ref_name": "ifu_entry",
+                            "question": "Does this upstream leaf prove only fetch-family continuity, or does it also resolve a concrete slot identity?",
+                        },
+                    }
+                ],
+                "final": """```json
+{"status":"partial","tasks":[{"ref_name":"decode_accept","dep_name":"ifu_entry","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld == dispatch_vld_i","dispatch_vld_i && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["decode accepted"],"match_mode":"first","max_match":1}],"unknown":["slot identity remains unresolved downstream"]}
+```""",
+            },
+            """```json
+{"status":"answered","answer":"The upstream leaf proves fetch-family continuity only; it does not resolve a concrete downstream slot identity.","field_updates":{"behavior_hint":"Fetch family is resolved here, but downstream still needs local evidence before choosing a slot.","leaf_updates":[{"ref_name":"ifu_entry","upstream_hint":"This leaf proves fetch-family continuity only. Downstream must not assume inst0/inst1/inst2 slot identity from it alone."}],"unknown_append":["No slot-specific selector evidence is available in this upstream item."]},"unknown":[],"suggested_action":"continue"}
+```""",
+        ]
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={
+            "ifu_mod": _structured_topology_block("fetch_vld"),
+            "idu_mod": _structured_topology_block("dispatch_vld_i", "decode_ready", "dispatch_vld"),
+        },
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [{"output_port": "dispatch_vld_o", "value_condition": "dispatch_vld_o = fetch_vld", "behavior": "forward to IDU"}],
+                "_boundary_handoff_routes": [{"status": "resolved", "output_port": "dispatch_vld_o"}],
+                "lifecycle_context": "accepts fetch-valid and forwards decode work",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+        {
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+            "orchestrator_role": "parent_module",
+            "orchestration": {
+                "boundary_takeover": [{"input_port": "dispatch_vld_i", "value_condition": "dispatch_vld_i", "behavior": "accept IFU handoff"}],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "accepts decode handoff",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    assert len(llm.calls) == 3
+    assert llm.calls[1]["kwargs"].get("tools_enabled") is True
+    tool_result = json.loads(llm.calls[1]["tool_results"][0]["result"])
+    assert tool_result["status"] == "answered"
+    assert tool_result["effective_upstream_hint"] == (
+        "This leaf proves fetch-family continuity only. Downstream must not assume inst0/inst1/inst2 slot identity from it alone."
+    )
+    assert tool_result["applied_updates"]["behavior_hint"] == (
+        "Fetch family is resolved here, but downstream still needs local evidence before choosing a slot."
+    )
+    assert "## Upstream Module Context" in llm.calls[2]["prompt"]
+    assert '"ref_name": "ifu_entry"' in llm.calls[2]["prompt"]
+    assert '"behavior_hint": ""' in llm.calls[2]["prompt"]
+
+
+def test_run_pass3_3_ask_agent_rejects_unknown_visible_ref_name(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+            {
+                "tool_calls": [
+                    {
+                        "name": "AskAgent",
+                        "arguments": {
+                            "ref_name": "missing_leaf",
+                            "question": "Can downstream assume slot 0 here?",
+                        },
+                    }
+                ],
+                "final": """```json
+{"status":"partial","tasks":[{"ref_name":"decode_accept","dep_name":"ifu_entry","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld == dispatch_vld_i","dispatch_vld_i"],"capture_signals":["dispatch_vld"],"logging_lines":["decode accepted"],"match_mode":"first","max_match":1}],"unknown":["slot ambiguity remains unresolved"]}
+```""",
+            },
+        ]
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={
+            "ifu_mod": _structured_topology_block("fetch_vld"),
+            "idu_mod": _structured_topology_block("dispatch_vld_i", "dispatch_vld"),
+        },
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [{"output_port": "dispatch_vld_o", "value_condition": "dispatch_vld_o = fetch_vld", "behavior": "forward to IDU"}],
+                "_boundary_handoff_routes": [{"status": "resolved", "output_port": "dispatch_vld_o"}],
+                "lifecycle_context": "accepts fetch-valid and forwards decode work",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+        {
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+            "orchestrator_role": "parent_module",
+            "orchestration": {
+                "boundary_takeover": [{"input_port": "dispatch_vld_i", "value_condition": "dispatch_vld_i", "behavior": "accept IFU handoff"}],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "accepts decode handoff",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    assert len(llm.calls) == 2
+    tool_result = json.loads(llm.calls[1]["tool_results"][0]["result"])
+    assert tool_result["status"] == "error"
+    assert "Unknown `ref_name=missing_leaf`" in tool_result["error"]
+
+
+def test_run_pass3_3_ask_agent_enforces_per_item_limit(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["ifu accepts instruction"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+            {
+                "tool_calls": [
+                    {
+                        "name": "AskAgent",
+                        "arguments": {
+                            "ref_name": "ifu_entry",
+                            "question": "Does this leaf resolve slot identity?",
+                        },
+                    },
+                    {
+                        "name": "AskAgent",
+                        "arguments": {
+                            "ref_name": "ifu_entry",
+                            "question": "Should downstream keep the route partial if no local selector is visible?",
+                        },
+                    },
+                    {
+                        "name": "AskAgent",
+                        "arguments": {
+                            "ref_name": "ifu_entry",
+                            "question": "Can I ask a third time?",
+                        },
+                    },
+                ],
+                "final": """```json
+{"status":"partial","tasks":[{"ref_name":"decode_accept","dep_name":"ifu_entry","task_name":"decode accept","condition_lines":["$dep.ifu_entry.fetch_vld == dispatch_vld_i","dispatch_vld_i && decode_ready"],"capture_signals":["dispatch_vld"],"logging_lines":["decode accepted"],"match_mode":"first","max_match":1}],"unknown":["slot ambiguity remains unresolved"]}
+```""",
+            },
+            """```json
+{"status":"answered","answer":"No, this leaf does not resolve slot identity.","field_updates":{"leaf_updates":[{"ref_name":"ifu_entry","upstream_hint":"This leaf does not resolve downstream slot identity."}]},"unknown":[],"suggested_action":"continue"}
+```""",
+            """```json
+{"status":"answered","answer":"Yes. Without a local selector or same-line anchor, downstream should stay partial.","field_updates":{"unknown_append":["No local selector evidence was proven upstream."]},"unknown":[],"suggested_action":"continue"}
+```""",
+        ]
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={
+            "ifu_mod": _structured_topology_block("fetch_vld"),
+            "idu_mod": _structured_topology_block("dispatch_vld_i", "decode_ready", "dispatch_vld"),
+        },
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [{"output_port": "dispatch_vld_o", "value_condition": "dispatch_vld_o = fetch_vld", "behavior": "forward to IDU"}],
+                "_boundary_handoff_routes": [{"status": "resolved", "output_port": "dispatch_vld_o"}],
+                "lifecycle_context": "accepts fetch-valid and forwards decode work",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+        {
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+            "orchestrator_role": "parent_module",
+            "orchestration": {
+                "boundary_takeover": [{"input_port": "dispatch_vld_i", "value_condition": "dispatch_vld_i", "behavior": "accept IFU handoff"}],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "accepts decode handoff",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    assert len(llm.calls) == 4
+    tool_results = llm.calls[1]["tool_results"]
+    assert json.loads(tool_results[0]["result"])["status"] == "answered"
+    assert json.loads(tool_results[1]["result"])["status"] == "answered"
+    third_result = json.loads(tool_results[2]["result"])
+    assert third_result["status"] == "error"
+    assert "per-item call limit reached" in third_result["error"]
 
 
 def test_run_pass3_3_keeps_valid_tasks_when_one_task_is_invalid(tmp_path):

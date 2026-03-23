@@ -218,6 +218,32 @@ class Pass3Tools:
         """Alias for pass3.3.2 tools (for parent-level calls)."""
         return self.pass3_3_2_tools()
 
+    def pass3_3_3_tools(self) -> List[Dict[str, Any]]:
+        """Tools for pass3.3.3 APV clarification."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "AskAgent",
+                    "description": "Ask one visible upstream APV leaf's originating module agent a concrete clarification question. Use this only when current-module evidence cannot resolve a branch/slot/pipe/channel ambiguity or continuity limit. The reply is advisory-only and may update upstream-facing hints, but it does not rewrite upstream APV tasks or YAML.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ref_name": {
+                                "type": "string",
+                                "description": "One visible upstream dep handle `ref_name` from the current prompt.",
+                            },
+                            "question": {
+                                "type": "string",
+                                "description": "One concrete clarification question about ambiguity, continuity limits, or what downstream may safely assume.",
+                            },
+                        },
+                        "required": ["ref_name", "question"],
+                    },
+                },
+            },
+        ]
+
     def pass3_3_tools(self) -> List[Dict[str, Any]]:
         """Legacy alias for pass3.3 tools."""
         return self.pass3_3_2_tools()

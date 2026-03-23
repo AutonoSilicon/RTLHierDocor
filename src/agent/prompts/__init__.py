@@ -71,6 +71,8 @@ from .pass3_3_instrack import (
 from .pass3_3_apv import (
     PASS3_3_3_APV_SYSTEM,
     PASS3_3_3_APV_PROMPT,
+    PASS3_3_3_APV_CONSULT_SYSTEM,
+    PASS3_3_3_APV_CONSULT_PROMPT,
 )
 
 __all__ = [
@@ -133,4 +135,6 @@ __all__ = [
     "PASS3_3_2_ORCHESTRATE_PROMPT",
     "PASS3_3_3_APV_SYSTEM",
     "PASS3_3_3_APV_PROMPT",
+    "PASS3_3_3_APV_CONSULT_SYSTEM",
+    "PASS3_3_3_APV_CONSULT_PROMPT",
 ]

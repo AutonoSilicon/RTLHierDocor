@@ -51,6 +51,9 @@ How APV matches a task chain:
 - Visible upstream candidates may be truncated by the wrapper; use only the candidates shown in `Visible Upstream Dep Handles`.
 - `behavior_hint`, `handoff_hint`, and downstream `upstream_hint` are advisory context only. They may explain uncertainty or branch design, but they never replace a real signal relation in `condition_lines`.
 - Do not assume slot identity from source-path identity alone. A unique bypass/ibuf/lbuf path does not imply the instruction must be in `inst0`/`inst1`/`inst2` unless local evidence explicitly proves that mapping.
+- You may call `AskAgent(ref_name, question)` only for one currently visible upstream dep handle. Use it to clarify unresolved branch/slot/pipe/channel ambiguity or continuity limits when current evidence is insufficient.
+- `AskAgent` is Q/A-only. It may return advisory hint updates, but it must not be used to rewrite upstream APV tasks, captures, conditions, status, or YAML.
+- Keep `AskAgent` questions concrete. Ask what downstream may safely assume, what ambiguity remains, or which advisory hint should be updated. Do not ask open-ended review questions.
 
 Task fields:
 - `ref_name`: short stable snake_case alias for this task inside the raw JSON. Later tasks may reference it as `$dep.<ref_name>.<signal>`.
@@ -226,4 +229,60 @@ Interpret each task's `condition_lines` as one local observation point.
 - If you output `complete`, at least one same-line continuity condition directly ties an upstream anchor to a local anchor.
 - If you rely on `behavior_hint`, `handoff_hint`, or `upstream_hint`, confirm they only explain ambiguity and do not replace any required signal evidence.
 - If any step lacks enough evidence, delete that speculative task and return `partial` instead of keeping a guessed chain.
+"""
+
+PASS3_3_3_APV_CONSULT_SYSTEM = """You are a senior CPU verification engineer answering one downstream clarification question about an already-generated upstream APV leaf.
+
+Goal:
+- Answer one concrete downstream question about what the upstream APV leaf proves, what it does not prove, and what downstream should or should not assume.
+- Return advisory-only updates. Do not regenerate or rewrite upstream APV tasks, captures, conditions, status, branch topology, or runtime YAML.
+- Use the provided upstream APV summary, current leaf context, prior Q/A transcript, and latest advisory overrides as the only context.
+
+Rules:
+- Output exactly one `json` code block and no other text.
+- The JSON must include `status`, `answer`, `field_updates`, `unknown`, and `suggested_action`.
+- Allowed `status`: `answered`, `insufficient`.
+- Allowed `suggested_action`: `continue`, `stay_partial`, `ask_again`.
+- `field_updates` is advisory-only. It may include:
+  - `behavior_hint`: optional item-level advisory override
+  - `leaf_updates`: optional list of `{ref_name, upstream_hint}`
+  - `unknown_append`: optional list of extra advisory limitations
+- Do not return any APV task list, YAML fragment, or rewritten raw JSON.
+- Keep the answer concise, evidence-based, and specific to the asked ambiguity.
+"""
+
+PASS3_3_3_APV_CONSULT_PROMPT = """
+## Upstream Module Context
+```json
+{upstream_item_json}
+```
+
+## Upstream Raw APV Summary
+```json
+{upstream_apv_summary_json}
+```
+
+## Selected Upstream Leaf
+```json
+{leaf_context_json}
+```
+
+## Existing Q/A Transcript
+```json
+{qa_transcript_json}
+```
+
+## Latest Advisory Overrides
+```json
+{advisory_override_json}
+```
+
+## Downstream Question
+{question}
+
+## Required Output
+- Answer the downstream question directly.
+- Update only advisory fields if needed.
+- Do not rewrite upstream APV tasks or status.
+- If the question cannot be answered from the provided evidence, return `status = "insufficient"` and `suggested_action = "stay_partial"` unless one narrowly-scoped follow-up question would materially help.
 """
