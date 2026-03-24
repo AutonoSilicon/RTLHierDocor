@@ -11,11 +11,13 @@ from .prompts import PASS3_3_3_APV_PROMPT, PASS3_3_3_APV_SYSTEM
 class Pass3InStrackAPV:
     """Helper object encapsulating pass3.3.3 APV generation."""
 
+    _APV_INDEX_SCHEMA_VERSION = "pass3_3_3_apv_index_v8"
     _MAX_VISIBLE_DEP_CANDIDATES = 16
     _UPSTREAM_CANDIDATE_OVERFLOW_LIMIT = 8
     _DEFAULT_APV_MAX_TOOL_ROUNDS = 32
     _MAX_READ_LINE_SPAN = 80
     _ALLOWED_SOURCE_ACCESS_MODES = {"embedded_topology", "toolized_source"}
+    _ALLOWED_ANCHOR_KINDS = {"identity", "path", "gating"}
     _ALLOWED_MATCH_MODES = {"first", "all", "unique_per_var"}
     _MATCH_MODE_ALIASES = {
         "single": "first",
@@ -66,6 +68,77 @@ class Pass3InStrackAPV:
     }
     _SIGNAL_GUIDANCE_MARKERS = ("(port)", "->", "Inputs from blocks:", "Outputs to blocks:", "[Source code]")
     _ANCHOR_HINT_TOKENS = ("pc", "vpc", "data", "inst", "dispatch", "issue", "valid", "vld")
+    _ANCHOR_REASON_SEMANTIC_HINTS = {
+        "align",
+        "aligns",
+        "bind",
+        "binds",
+        "block",
+        "blocks",
+        "carry",
+        "carries",
+        "channel",
+        "confirm",
+        "confirms",
+        "continuity",
+        "correlate",
+        "correlates",
+        "disambiguate",
+        "disambiguates",
+        "distinguish",
+        "distinguishes",
+        "enable",
+        "enables",
+        "family",
+        "gate",
+        "gates",
+        "gating",
+        "identify",
+        "identifies",
+        "identity",
+        "instruction",
+        "link",
+        "links",
+        "map",
+        "maps",
+        "match",
+        "matches",
+        "mux",
+        "path",
+        "pc",
+        "pipe",
+        "preserve",
+        "preserves",
+        "route",
+        "same",
+        "select",
+        "selects",
+        "slot",
+        "stall",
+        "timing",
+        "track",
+        "tracks",
+    }
+    _ANCHOR_REASON_STOPWORDS = {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "it",
+        "of",
+        "or",
+        "that",
+        "the",
+        "this",
+        "to",
+        "with",
+    }
 
     def __init__(self, generator: Any):
         self.g = generator
@@ -99,7 +172,7 @@ class Pass3InStrackAPV:
             index_payload = {
                 "instruction": instruction,
                 "start_module": parsed_search.get("start_module", ""),
-                "schema_version": "pass3_3_3_apv_index_v7",
+                "schema_version": self._APV_INDEX_SCHEMA_VERSION,
                 "status": "failed",
                 "error": error,
                 "items": [],
@@ -146,7 +219,7 @@ class Pass3InStrackAPV:
         index_payload = {
             "instruction": instruction,
             "start_module": parsed_search.get("start_module", ""),
-            "schema_version": "pass3_3_3_apv_index_v7",
+            "schema_version": self._APV_INDEX_SCHEMA_VERSION,
             "items": items,
         }
         index_text = json.dumps(index_payload, ensure_ascii=False, indent=2)
@@ -482,6 +555,7 @@ class Pass3InStrackAPV:
         tasks: List[Dict[str, Any]] = []
         errors: List[str] = []
         dep_symbols: Dict[str, Dict[str, Any]] = {}
+        reserved_ref_names: Set[str] = set()
         normalized_previous_task_contexts = self._normalize_visible_dep_context_list(previous_task_contexts)
         trusted_local_signal_catalog = bool((local_signal_guidance or {}).get("trusted_local_signal_catalog"))
         allowed_local_signals = set((local_signal_guidance or {}).get("allowed_local_signals") or [])
@@ -498,7 +572,12 @@ class Pass3InStrackAPV:
                     item=previous_task_context,
                     source="upstream",
                     upstream_hint=str(previous_task_context.get("upstream_hint") or "").strip(),
+                    anchors=list(previous_task_context.get("anchors") or []),
+                    anchor_capture_names=list(previous_task_context.get("anchor_capture_names") or []),
+                    anchor_kinds=list(previous_task_context.get("anchor_kinds") or []),
+                    anchor_reasons=list(previous_task_context.get("anchor_reasons") or []),
                 )
+                reserved_ref_names.add(upstream_ref_name)
 
         for task_index, raw_task in enumerate(raw_tasks):
             task_errors: List[str] = []
@@ -534,8 +613,8 @@ class Pass3InStrackAPV:
             try:
                 max_match = int(raw_task.get("max_match", 0))
             except Exception:
-                errors.append(f"Task `{task_name or task_index}` has non-integer `max_match`.")
-                continue
+                task_errors.append(f"Task `{task_name or task_index}` has non-integer `max_match`.")
+                max_match = 0
 
             if not ref_name:
                 task_errors.append(f"Task `{task_name or task_index}` is missing `ref_name`.")
@@ -547,7 +626,7 @@ class Pass3InStrackAPV:
                 task_errors.append(
                     f"Task `{task_name or task_index}` uses task-id-like `ref_name={ref_name}`; raw APV JSON must use stable aliases, not final task ids."
                 )
-            elif ref_name in dep_symbols:
+            elif ref_name in reserved_ref_names:
                 task_errors.append(
                     f"Task `{task_name or task_index}` uses duplicate `ref_name={ref_name}` which is already visible in the dep namespace."
                 )
@@ -565,12 +644,23 @@ class Pass3InStrackAPV:
                 task_errors.append(
                     f"Task `{task_name or task_index}` uses unsupported `match_mode={raw_match_mode}`."
                 )
+                match_mode = "first"
             if max_match < 0:
                 task_errors.append(f"Task `{task_name or task_index}` uses negative `max_match`.")
+                max_match = 0
 
-            if task_errors:
-                errors.extend(task_errors)
-                continue
+            if not ref_name or not self._REF_NAME_RE.fullmatch(ref_name) or self._TASK_ID_LIKE_RE.fullmatch(ref_name) or ref_name in reserved_ref_names:
+                ref_name = self._salvage_ref_name(
+                    raw_ref_name=ref_name,
+                    task_name=task_name,
+                    task_index=task_index,
+                    reserved_ref_names=reserved_ref_names,
+                )
+            if not task_name:
+                task_name = ref_name or f"task_{task_index + 1}"
+            if dep_name_raw is None:
+                dep_name = ""
+            errors.extend(task_errors)
 
             dep_references = [
                 (match.group(1), match.group(2))
@@ -594,39 +684,41 @@ class Pass3InStrackAPV:
             dep_symbol: Optional[Dict[str, Any]] = None
             dep_ref_name = dep_ref_names[0] if len(dep_ref_names) == 1 else ""
             if bare_dep_refs:
-                task_errors.append(
+                errors.append(
                     f"Task `{task_name}` must use full `$dep.<ref_name>.<signal>` references in `condition_lines`, got bare refs: {', '.join(bare_dep_refs)}."
                 )
             elif len(dep_ref_names) > 1:
-                task_errors.append(
+                errors.append(
                     f"Task `{task_name}` must reference at most one unique dep `ref_name` in `condition_lines`, got: {', '.join(dep_ref_names)}."
                 )
             elif dep_name and not dep_ref_name:
-                task_errors.append(
+                errors.append(
                     f"Task `{task_name}` declares `dep_name={dep_name}` but has no `$dep.<ref_name>.<signal>` reference in `condition_lines`."
                 )
             elif dep_ref_name and not dep_name:
-                task_errors.append(
+                errors.append(
                     f"Task `{task_name}` references `$dep.{dep_ref_name}.*` but must declare matching `dep_name`."
                 )
+                dep_name = dep_ref_name
             elif dep_ref_name and dep_name and dep_ref_name != dep_name:
-                task_errors.append(
+                errors.append(
                     f"Task `{task_name}` declares `dep_name={dep_name}` but its `condition_lines` reference `$dep.{dep_ref_name}.*`."
                 )
-            elif dep_name:
+                dep_name = dep_ref_name
+            if dep_name:
                 dep_symbol = dep_symbols.get(dep_name)
                 if not dep_symbol:
                     available_ref_names = ", ".join(sorted(dep_symbols.keys())) or "<none>"
                     if self._TASK_ID_LIKE_RE.fullmatch(dep_name):
-                        task_errors.append(
+                        errors.append(
                             f"Task `{task_name}` must not emit final `$dep.<task_id>.<signal>` references in raw APV JSON; use a declared `ref_name` instead of `{dep_name}`."
                         )
                     elif dep_name in future_ref_names:
-                        task_errors.append(
+                        errors.append(
                             f"Task `{task_name}` forward-references `ref_name={dep_name}` before that task is declared."
                         )
                     else:
-                        task_errors.append(
+                        errors.append(
                             f"Task `{task_name}` references unknown dep `ref_name={dep_name}`; available: {available_ref_names}."
                         )
                 else:
@@ -640,29 +732,25 @@ class Pass3InStrackAPV:
                         }
                     )
                     if missing_capture_names:
-                        task_errors.append(
+                        errors.append(
                             f"Task `{task_name}` references unknown dep capture name(s) for `ref_name={dep_name}`: {', '.join(missing_capture_names)}; available: {', '.join(available_capture_names)}."
                         )
                     if not dep_task_id:
-                        task_errors.append(
+                        errors.append(
                             f"Task `{task_name}` is missing the resolved upstream task id for `ref_name={dep_name}`."
                         )
             elif legacy_dep_source or legacy_dep_leaf_name:
-                task_errors.append(
+                errors.append(
                     f"Task `{task_name}` declares legacy dependency fields without any `$dep.<ref_name>.<signal>` reference in `condition_lines`."
                 )
             if legacy_dep_source:
-                task_errors.append(
+                errors.append(
                     f"Task `{task_name}` must not emit legacy `dep_source={legacy_dep_source}`; use `dep_name` plus `$dep.<ref_name>.<signal>` references only."
                 )
             if legacy_dep_leaf_name:
-                task_errors.append(
+                errors.append(
                     f"Task `{task_name}` must not emit legacy `dep_leaf_name={legacy_dep_leaf_name}`; use `dep_name` plus `$dep.<ref_name>.<signal>` references only."
                 )
-
-            if task_errors:
-                errors.extend(task_errors)
-                continue
 
             task_id = self._build_task_id(item=item, item_index=item_index, task_index=task_index)
             normalized_conditions = [
@@ -695,11 +783,24 @@ class Pass3InStrackAPV:
                     errors.append(
                         f"Task `{task_name}` references unknown local signal(s) for this module item: {', '.join(missing_local_signals)}."
                     )
-                    continue
             capture_names = self._capture_names(normalized_capture)
             if not capture_names:
                 errors.append(f"Task `{task_name}` does not expose any usable capture names.")
-                continue
+            normalized_anchors, anchor_errors = self._normalize_anchor_entries(
+                raw_task=raw_task,
+                task_name=task_name,
+                dep_name=dep_name,
+                dep_task_id=dep_task_id,
+                condition_lines=condition_lines,
+                normalized_capture=normalized_capture,
+                scope_prefix=scope_prefix,
+                root_prefixes=root_prefixes,
+            )
+            if anchor_errors:
+                errors.extend(anchor_errors)
+            anchor_capture_names = self._anchor_capture_names(normalized_anchors)
+            anchor_kinds = self._anchor_kinds(normalized_anchors)
+            anchor_reasons = self._anchor_reasons(normalized_anchors)
             branch_lineage = self._derive_branch_lineage(dep_symbol=dep_symbol, ref_name=ref_name)
 
             tasks.append(
@@ -717,8 +818,13 @@ class Pass3InStrackAPV:
                     "capture_names": capture_names,
                     "branch_lineage": branch_lineage,
                     "handoff_hint": handoff_hint,
+                    "anchors": normalized_anchors,
+                    "anchor_kinds": anchor_kinds,
+                    "anchor_capture_names": anchor_capture_names,
+                    "anchor_reasons": anchor_reasons,
                 }
             )
+            reserved_ref_names.add(ref_name)
             dep_symbols[ref_name] = self._build_dep_symbol(
                 ref_name=ref_name,
                 task_id=task_id,
@@ -727,9 +833,38 @@ class Pass3InStrackAPV:
                 upstream_hint=handoff_hint,
                 item=item,
                 source="local",
+                anchors=normalized_anchors,
+                anchor_capture_names=anchor_capture_names,
+                anchor_kinds=anchor_kinds,
+                anchor_reasons=anchor_reasons,
             )
 
         return tasks, errors
+
+    def _sanitize_ref_name_candidate(self, value: str) -> str:
+        candidate = re.sub(r"[^A-Za-z0-9_]+", "_", str(value or "").strip().lower()).strip("_")
+        candidate = re.sub(r"_+", "_", candidate)
+        if candidate and candidate[0].isdigit():
+            candidate = f"task_{candidate}"
+        return candidate
+
+    def _salvage_ref_name(
+        self,
+        *,
+        raw_ref_name: str,
+        task_name: str,
+        task_index: int,
+        reserved_ref_names: Set[str],
+    ) -> str:
+        base = self._sanitize_ref_name_candidate(raw_ref_name) or self._sanitize_ref_name_candidate(task_name)
+        if not base or not self._REF_NAME_RE.fullmatch(base) or self._TASK_ID_LIKE_RE.fullmatch(base):
+            base = f"task_{task_index + 1}"
+        candidate = base
+        suffix = 2
+        while candidate in reserved_ref_names or not self._REF_NAME_RE.fullmatch(candidate) or self._TASK_ID_LIKE_RE.fullmatch(candidate):
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        return candidate
 
     def _quality_gate_tasks(
         self,
@@ -744,6 +879,7 @@ class Pass3InStrackAPV:
             return []
 
         errors: List[str] = []
+        module_name = str(item.get("module") or "").strip() or "<unknown>"
         terminal_tasks = self._terminal_tasks(tasks)
         if len(terminal_tasks) > 1:
             seen_branch_lineages: Set[str] = set()
@@ -771,41 +907,55 @@ class Pass3InStrackAPV:
                     continue
                 seen_branch_lineages.add(branch_key)
 
-        task_contexts = self._normalize_visible_dep_context_list(previous_task_contexts)
-        upstream_anchor_map = dict((local_signal_guidance or {}).get("preferred_upstream_anchor_names_by_task_id") or {})
-        local_anchor_names = set((local_signal_guidance or {}).get("preferred_local_anchor_names") or [])
-        if not task_contexts or not local_anchor_names:
+        identity_anchor_tasks = [task for task in tasks if "identity" in list(task.get("anchor_kinds") or [])]
+        if not identity_anchor_tasks:
+            errors.append(
+                f"Module `{module_name}` was marked complete without any `identity` anchor; "
+                "`path`/`gating` anchors alone cannot justify `complete`."
+            )
             return errors
-        for task in tasks:
+
+        normalized_previous_task_contexts = self._normalize_visible_dep_context_list(previous_task_contexts)
+        if normalized_previous_task_contexts and not any(
+            str(task.get("depends_on") or "").strip()
+            and any(
+                str(anchor.get("kind") or "").strip() == "identity" and list(anchor.get("dep_signals") or [])
+                for anchor in list(task.get("anchors") or [])
+            )
+            for task in tasks
+        ):
+            errors.append(
+                f"Module `{module_name}` was marked complete without any upstream-linked `identity` anchor continuity."
+            )
+
+        found_same_line_identity = False
+        for task in identity_anchor_tasks:
+            task_name = str(task.get("task_name") or task.get("ref_name") or task.get("id") or "<unknown>").strip()
             dep_task_id = str(task.get("depends_on") or "").strip()
-            if not dep_task_id or dep_task_id not in upstream_anchor_map:
-                continue
-            upstream_anchor_names = set(upstream_anchor_map.get(dep_task_id) or [])
-            if not upstream_anchor_names:
-                continue
-            for condition in task.get("condition_lines") or []:
-                dep_anchors = {
-                    dep_signal
-                    for dep_task_id, dep_signal in self._DEP_REFERENCE_RE.findall(str(condition or ""))
-                    if dep_task_id == str(task.get("depends_on") or "").strip() and dep_signal in upstream_anchor_names
-                }
-                if not dep_anchors:
+            for anchor in list(task.get("anchors") or []):
+                if str(anchor.get("kind") or "").strip() != "identity":
                     continue
-                local_signals = self._extract_local_signal_names(str(condition or ""))
-                if local_signals & local_anchor_names:
-                    break
-            else:
-                local_anchor_preview = ", ".join(sorted(local_anchor_names)[:4])
-                upstream_anchor_preview = ", ".join(sorted(upstream_anchor_names)[:4])
-                module_name = str(item.get("module") or "").strip() or "<unknown>"
-                task_name = str(task.get("task_name") or task.get("ref_name") or task.get("id") or "<unknown>").strip()
-                errors.append(
-                    (
-                        f"Module `{module_name}` task `{task_name}` was marked complete without any same-line "
-                        f"continuity-preserving relation between upstream anchor(s) [{upstream_anchor_preview}] "
-                        f"and local anchor(s) [{local_anchor_preview}] for its selected upstream candidate."
+                dep_signals = list(anchor.get("dep_signals") or [])
+                local_signals = list(anchor.get("local_signals") or [])
+                if dep_task_id and not dep_signals:
+                    errors.append(
+                        f"Module `{module_name}` task `{task_name}` was marked complete with an `identity` anchor "
+                        "that has no upstream `dep_signals`."
                     )
-                )
+                    continue
+                if dep_task_id and dep_signals and local_signals:
+                    if any(
+                        any(dep_signal in str(condition or "") for dep_signal in dep_signals)
+                        and any(local_signal in str(condition or "") for local_signal in local_signals)
+                        for condition in list(task.get("condition_lines") or [])
+                    ):
+                        found_same_line_identity = True
+                        break
+
+        if normalized_previous_task_contexts and not found_same_line_identity:
+            errors.append(
+                f"Module `{module_name}` was marked complete without any same-line `identity` relation tying an upstream anchor to a local anchor."
+            )
 
         return errors
 
@@ -846,7 +996,10 @@ class Pass3InStrackAPV:
             anchor_names = sorted(
                 {
                     str(name or "").strip()
-                    for name in list(previous_task_context.get("capture_names") or [])
+                    for name in (
+                        list(previous_task_context.get("anchor_capture_names") or [])
+                        or list(previous_task_context.get("capture_names") or [])
+                    )
                     if self._is_anchor_like_name(str(name or "").strip())
                 }
             )
@@ -1226,15 +1379,49 @@ class Pass3InStrackAPV:
                 lines.append(f"    dependsOn: {self._yaml_quote(task['depends_on'])}")
             lines.append(f"    matchMode: {self._yaml_quote(task['match_mode'])}")
             lines.append(f"    maxMatch: {int(task['max_match'])}")
-            lines.append("    condition:")
-            for entry in task.get("condition_lines") or []:
-                lines.append(f"      - {self._yaml_quote(entry)}")
-            lines.append("    capture:")
-            for entry in task.get("capture_signals") or []:
-                lines.append(f"      - {self._yaml_quote(entry)}")
-            lines.append("    logging:")
-            for entry in task.get("logging_lines") or []:
-                lines.append(f"      - {self._yaml_quote(entry)}")
+            anchors = list(task.get("anchors") or [])
+            if anchors:
+                lines.append("    anchors:")
+                for anchor in anchors:
+                    lines.append(f"      - kind: {self._yaml_quote(anchor.get('kind'))}")
+                    dep_signals = list(anchor.get("dep_signals") or [])
+                    if dep_signals:
+                        lines.append("        depSignals:")
+                        for dep_signal in dep_signals:
+                            lines.append(f"          - {self._yaml_quote(dep_signal)}")
+                    else:
+                        lines.append("        depSignals: []")
+                    local_signals = list(anchor.get("local_signals") or [])
+                    if local_signals:
+                        lines.append("        localSignals:")
+                        for local_signal in local_signals:
+                            lines.append(f"          - {self._yaml_quote(local_signal)}")
+                    else:
+                        lines.append("        localSignals: []")
+                    lines.append(f"        reason: {self._yaml_quote(anchor.get('reason'))}")
+            else:
+                lines.append("    anchors: []")
+            condition_lines = list(task.get("condition_lines") or [])
+            if condition_lines:
+                lines.append("    condition:")
+                for entry in condition_lines:
+                    lines.append(f"      - {self._yaml_quote(entry)}")
+            else:
+                lines.append("    condition: []")
+            capture_signals = list(task.get("capture_signals") or [])
+            if capture_signals:
+                lines.append("    capture:")
+                for entry in capture_signals:
+                    lines.append(f"      - {self._yaml_quote(entry)}")
+            else:
+                lines.append("    capture: []")
+            logging_lines = list(task.get("logging_lines") or [])
+            if logging_lines:
+                lines.append("    logging:")
+                for entry in logging_lines:
+                    lines.append(f"      - {self._yaml_quote(entry)}")
+            else:
+                lines.append("    logging: []")
         return "\n".join(lines).strip() + "\n"
 
     def _normalize_condition_expression(self, text: str) -> str:
@@ -1340,6 +1527,201 @@ class Pass3InStrackAPV:
         text = str(value).strip()
         return [text] if text else []
 
+    def _coerce_anchor_list(self, value: Any) -> List[Dict[str, Any]]:
+        entries = value if isinstance(value, list) else [value] if isinstance(value, dict) else []
+        anchors: List[Dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            anchors.append(
+                {
+                    "kind": str(entry.get("kind") or "").strip().lower(),
+                    "dep_signals": self._coerce_string_list(entry.get("dep_signals")),
+                    "local_signals": self._coerce_string_list(entry.get("local_signals")),
+                    "reason": self._normalize_hint_text(entry.get("reason")),
+                }
+            )
+        return anchors
+
+    def _validate_anchor_reason(self, *, kind: str, reason: str, signals: List[str]) -> Optional[str]:
+        normalized_reason = self._normalize_hint_text(reason)
+        if not normalized_reason:
+            return f"`{kind}` anchor is missing a non-empty `reason`."
+
+        reason_tokens = [
+            token.lower()
+            for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", normalized_reason)
+            if token.strip()
+        ]
+        if len(reason_tokens) < 3:
+            return (
+                f"`{kind}` anchor reason `{normalized_reason}` is too short; explain why the anchor is sufficient, "
+                "not just which signals are used."
+            )
+
+        signal_tokens: Set[str] = set()
+        for signal in list(signals or []):
+            signal_tokens.update(
+                token.lower()
+                for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(signal or ""))
+                if token.strip()
+            )
+        meaningful_reason_tokens = [
+            token
+            for token in reason_tokens
+            if token not in self._ANCHOR_REASON_STOPWORDS and token not in signal_tokens
+        ]
+        semantic_tokens = [token for token in reason_tokens if token in self._ANCHOR_REASON_SEMANTIC_HINTS]
+        if not semantic_tokens or not meaningful_reason_tokens:
+            return (
+                f"`{kind}` anchor reason `{normalized_reason}` must describe why the anchor is sufficient; "
+                "do not only restate signal names or `== 1'b1` facts."
+            )
+        return None
+
+    def _normalize_anchor_entries(
+        self,
+        *,
+        raw_task: Dict[str, Any],
+        task_name: str,
+        dep_name: str,
+        dep_task_id: str,
+        condition_lines: List[str],
+        normalized_capture: List[str],
+        scope_prefix: str,
+        root_prefixes: List[str],
+    ) -> (List[Dict[str, Any]], List[str]):
+        anchors = self._coerce_anchor_list(raw_task.get("anchors"))
+        if not anchors:
+            return [], [f"Task `{task_name}` is missing non-empty `anchors`."]
+
+        normalized_anchors: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        normalized_condition_lines = [str(line or "") for line in list(condition_lines or [])]
+
+        for anchor_index, raw_anchor in enumerate(anchors, start=1):
+            kind = str(raw_anchor.get("kind") or "").strip().lower()
+            dep_signals = self._coerce_string_list(raw_anchor.get("dep_signals"))
+            local_signals = self._coerce_string_list(raw_anchor.get("local_signals"))
+            reason = self._normalize_hint_text(raw_anchor.get("reason"))
+            anchor_label = f"Task `{task_name}` anchor #{anchor_index}"
+
+            if kind not in self._ALLOWED_ANCHOR_KINDS:
+                errors.append(
+                    f"{anchor_label} uses unsupported `kind={kind or '<empty>'}`; expected one of: "
+                    + ", ".join(sorted(self._ALLOWED_ANCHOR_KINDS))
+                    + "."
+                )
+                kind = "gating"
+            if not dep_signals and not local_signals:
+                errors.append(f"{anchor_label} must declare at least one `dep_signals` or `local_signals` entry.")
+                local_signals = list(normalized_capture[:1])
+
+            reason_error = self._validate_anchor_reason(
+                kind=kind,
+                reason=reason,
+                signals=dep_signals + local_signals,
+            )
+            if reason_error:
+                errors.append(f"{anchor_label} {reason_error}")
+                if not reason:
+                    reason = (
+                        f"This {kind} anchor is retained as warning-only evidence; its sufficiency rationale was missing or malformed."
+                    )
+
+            normalized_local_signals = [
+                self._normalize_signal_expression(signal, scope_prefix, root_prefixes)
+                for signal in local_signals
+            ]
+            missing_local_signals = [
+                signal for signal in normalized_local_signals if signal not in normalized_capture
+            ]
+            if missing_local_signals:
+                errors.append(
+                    f"{anchor_label} local signal(s) must also appear in `capture_signals`: "
+                    + ", ".join(missing_local_signals)
+                    + "."
+                )
+
+            normalized_dep_signals: List[str] = []
+            for dep_signal in dep_signals:
+                dep_match = self._DEP_REFERENCE_RE.search(dep_signal)
+                if not dep_match:
+                    errors.append(
+                        f"{anchor_label} dep signal `{dep_signal}` must use `$dep.<ref_name>.<signal>` form."
+                    )
+                    normalized_dep_signals.append(str(dep_signal or "").strip())
+                    continue
+                dep_ref_name = dep_match.group(1)
+                if not dep_name:
+                    errors.append(f"{anchor_label} must not declare `dep_signals` on a root task.")
+                elif dep_ref_name != dep_name:
+                    errors.append(
+                        f"{anchor_label} dep signal `{dep_signal}` must use the task's unique `dep_name={dep_name}`."
+                    )
+                if not any(dep_signal in condition_line for condition_line in normalized_condition_lines):
+                    errors.append(
+                        f"{anchor_label} dep signal `{dep_signal}` must appear in `condition_lines`."
+                    )
+                normalized_dep_signal = self._normalize_signal_expression(dep_signal, scope_prefix, root_prefixes)
+                if dep_task_id and dep_name and dep_ref_name == dep_name:
+                    normalized_dep_signal = self._DEP_REFERENCE_RE.sub(
+                        lambda m: f"$dep.{dep_task_id}.{m.group(2)}",
+                        normalized_dep_signal,
+                    )
+                normalized_dep_signals.append(normalized_dep_signal)
+
+            if kind == "identity":
+                if dep_name and (not normalized_dep_signals or not normalized_local_signals):
+                    errors.append(
+                        f"{anchor_label} `identity` anchors on dependent tasks must include both `dep_signals` and `local_signals`."
+                    )
+                if not dep_name and not normalized_local_signals:
+                    errors.append(
+                        f"{anchor_label} `identity` anchors on root tasks must include non-empty `local_signals`."
+                    )
+
+            normalized_anchors.append(
+                {
+                    "kind": kind,
+                    "dep_signals": normalized_dep_signals,
+                    "local_signals": normalized_local_signals,
+                    "reason": reason,
+                }
+            )
+
+        if dep_name and normalized_anchors and not any(anchor.get("dep_signals") for anchor in normalized_anchors):
+            errors.append(
+                f"Task `{task_name}` depends on `dep_name={dep_name}` but none of its anchors declare any `dep_signals`."
+            )
+        if not dep_name and any(anchor.get("dep_signals") for anchor in normalized_anchors):
+            errors.append(f"Task `{task_name}` is a root task and must not declare any anchor `dep_signals`.")
+        return normalized_anchors, errors
+
+    def _anchor_capture_names(self, anchors: List[Dict[str, Any]]) -> List[str]:
+        capture_names: List[str] = []
+        for anchor in list(anchors or []):
+            for capture_name in self._capture_names(list(anchor.get("local_signals") or [])):
+                if capture_name and capture_name not in capture_names:
+                    capture_names.append(capture_name)
+        return capture_names
+
+    def _anchor_kinds(self, anchors: List[Dict[str, Any]]) -> List[str]:
+        kinds: List[str] = []
+        for anchor in list(anchors or []):
+            kind = str(anchor.get("kind") or "").strip()
+            if kind and kind not in kinds:
+                kinds.append(kind)
+        return kinds
+
+    def _anchor_reasons(self, anchors: List[Dict[str, Any]]) -> List[str]:
+        reasons: List[str] = []
+        for anchor in list(anchors or []):
+            reason = self._normalize_hint_text(anchor.get("reason"))
+            if reason and reason not in reasons:
+                reasons.append(reason)
+        return reasons
+
     @staticmethod
     def _normalize_unknown(value: Any) -> List[str]:
         if isinstance(value, list):
@@ -1389,6 +1771,10 @@ class Pass3InStrackAPV:
                 "local_ref_name": str(candidate.get("local_ref_name") or "").strip(),
                 "task_name": str(candidate.get("task_name") or "").strip(),
                 "capture_names": list(candidate.get("capture_names") or []),
+                "anchors": list(candidate.get("anchors") or []),
+                "anchor_kinds": list(candidate.get("anchor_kinds") or []),
+                "anchor_capture_names": list(candidate.get("anchor_capture_names") or []),
+                "anchor_reasons": list(candidate.get("anchor_reasons") or []),
                 "branch_lineage": list(candidate.get("branch_lineage") or []),
                 "upstream_hint": self._normalize_hint_text(candidate.get("upstream_hint")),
                 "module": str(candidate.get("module") or "").strip(),
@@ -1412,6 +1798,10 @@ class Pass3InStrackAPV:
         item: Dict[str, Any],
         source: str,
         upstream_hint: str = "",
+        anchors: Optional[List[Dict[str, Any]]] = None,
+        anchor_capture_names: Optional[List[str]] = None,
+        anchor_kinds: Optional[List[str]] = None,
+        anchor_reasons: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         return {
             "ref_name": str(ref_name or "").strip(),
@@ -1419,6 +1809,19 @@ class Pass3InStrackAPV:
             "capture_names": list(capture_names or []),
             "branch_lineage": list(branch_lineage or []),
             "upstream_hint": self._normalize_hint_text(upstream_hint),
+            "anchors": [
+                {
+                    "kind": str(anchor.get("kind") or "").strip(),
+                    "dep_signals": list(anchor.get("dep_signals") or []),
+                    "local_signals": list(anchor.get("local_signals") or []),
+                    "reason": self._normalize_hint_text(anchor.get("reason")),
+                }
+                for anchor in list(anchors or [])
+                if isinstance(anchor, dict)
+            ],
+            "anchor_capture_names": list(anchor_capture_names or []),
+            "anchor_kinds": list(anchor_kinds or []),
+            "anchor_reasons": list(anchor_reasons or []),
             "module": str(item.get("module") or "").strip(),
             "instance": str(item.get("instance") or "").strip(),
             "path": self._item_path(item),
@@ -1457,6 +1860,10 @@ class Pass3InStrackAPV:
                 "ref_name": ref_name,
                 "task_id": task_id,
                 "capture_names": capture_names,
+                "anchors": list(entry.get("anchors") or []),
+                "anchor_kinds": list(entry.get("anchor_kinds") or []),
+                "anchor_capture_names": list(entry.get("anchor_capture_names") or []),
+                "anchor_reasons": list(entry.get("anchor_reasons") or []),
                 "branch_lineage": [ref_name],
                 "module": str(entry.get("module") or "").strip(),
                 "instance": str(entry.get("instance") or "").strip(),
@@ -1486,6 +1893,10 @@ class Pass3InStrackAPV:
         cached.setdefault("leaf_task_id", "")
         cached.setdefault("leaf_ref_name", "")
         cached.setdefault("leaf_capture_names", [])
+        cached.setdefault("anchors", [])
+        cached.setdefault("anchor_kinds", [])
+        cached.setdefault("anchor_capture_names", [])
+        cached.setdefault("anchor_reasons", [])
         cached.setdefault("task_contexts", [])
         if not cached.get("leaf_contexts") and cached.get("leaf_task_id") and cached.get("leaf_ref_name"):
             cached["leaf_contexts"] = [
@@ -1493,6 +1904,10 @@ class Pass3InStrackAPV:
                     "task_id": str(cached.get("leaf_task_id") or "").strip(),
                     "ref_name": str(cached.get("leaf_ref_name") or "").strip(),
                     "capture_names": list(cached.get("leaf_capture_names") or []),
+                    "anchors": list(cached.get("anchors") or []),
+                    "anchor_kinds": list(cached.get("anchor_kinds") or []),
+                    "anchor_capture_names": list(cached.get("anchor_capture_names") or []),
+                    "anchor_reasons": list(cached.get("anchor_reasons") or []),
                     "branch_lineage": [str(cached.get("leaf_ref_name") or "").strip()],
                     "upstream_hint": "",
                     "module": str(cached.get("module") or "").strip(),
@@ -1639,6 +2054,10 @@ class Pass3InStrackAPV:
                     "ref_name": ref_name,
                     "task_name": str(task.get("task_name") or "").strip(),
                     "capture_names": capture_names,
+                    "anchors": list(task.get("anchors") or []),
+                    "anchor_kinds": list(task.get("anchor_kinds") or []),
+                    "anchor_capture_names": list(task.get("anchor_capture_names") or []),
+                    "anchor_reasons": list(task.get("anchor_reasons") or []),
                     "branch_lineage": list(task.get("branch_lineage") or []),
                     "upstream_hint": upstream_hint,
                     "module": str(item.get("module") or "").strip(),
@@ -1668,6 +2087,10 @@ class Pass3InStrackAPV:
                     "task_id": task_id,
                     "ref_name": ref_name,
                     "capture_names": capture_names,
+                    "anchors": list(task.get("anchors") or []),
+                    "anchor_kinds": list(task.get("anchor_kinds") or []),
+                    "anchor_capture_names": list(task.get("anchor_capture_names") or []),
+                    "anchor_reasons": list(task.get("anchor_reasons") or []),
                     "branch_lineage": list(task.get("branch_lineage") or []),
                     "upstream_hint": upstream_hint,
                     "module": str(item.get("module") or "").strip(),
@@ -1686,6 +2109,10 @@ class Pass3InStrackAPV:
             ref_name = str(entry.get("ref_name") or "").strip()
             local_ref_name = str(entry.get("local_ref_name") or ref_name or "").strip()
             capture_names = self._coerce_string_list(entry.get("capture_names"))
+            anchors = self._coerce_anchor_list(entry.get("anchors"))
+            anchor_kinds = self._coerce_string_list(entry.get("anchor_kinds")) or self._anchor_kinds(anchors)
+            anchor_capture_names = self._coerce_string_list(entry.get("anchor_capture_names")) or self._anchor_capture_names(anchors)
+            anchor_reasons = self._coerce_string_list(entry.get("anchor_reasons")) or self._anchor_reasons(anchors)
             branch_lineage = self._coerce_string_list(entry.get("branch_lineage"))
             upstream_hint = self._normalize_hint_text(entry.get("upstream_hint"))
             task_name = str(entry.get("task_name") or entry.get("name") or "").strip()
@@ -1700,6 +2127,10 @@ class Pass3InStrackAPV:
                     "local_ref_name": local_ref_name,
                     "task_name": task_name,
                     "capture_names": capture_names,
+                    "anchors": anchors,
+                    "anchor_kinds": anchor_kinds,
+                    "anchor_capture_names": anchor_capture_names,
+                    "anchor_reasons": anchor_reasons,
                     "branch_lineage": branch_lineage,
                     "upstream_hint": upstream_hint,
                     "module": str(entry.get("module") or "").strip(),
@@ -1717,6 +2148,10 @@ class Pass3InStrackAPV:
             task_id = str(entry.get("task_id") or "").strip()
             ref_name = str(entry.get("ref_name") or "").strip()
             capture_names = self._coerce_string_list(entry.get("capture_names"))
+            anchors = self._coerce_anchor_list(entry.get("anchors"))
+            anchor_kinds = self._coerce_string_list(entry.get("anchor_kinds")) or self._anchor_kinds(anchors)
+            anchor_capture_names = self._coerce_string_list(entry.get("anchor_capture_names")) or self._anchor_capture_names(anchors)
+            anchor_reasons = self._coerce_string_list(entry.get("anchor_reasons")) or self._anchor_reasons(anchors)
             branch_lineage = self._coerce_string_list(entry.get("branch_lineage"))
             upstream_hint = self._normalize_hint_text(entry.get("upstream_hint"))
             if ref_name and not branch_lineage:
@@ -1728,6 +2163,10 @@ class Pass3InStrackAPV:
                     "task_id": task_id,
                     "ref_name": ref_name,
                     "capture_names": capture_names,
+                    "anchors": anchors,
+                    "anchor_kinds": anchor_kinds,
+                    "anchor_capture_names": anchor_capture_names,
+                    "anchor_reasons": anchor_reasons,
                     "branch_lineage": branch_lineage,
                     "upstream_hint": upstream_hint,
                     "module": str(entry.get("module") or "").strip(),
@@ -1751,6 +2190,10 @@ class Pass3InStrackAPV:
                     "local_ref_name": local_ref_name,
                     "task_name": str(entry.get("task_name") or "").strip(),
                     "capture_names": list(entry.get("capture_names") or []),
+                    "anchors": list(entry.get("anchors") or []),
+                    "anchor_kinds": list(entry.get("anchor_kinds") or []),
+                    "anchor_capture_names": list(entry.get("anchor_capture_names") or []),
+                    "anchor_reasons": list(entry.get("anchor_reasons") or []),
                     "branch_lineage": list(entry.get("branch_lineage") or []),
                     "upstream_hint": self._normalize_hint_text(entry.get("upstream_hint")),
                     "module": str(entry.get("module") or "").strip(),

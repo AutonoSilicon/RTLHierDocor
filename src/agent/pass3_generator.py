@@ -1877,7 +1877,7 @@ class Pass3Generator:
 
             json_payload = {
                 **parsed_search,
-                "schema_version": "pass3_3_instrack_apv_v7",
+                "schema_version": "pass3_3_instrack_apv_v8",
                 "orchestrate_index_artifact_json": artifact_orchestrate_index_json,
                 "apv_index_artifact_json": artifact_apv_index_json if apv_enabled else "",
                 "apv_status": apv_status,

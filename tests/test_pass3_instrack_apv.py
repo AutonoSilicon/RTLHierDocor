@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 
 from agent.pass3_generator import Pass3Generator
 from agent.project_progress_tracker import ProjectProgressTracker
@@ -28,20 +29,24 @@ class FakeResolver:
 
 
 class FakeLLM:
-    def __init__(self, responses):
+    def __init__(self, responses, auto_anchorize=True):
         self.responses = list(responses)
         self.calls = []
+        self.auto_anchorize = auto_anchorize
 
     async def generate(self, system, prompt, **kwargs):
         self.calls.append({"system": system, "prompt": prompt, "kwargs": kwargs})
         if not self.responses:
             raise AssertionError("unexpected LLM call")
-        return self.responses.pop(0), {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
+        response = self.responses.pop(0)
+        if self.auto_anchorize:
+            response = _maybe_anchorize_response(response)
+        return response, {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
 
 
 class FakeToolLLM(FakeLLM):
-    def __init__(self, responses, tool_rounds):
-        super().__init__(responses)
+    def __init__(self, responses, tool_rounds, auto_anchorize=True):
+        super().__init__(responses, auto_anchorize=auto_anchorize)
         self.tool_rounds = list(tool_rounds)
 
     async def generate(self, system, prompt, **kwargs):
@@ -68,7 +73,133 @@ class FakeToolLLM(FakeLLM):
                         f.write(f"- result `{step['name']}_{round_idx}`:\n```text\n{tool_result}\n```\n")
         if not self.responses:
             raise AssertionError("unexpected LLM call")
-        return self.responses.pop(0), {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
+        response = self.responses.pop(0)
+        if self.auto_anchorize:
+            response = _maybe_anchorize_response(response)
+        return response, {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
+
+
+def _extract_json_code_block(text):
+    raw_text = str(text or "")
+    start = raw_text.find("```json")
+    if start < 0:
+        return None
+    start = raw_text.find("\n", start)
+    if start < 0:
+        return None
+    end = raw_text.rfind("```")
+    if end <= start:
+        return None
+    return raw_text[start + 1 : end].strip()
+
+
+def _default_anchor_reason(kind, task_name, dep_name, local_signals):
+    signal_preview = ", ".join(list(local_signals or [])[:2]) or "the captured local signals"
+    normalized_task_name = str(task_name or "task").strip() or "task"
+    if kind == "identity":
+        if dep_name:
+            return (
+                f"This identity anchor ties {dep_name} to {signal_preview} so {normalized_task_name} continues the same instruction."
+            )
+        return f"This identity anchor keeps {signal_preview} as the local instruction identifier for {normalized_task_name}."
+    if kind == "path":
+        return f"This path anchor uses {signal_preview} to distinguish the active route for {normalized_task_name}."
+    return f"This gating anchor uses {signal_preview} to show when {normalized_task_name} is enabled at the sampled cycle."
+
+
+def _extract_local_condition_signals(condition_lines):
+    reserved = {"and", "or", "not", "true", "false", "none"}
+    local_signals = []
+    for line in list(condition_lines or []):
+        stripped = re.sub(r"\$dep\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?", " ", str(line or ""))
+        for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", stripped):
+            lowered = token.lower()
+            if lowered in reserved:
+                continue
+            if token in {"b", "h", "d"}:
+                continue
+            if token not in local_signals:
+                local_signals.append(token)
+    return local_signals
+
+
+def _default_anchor_for_task(task):
+    capture_signals = list(task.get("capture_signals") or task.get("capture") or [])
+    local_signals = capture_signals[:1]
+    dep_name = str(task.get("dep_name") or "").strip()
+    condition_lines = list(task.get("condition_lines") or task.get("condition") or [])
+    joined_conditions = " ".join(str(line) for line in condition_lines)
+    local_condition_signals = _extract_local_condition_signals(condition_lines)
+    dep_signals = []
+    if dep_name:
+        dep_signals = sorted(set(re.findall(rf"\$dep\.{re.escape(dep_name)}\.[A-Za-z_][A-Za-z0-9_]*", joined_conditions)))
+    local_anchor_text = " ".join(local_condition_signals + capture_signals).lower()
+    if not dep_name:
+        kind = "identity"
+    elif any(token in local_anchor_text for token in ("pc", "inst", "data", "iid", "dispatch")):
+        kind = "identity"
+    elif any(token in local_anchor_text for token in ("slot", "pipe", "channel", "buf", "bypass", "route", "mux")):
+        kind = "path"
+    else:
+        kind = "gating"
+    if kind == "identity" and dep_name and local_condition_signals:
+        local_signals = [local_condition_signals[0]]
+        if local_signals[0] not in capture_signals:
+            capture_signals.append(local_signals[0])
+            task["capture_signals"] = capture_signals
+    elif kind == "identity" and not local_signals and local_condition_signals:
+        local_signals = [local_condition_signals[0]]
+        if local_signals[0] not in capture_signals:
+            capture_signals.append(local_signals[0])
+            task["capture_signals"] = capture_signals
+    elif not local_signals and local_condition_signals:
+        local_signals = [local_condition_signals[0]]
+        if local_signals[0] not in capture_signals:
+            capture_signals.append(local_signals[0])
+            task["capture_signals"] = capture_signals
+    elif not local_signals and capture_signals:
+        local_signals = capture_signals[:1]
+
+    if any(token in local_anchor_text for token in ("slot", "pipe", "channel", "buf", "bypass", "route", "mux")) and not dep_name:
+        kind = "identity"
+    elif any(token in local_anchor_text for token in ("slot", "pipe", "channel", "buf", "bypass", "route", "mux")):
+        kind = "path"
+    if kind == "identity" and not local_signals and capture_signals:
+        local_signals = capture_signals[:1]
+    if kind == "identity" and dep_name and not dep_signals:
+        kind = "gating"
+    return [
+        {
+            "kind": kind,
+            "dep_signals": dep_signals,
+            "local_signals": local_signals,
+            "reason": _default_anchor_reason(kind, task.get("task_name") or task.get("name") or "", dep_name, local_signals),
+        }
+    ]
+
+
+def _maybe_anchorize_response(text):
+    json_block = _extract_json_code_block(text)
+    if not json_block:
+        return text
+    try:
+        payload = json.loads(json_block)
+    except Exception:
+        return text
+    tasks = payload.get("tasks")
+    if not isinstance(tasks, list):
+        return text
+    changed = False
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if task.get("anchors"):
+            continue
+        task["anchors"] = _default_anchor_for_task(task)
+        changed = True
+    if not changed:
+        return text
+    return "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
 
 
 class FakeOwner:
@@ -314,37 +445,40 @@ def test_run_pass3_3_generates_apv_yaml_with_serial_dep_backfill(tmp_path):
     assert 'dependsOn: "s00_t00_x_ifu"' in idu_yaml
     assert '"$dep.s00_t00_x_ifu.fetch_vld == x_idu.dispatch_vld_i"' in idu_yaml
     assert '"$dep.s01_t00_x_idu.dispatch_vld == x_idu.issue_en"' in idu_yaml
-    assert apv_index["schema_version"] == "pass3_3_3_apv_index_v7"
-    assert apv_index["items"][0]["leaf_contexts"] == [
-        {
-            "task_id": "s00_t00_x_ifu",
-            "ref_name": "ifu_entry",
-            "capture_names": ["fetch_vld"],
-            "branch_lineage": ["ifu_entry"],
-            "upstream_hint": "",
-            "module": "ifu_mod",
-            "instance": "x_ifu",
-            "path": "top/x_ifu",
-        }
-    ]
+    assert apv_index["schema_version"] == "pass3_3_3_apv_index_v8"
+    assert len(apv_index["items"][0]["leaf_contexts"]) == 1
+    first_leaf = apv_index["items"][0]["leaf_contexts"][0]
+    assert first_leaf["task_id"] == "s00_t00_x_ifu"
+    assert first_leaf["ref_name"] == "ifu_entry"
+    assert first_leaf["capture_names"] == ["fetch_vld"]
+    assert first_leaf["branch_lineage"] == ["ifu_entry"]
+    assert first_leaf["upstream_hint"] == ""
+    assert first_leaf["module"] == "ifu_mod"
+    assert first_leaf["instance"] == "x_ifu"
+    assert first_leaf["path"] == "top/x_ifu"
+    assert first_leaf["anchor_kinds"] == ["identity"]
+    assert first_leaf["anchor_capture_names"] == ["fetch_vld"]
+    assert first_leaf["anchor_reasons"]
+    assert first_leaf["anchors"][0]["reason"] == first_leaf["anchor_reasons"][0]
     assert apv_index["items"][0]["leaf_task_id"] == "s00_t00_x_ifu"
     assert apv_index["items"][0]["leaf_ref_name"] == "ifu_entry"
-    assert apv_index["items"][1]["leaf_contexts"] == [
-        {
-            "task_id": "s01_t01_x_idu",
-            "ref_name": "issue_fire",
-            "capture_names": ["issue_pkt_vld"],
-            "branch_lineage": ["ifu_entry", "decode_accept", "issue_fire"],
-            "upstream_hint": "",
-            "module": "idu_mod",
-            "instance": "x_idu",
-            "path": "top/x_idu",
-        }
-    ]
+    assert len(apv_index["items"][1]["leaf_contexts"]) == 1
+    second_leaf = apv_index["items"][1]["leaf_contexts"][0]
+    assert second_leaf["task_id"] == "s01_t01_x_idu"
+    assert second_leaf["ref_name"] == "issue_fire"
+    assert second_leaf["capture_names"] == ["issue_pkt_vld"]
+    assert second_leaf["branch_lineage"] == ["ifu_entry", "decode_accept", "issue_fire"]
+    assert second_leaf["upstream_hint"] == ""
+    assert second_leaf["module"] == "idu_mod"
+    assert second_leaf["instance"] == "x_idu"
+    assert second_leaf["path"] == "top/x_idu"
+    assert second_leaf["anchor_kinds"] == ["gating"]
+    assert second_leaf["anchor_capture_names"] == ["issue_pkt_vld"]
+    assert second_leaf["anchor_reasons"]
     assert apv_index["items"][1]["leaf_task_id"] == "s01_t01_x_idu"
     assert apv_index["items"][1]["leaf_ref_name"] == "issue_fire"
     assert apv_index["items"][1]["status"] == "complete"
-    assert summary_json["schema_version"] == "pass3_3_instrack_apv_v7"
+    assert summary_json["schema_version"] == "pass3_3_instrack_apv_v8"
     assert summary_json["apv_index_artifact_json"] == f"instrack/{slug}/artifacts/apv_index.json"
     assert summary_json["apv_status"] == ""
     assert summary_json["apv_error"] == ""
@@ -562,8 +696,9 @@ def test_run_pass3_3_marks_partial_when_dep_ref_name_is_not_visible(tmp_path):
     yaml_text = (tmp_path / "chip" / "instrack" / slug / "artifacts" / "top__x_idu.apv.yaml").read_text(encoding="utf-8")
     apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
 
-    assert "tasks: []" in yaml_text
+    assert 'name: "bad dep"' in yaml_text
     assert apv_index["items"][0]["status"] == "partial"
+    assert apv_index["items"][0]["task_count"] == 1
     assert any("unknown dep `ref_name=missing`" in reason for reason in apv_index["items"][0]["unknown"])
 
 
@@ -638,18 +773,15 @@ def test_run_pass3_3_propagates_handoff_hint_into_visible_upstream_candidates(tm
     apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
 
     assert apv_index["items"][0]["behavior_hint"] == "IFU entry remains on the fetch family, but downstream should keep slot ambiguity in mind."
-    assert apv_index["items"][0]["leaf_contexts"] == [
-        {
-            "task_id": "s00_t00_x_ifu",
-            "ref_name": "ifu_entry",
-            "capture_names": ["fetch_vld"],
-            "branch_lineage": ["ifu_entry"],
-            "upstream_hint": "This leaf confirms fetch-family progress only; downstream must not assume slot identity yet.",
-            "module": "ifu_mod",
-            "instance": "x_ifu",
-            "path": "top/x_ifu",
-        }
-    ]
+    assert len(apv_index["items"][0]["leaf_contexts"]) == 1
+    leaf_context = apv_index["items"][0]["leaf_contexts"][0]
+    assert leaf_context["task_id"] == "s00_t00_x_ifu"
+    assert leaf_context["ref_name"] == "ifu_entry"
+    assert leaf_context["capture_names"] == ["fetch_vld"]
+    assert leaf_context["branch_lineage"] == ["ifu_entry"]
+    assert leaf_context["upstream_hint"] == "This leaf confirms fetch-family progress only; downstream must not assume slot identity yet."
+    assert leaf_context["anchor_kinds"] == ["identity"]
+    assert leaf_context["anchor_capture_names"] == ["fetch_vld"]
     assert '"upstream_hint": "This leaf confirms fetch-family progress only; downstream must not assume slot identity yet."' in llm.calls[1]["prompt"]
 
 
@@ -759,7 +891,7 @@ def test_run_pass3_3_keeps_valid_tasks_when_one_task_is_invalid(tmp_path):
     assert 'name: "good second"' in yaml_text
     assert 'tasks: []' not in yaml_text
     assert apv_index["items"][0]["status"] == "partial"
-    assert apv_index["items"][0]["task_count"] == 1
+    assert apv_index["items"][0]["task_count"] == 2
     assert any("unsupported `match_mode=bogus`" in reason for reason in apv_index["items"][0]["unknown"])
 
 
@@ -1053,7 +1185,7 @@ def test_run_pass3_3_rejects_duplicate_ref_name(tmp_path):
     slug = generator._safe_slug("ADD").lower()
     apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
     assert apv_index["items"][0]["status"] == "partial"
-    assert apv_index["items"][0]["task_count"] == 1
+    assert apv_index["items"][0]["task_count"] == 2
     assert any("duplicate `ref_name=dup_ref`" in reason for reason in apv_index["items"][0]["unknown"])
 
 
@@ -1234,7 +1366,7 @@ def test_run_pass3_3_marks_partial_when_complete_lacks_same_line_anchor_relation
 
     assert apv_index["items"][0]["status"] == "complete"
     assert apv_index["items"][1]["status"] == "partial"
-    assert any("same-line continuity-preserving relation" in reason for reason in apv_index["items"][1]["unknown"])
+    assert any("same-line `identity` relation" in reason for reason in apv_index["items"][1]["unknown"])
 
 
 def test_run_pass3_3_allows_sibling_branch_tasks_sharing_same_parent_ref_name(tmp_path):
@@ -1369,28 +1501,20 @@ def test_run_pass3_3_keeps_complete_multi_leaf_item_when_terminal_branch_lineage
     assert apv_index["items"][0]["leaf_task_id"] == ""
     assert apv_index["items"][0]["leaf_ref_name"] == ""
     assert apv_index["items"][0]["leaf_capture_names"] == []
-    assert apv_index["items"][0]["leaf_contexts"] == [
-        {
-            "task_id": "s00_t01_x_idu",
-            "ref_name": "to_buf0",
-            "capture_names": ["buf0_fire"],
-            "branch_lineage": ["dispatch_entry", "to_buf0"],
-            "upstream_hint": "",
-            "module": "idu_mod",
-            "instance": "x_idu",
-            "path": "top/x_idu",
-        },
-        {
-            "task_id": "s00_t02_x_idu",
-            "ref_name": "to_buf1",
-            "capture_names": ["buf1_fire"],
-            "branch_lineage": ["dispatch_entry", "to_buf1"],
-            "upstream_hint": "",
-            "module": "idu_mod",
-            "instance": "x_idu",
-            "path": "top/x_idu",
-        },
-    ]
+    assert len(apv_index["items"][0]["leaf_contexts"]) == 2
+    buf0_leaf, buf1_leaf = apv_index["items"][0]["leaf_contexts"]
+    assert buf0_leaf["task_id"] == "s00_t01_x_idu"
+    assert buf0_leaf["ref_name"] == "to_buf0"
+    assert buf0_leaf["capture_names"] == ["buf0_fire"]
+    assert buf0_leaf["branch_lineage"] == ["dispatch_entry", "to_buf0"]
+    assert buf0_leaf["anchor_kinds"] == ["path"]
+    assert buf0_leaf["anchor_capture_names"] == ["buf0_fire"]
+    assert buf1_leaf["task_id"] == "s00_t02_x_idu"
+    assert buf1_leaf["ref_name"] == "to_buf1"
+    assert buf1_leaf["capture_names"] == ["buf1_fire"]
+    assert buf1_leaf["branch_lineage"] == ["dispatch_entry", "to_buf1"]
+    assert buf1_leaf["anchor_kinds"] == ["path"]
+    assert buf1_leaf["anchor_capture_names"] == ["buf1_fire"]
     assert apv_index["items"][0]["unknown"] == []
 
 
@@ -1617,6 +1741,251 @@ def test_run_pass3_3_marks_partial_when_dep_name_does_not_match_selected_candida
     assert apv_index["items"][0]["status"] == "complete"
     assert apv_index["items"][1]["status"] == "partial"
     assert any("declares `dep_name=slot1_leaf` but its `condition_lines` reference `$dep.slot0_leaf.*`" in reason for reason in apv_index["items"][1]["unknown"])
+
+
+def test_run_pass3_3_rejects_missing_anchors(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"logging_lines":["start"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+        ],
+        auto_anchorize=False,
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={"ifu_mod": _structured_topology_block("fetch_vld")},
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "fetch stage",
+                "confidence": "high",
+                "unknown": "",
+            },
+        }
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    slug = generator._safe_slug("ADD").lower()
+    apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
+
+    assert apv_index["items"][0]["status"] == "partial"
+    assert any("missing non-empty `anchors`" in reason for reason in apv_index["items"][0]["unknown"])
+
+
+def test_run_pass3_3_rejects_empty_anchor_reason(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"anchors":[{"kind":"identity","dep_signals":[],"local_signals":["fetch_vld"],"reason":""}],"logging_lines":["start"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+        ],
+        auto_anchorize=False,
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={"ifu_mod": _structured_topology_block("fetch_vld")},
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "fetch stage",
+                "confidence": "high",
+                "unknown": "",
+            },
+        }
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    slug = generator._safe_slug("ADD").lower()
+    apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
+
+    assert apv_index["items"][0]["status"] == "partial"
+    assert any("missing a non-empty `reason`" in reason for reason in apv_index["items"][0]["unknown"])
+
+
+def test_run_pass3_3_rejects_root_anchor_dep_signals(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"anchors":[{"kind":"identity","dep_signals":["$dep.prev.fetch_vld"],"local_signals":["fetch_vld"],"reason":"This identity anchor tries to use upstream history to keep the same instruction."}],"logging_lines":["start"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+        ],
+        auto_anchorize=False,
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={"ifu_mod": _structured_topology_block("fetch_vld")},
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "fetch stage",
+                "confidence": "high",
+                "unknown": "",
+            },
+        }
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    slug = generator._safe_slug("ADD").lower()
+    apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
+
+    assert apv_index["items"][0]["status"] == "partial"
+    assert any("must not declare `dep_signals` on a root task" in reason for reason in apv_index["items"][0]["unknown"])
+
+
+def test_run_pass3_3_rejects_dependent_task_without_anchor_dep_signals(tmp_path):
+    llm = FakeLLM(
+        [
+            """```json
+{"status":"complete","tasks":[{"ref_name":"ifu_entry","dep_name":"","task_name":"ifu entry","condition_lines":["fetch_vld"],"capture_signals":["fetch_vld"],"anchors":[{"kind":"identity","dep_signals":[],"local_signals":["fetch_vld"],"reason":"This identity anchor keeps fetch_vld as the local instruction identifier for ifu entry."}],"logging_lines":["start"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+            """```json
+{"status":"complete","tasks":[{"ref_name":"decode_accept","dep_name":"s00_t00_x_ifu","task_name":"decode accept","condition_lines":["$dep.s00_t00_x_ifu.fetch_vld == dispatch_vld_i","dispatch_vld_i"],"capture_signals":["dispatch_vld_i"],"anchors":[{"kind":"identity","dep_signals":[],"local_signals":["dispatch_vld_i"],"reason":"This identity anchor claims decode_accept keeps the same instruction at dispatch_vld_i."}],"logging_lines":["decode"],"match_mode":"first","max_match":1}],"unknown":[]}
+```""",
+        ],
+        auto_anchorize=False,
+    )
+    generator = _build_generator(
+        tmp_path,
+        llm,
+        topology_blocks={
+            "ifu_mod": _structured_topology_block("fetch_vld"),
+            "idu_mod": _structured_topology_block("dispatch_vld_i"),
+        },
+    )
+    top_node = FakeNode("top_mod", "top")
+
+    search_payload = {
+        "schema_version": "pass3_3_1_startpoint_v3",
+        "top_module": "top_mod",
+        "instruction": "ADD",
+        "start_module": "ifu_mod",
+        "start_instance": "x_ifu",
+        "start_block": "IFU_ENTRY",
+        "key_register": "ifu_reg",
+        "key_register_line_range": {"start_line": 1, "end_line": 2},
+        "confidence": "high",
+        "unknown": "",
+    }
+    orchestrate_items = [
+        {
+            "module": "ifu_mod",
+            "instance": "x_ifu",
+            "path": "top/x_ifu",
+            "orchestrator_role": "start_module",
+            "orchestration": {
+                "boundary_takeover": [],
+                "boundary_handoffs": [{"output_port": "dispatch_vld_o", "value_condition": "dispatch_vld_o = fetch_vld", "behavior": "forward"}],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "fetch stage",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+        {
+            "module": "idu_mod",
+            "instance": "x_idu",
+            "path": "top/x_idu",
+            "orchestrator_role": "parent_module",
+            "orchestration": {
+                "boundary_takeover": [{"input_port": "dispatch_vld_i", "value_condition": "dispatch_vld_i", "behavior": "accept"}],
+                "boundary_handoffs": [],
+                "_boundary_handoff_routes": [],
+                "lifecycle_context": "decode stage",
+                "confidence": "high",
+                "unknown": "",
+            },
+        },
+    ]
+    _prime_cached_search_and_orchestrate(generator, top_node, "ADD", search_payload, orchestrate_items)
+
+    asyncio.run(generator.run_pass3_3(top_node))
+
+    slug = generator._safe_slug("ADD").lower()
+    apv_index = json.loads((tmp_path / "chip" / "instrack" / slug / "artifacts" / "apv_index.json").read_text(encoding="utf-8"))
+
+    assert apv_index["items"][0]["status"] == "complete"
+    assert apv_index["items"][1]["status"] == "partial"
+    assert any(
+        "dependent tasks must include both `dep_signals` and `local_signals`" in reason
+        or "none of its anchors declare any `dep_signals`" in reason
+        for reason in apv_index["items"][1]["unknown"]
+    )
 
 
 def test_run_pass3_3_fails_instruction_when_route_contains_duplicate_item_path(tmp_path):

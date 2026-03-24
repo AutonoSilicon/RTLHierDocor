@@ -92,7 +92,9 @@ def test_apv_prompt_is_single_shot_and_uses_dep_placeholders_only():
     assert "Start from `boundary_takeover` as the authoritative ingress of this item and end at this item's instruction-relevant `boundary_handoffs`." in prompt_text
     assert "under one global clock supplied by the outer wrapper" in prompt_text
     assert "A task is a match rule for one local observation point" in prompt_text
-    assert "condition_lines` are evaluated together at one candidate time point" in prompt_text
+    assert "condition_lines` are ordered source lines of one boolean expression" in prompt_text
+    assert "APV concatenates those lines in order" in prompt_text
+    assert "keep the logical connectors explicit" in prompt_text
     assert "capture_signals` are not extra hints" in prompt_text
     assert "sampled at that matched time point and persisted" in prompt_text
     assert "use the signal value captured by the dependency task" in prompt_text
@@ -111,6 +113,7 @@ def test_apv_prompt_is_single_shot_and_uses_dep_placeholders_only():
     assert "may depend only on an earlier declared local task by its `ref_name`" in prompt_text
     assert "Multiple later tasks may depend on the same earlier local `ref_name`" in prompt_text
     assert "Such sibling branch tasks must use different conditions" in prompt_text
+    assert "If multiple channel/slot/pipe/path outcomes remain plausible, enumerate all plausible sibling tasks or leaves." in prompt_text
     assert "The task chain must be monotonic in time" in prompt_text
     assert "Keep one task when one observation point is enough" in prompt_text
     assert "`dep_name`" in prompt_text
@@ -141,6 +144,7 @@ def test_apv_prompt_is_single_shot_and_uses_dep_placeholders_only():
     assert "provided upstream `ref_name`" in prompt_text
     assert "Every task must declare `dep_name`." in prompt_text
     assert "Visible Upstream Dep Handles.branch_lineage" in prompt_text
+    assert "author new tasks using `identity` anchors only" in prompt_text
     assert "reference that earlier task's declared `ref_name`" in prompt_text
     assert "dep_source = \"prev_module_leaf\"" not in prompt_text
     assert "dep_source = \"prev_task_in_item\"" not in prompt_text
@@ -154,6 +158,7 @@ def test_apv_prompt_is_single_shot_and_uses_dep_placeholders_only():
     assert "Prefer event points that remove instruction-identity ambiguity over generic valid-only snapshots." in prompt_text
     assert "The local event chain is not necessarily a single linear chain." in prompt_text
     assert "each sibling task must use conditions that explicitly distinguish that path" in prompt_text
+    assert "If multiple local paths remain plausible after applying all visible evidence, enumerate all of them." in prompt_text
     assert "`complete` means all resolved instruction-relevant terminal paths in this item's current context are represented and transferable downstream" in prompt_text
     assert "Multi-leaf v3 cross-item propagation can export multiple downstream leaves." in prompt_text
     assert "Python derives downstream `branch_lineage` from the task forest" in prompt_text
@@ -164,11 +169,11 @@ def test_apv_prompt_is_single_shot_and_uses_dep_placeholders_only():
     assert "## Example Task Shape" in prompt_text
     assert "## Example Walkthrough" in prompt_text
     assert "## Branching Walkthrough" in prompt_text
-    assert "Interpret each task's `condition_lines` as one local observation point" in prompt_text
+    assert "Interpret each task's `condition_lines` as one local observation point expressed as one boolean expression" in prompt_text
     assert "`ibctrl_accept` is a dependent trace-style task" in prompt_text
     assert "searches later-or-same-cycle candidate time points" in prompt_text
     assert "captured and persisted when `pcgen_leaf` matched" in prompt_text
-    assert "local gating predicates that must be true at that same candidate time point" in prompt_text
+    assert "are part of that same reconstructed boolean expression at the same candidate time point" in prompt_text
     assert "This example intentionally stays as one task because one matched observation point already proves the local handoff." in prompt_text
     assert "Do not split a chain into extra tasks whose only new relation would be `valid == valid`." in prompt_text
     assert "If a later task is truly required, it should continue using captured PC, instruction, or data anchors" in prompt_text
@@ -183,8 +188,11 @@ def test_apv_prompt_is_single_shot_and_uses_dep_placeholders_only():
     assert '"task_name": "ibctrl_pc_match_and_bypass_activate"' in prompt_text
     assert '"behavior_hint": "Sequential fetch stays on the bypass family here' in prompt_text
     assert '"handoff_hint": "This leaf proves bypass-family dispatch only.' in prompt_text
-    assert '"$dep.pcgen_leaf.pcgen_ifctrl_pc == ib_vpc"' in prompt_text
-    assert '"ibctrl_ibdp_bypass_inst_vld == 1\'b1"' in prompt_text
+    assert '"($dep.pcgen_leaf.pcgen_ifctrl_pc == ib_vpc) &&"' in prompt_text
+    assert '"(ibctrl_ibdp_bypass_inst_vld == 1\'b1) &&"' in prompt_text
+    assert '"kind": "identity"' in prompt_text
+    assert '"kind": "path"' not in prompt_text
+    assert '"kind": "gating"' not in prompt_text
 
 
 def test_apv_prompt_plan2_guardrails_are_present():
@@ -193,6 +201,7 @@ def test_apv_prompt_plan2_guardrails_are_present():
     assert "## Pre-output Self-check" in prompt_text
     assert "Before final JSON, verify each of the following." in prompt_text
     assert "Every task declares `dep_name`." in prompt_text
+    assert 'Every anchor uses `kind = "identity"`.' in prompt_text
     assert 'Every root task uses `dep_name = ""` and no `$dep` references.' in prompt_text
     assert "Every dependent task uses exactly one unique `$dep.<ref_name>` source" in prompt_text
     assert "If the current item exports multiple terminal leaves, every terminal task keeps a unique `ref_name`" in prompt_text
@@ -216,10 +225,16 @@ def test_apv_prompt_plan2_dependency_and_anchor_examples_are_present():
     prompt_text = PASS3_3_3_APV_SYSTEM + "\n" + PASS3_3_3_APV_PROMPT
 
     assert "## Local Dependency Discipline" in prompt_text
+    assert "Every task must declare non-empty `anchors`." in prompt_text
+    assert "Each anchor object must include `kind`, `dep_signals`, `local_signals`, and `reason`." in prompt_text
+    assert "Author tasks anchor-first" in prompt_text
+    assert "`reason` explains why the chosen identity anchor is sufficient" in prompt_text
     assert "Good `ibctrl` pattern: declare `ibctrl_ingress` first" in prompt_text
     assert "Bad `ibctrl` pattern: if `bypass_leaf` references `$dep.ibctrl_ingress.accept_pc` before `ibctrl_ingress` is declared" in prompt_text
     assert "Do not mix multiple dependency sources in one task." in prompt_text
     assert "Every dependent task must set `dep_name` to the one unique dependency `ref_name`" in prompt_text
+    assert "The only allowed anchor `kind` is `identity`." in prompt_text
+    assert "Do not emit `path` or `gating` anchor kinds." in prompt_text
     assert "## Continuity Anchor Guidance" in prompt_text
     assert "Continuity anchor priority is `pc`, then `inst`, then packed data bus or bit slice, then `valid` or `vld`." in prompt_text
     assert 'Good: `$dep.prev.inst0 == ifu_idu_ib_inst0_data[31:0]`' in prompt_text
